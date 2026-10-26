@@ -1,0 +1,219 @@
+; SPDX-License-Identifier: MIT
+; ==============================================================================
+; DomRealm — a web page's scripts with a DOM, without a browser.
+; ==============================================================================
+;
+; A realm is one JavaScript engine (CEr, terotests/componentengine) holding
+; one page: js/prelude.js (the window, timers on the host's clock, the
+; outbox), js/webapi.js (the DOM, events, the cascade, the window's objects)
+; and js/host.js (the page as HTML again, a GET form's default action). The
+; host gives it the page's HTML and the text of its external scripts, runs
+; them, and from then on drives it:
+;
+;   input(json)      a user's event (webapi.js hostInput: down, up, key,
+;                    text, set, focus, scroll, wheel, move)
+;   tick(ms)         the host's clock moved on: timers that are due run
+;   resource(…)      the answer to a fetch the page asked for
+;   layout(json)     where the host laid the page's elements out
+;
+; and reads back what changed: `changed` and `snapshot` (the document as
+; HTML, every element with data-rd="<id>", the id `input` targets take),
+; `messages` (what the page asked of the host, JSON: open a URL, fetch one,
+; console lines, errors) and `dueIn` (when to tick next).
+;
+; The realm itself reaches nothing: no network, no files, no windows. What
+; the page asks for comes out as messages, and the host decides.
+; ==============================================================================
+
+Import "pkg:cer/src/lib.rs"
+Import "DomScripts.rgr"
+
+class DomRealm {
+    def engine:Engine (Engine.new_())
+    def scriptUrls:[string]
+    def scriptTexts:[string]
+    def ran:int 0
+    def failed:int 0
+    def errors:[string]
+    def started:boolean false
+    def maxErrors:int 50
+
+    Constructor () {
+        def u:[string]
+        scriptUrls = u
+        def t:[string]
+        scriptTexts = t
+        def e:[string]
+        errors = e
+    }
+
+    ; A string as a JavaScript string literal.
+    sfn quote:string (s:string) {
+        def t:string (replace s "\\" "\\\\")
+        t = (replace t "\"" "\\\"")
+        t = (replace t "\n" "\\n")
+        t = (replace t "\r" "\\r")
+        return ("\"" + t + "\"")
+    }
+
+    fn note:void (what:string) {
+        if ((array_length errors) < maxErrors) {
+            push errors what
+        }
+    }
+
+    ; Runs a script; "" when it ran to its end, else the error.
+    fn exec:string (src:string) {
+        engine.eval(src)
+        if ((strlen engine.error) > 0) {
+            def err:string engine.error
+            this.note(err)
+            return err
+        }
+        return ""
+    }
+
+    ; Runs an expression; its value as a string.
+    fn value:string (src:string) {
+        def r:string (engine.eval(src))
+        if ((strlen engine.error) > 0) {
+            this.note(engine.error)
+            return ""
+        }
+        return r
+    }
+
+    ; An external script's text, as the host fetched it: by its resolved URL.
+    fn addScript:void (url:string text:string) {
+        push scriptUrls url
+        push scriptTexts text
+    }
+
+    fn scriptFor:string (url:string) {
+        for scriptUrls u:string i {
+            if (u == url) {
+                return (itemAt scriptTexts i)
+            }
+        }
+        return ""
+    }
+
+    ; The page, before its scripts run.
+    fn start:void (html:string url:string width:double height:double) {
+        this.exec((DomScripts.prelude()))
+        this.exec((DomScripts.webapi()))
+        this.exec((DomScripts.host()))
+        this.exec(("__page(" + (DomRealm.quote(html)) + ", " + (DomRealm.quote(url)) + ")"))
+        this.exec(("__layout({viewport: [" + (to_string width) + ", " + (to_string height) + "]})"))
+        this.exec("__installDefaults()")
+        started = true
+    }
+
+    ; A stylesheet of the page (<link rel=stylesheet>), for getComputedStyle.
+    fn addStyle:void (css:string url:string) {
+        this.exec(("__addStyle(" + (DomRealm.quote(css)) + ")"))
+    }
+
+    ; The page's scripts, in the order a browser runs them (classic ones,
+    ; then deferred ones), then DOMContentLoaded and load. A module script
+    ; runs as a classic one: a bundle that imports nothing runs, one that
+    ; does fails as a script with a syntax error does.
+    fn runScripts:void () {
+        this.exec("var __rdScripts = JSON.parse(__scripts())")
+        def nd@(optional):double (str2double (this.value("__rdScripts.length")))
+        def n:int 0
+        if (!null? nd) {
+            n = (to_int (unwrap nd))
+        }
+        def i:int 0
+        while (i < n) {
+            def at:string ("__rdScripts[" + (to_string i) + "]")
+            def id:string (this.value((at + ".id")))
+            def hasSrc:string (this.value(("(" + at + ".src !== null) ? 'y' : ''")))
+            def src:string ""
+            if ((strlen hasSrc) > 0) {
+                src = (this.scriptFor((this.value((at + ".url")))))
+            } {
+                src = (this.value((at + ".text")))
+            }
+            if ((strlen src) > 0) {
+                this.exec(("__beginScript(" + id + ")"))
+                def err:string (this.exec(src))
+                def ok:string "true"
+                if ((strlen err) > 0) {
+                    ok = "false"
+                    failed = (failed + 1)
+                } {
+                    ran = (ran + 1)
+                }
+                this.exec(("__endScript(" + id + ", " + ok + ")"))
+            }
+            i = (i + 1)
+        }
+        this.exec("__loaded()")
+        this.tick(0.0)
+    }
+
+    ; An event from the user (webapi.js hostInput); its answer.
+    fn input:string (json:string) {
+        def r:string (this.value(("__input(" + (DomRealm.quote(json)) + ")")))
+        return r
+    }
+
+    ; The host's clock moved `ms` on; how many timers ran.
+    fn tick:int (ms:double) {
+        def r:string (this.value(("__tick(" + (to_string ms) + ")")))
+        def d@(optional):double (str2double r)
+        if (null? d) {
+            return 0
+        }
+        return (to_int (unwrap d))
+    }
+
+    ; ms until a timer is due, -1 when none is waiting.
+    fn dueIn:double () {
+        def r:string (this.value("__dueIn()"))
+        def d@(optional):double (str2double r)
+        if (null? d) {
+            return -1.0
+        }
+        return (unwrap d)
+    }
+
+    ; The answer to a {tag: "fetch"} message; status 0 for no answer.
+    fn resource:void (id:int status:int text:string contentType:string) {
+        this.exec(("__resource(" + (to_string id) + ", " + (to_string status) + ", " + (DomRealm.quote(text)) + ", " + (DomRealm.quote(contentType)) + ")"))
+    }
+
+    ; Where the host laid the elements out: {"viewport": [w, h], "boxes":
+    ; {"<id>": [x, y, w, h]}}.
+    fn layout:void (json:string) {
+        this.exec(("__layout(" + (DomRealm.quote(json)) + ")"))
+    }
+
+    fn changed:boolean () {
+        return ((strlen (this.value("__changed()"))) > 0)
+    }
+
+    fn snapshot:string () {
+        return (this.value("__snapshot()"))
+    }
+
+    fn title:string () {
+        return (this.value("document.title"))
+    }
+
+    ; What the page asked of the host since the last call, as a JSON array.
+    fn messages:string () {
+        return (this.value("__drain()"))
+    }
+
+    ; A script of the host's own (a test's probe); its value.
+    fn eval:string (src:string) {
+        return (this.value(src))
+    }
+
+    fn summary:string () {
+        return ("scripts=" + (to_string ran) + " failed=" + (to_string failed) + " errors=" + (to_string (array_length errors)))
+    }
+}

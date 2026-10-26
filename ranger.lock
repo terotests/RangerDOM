@@ -1,0 +1,11 @@
+{
+  "lockVersion": 1,
+  "packages": {
+    "cer": {
+      "git": "https://github.com/terotests/componentengine.git",
+      "rev": "86715589b3a5d8aae590209fc9f624cc5c4540df",
+      "subdir": "cer",
+      "sha256": "073376a87cbe28d6cea6c206473f810a720d774ab5842ab6b4a550ae39fed6e8"
+    }
+  }
+}

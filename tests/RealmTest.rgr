@@ -1,0 +1,161 @@
+; SPDX-License-Identifier: MIT
+; DomRealm, driven as a host drives it: plain DOM scripts, React 18 (its UMD
+; builds, tests/react/), events, timers, fetch, links and forms.
+;
+;   realm_test <dir with tests/react>
+Import "../src/DomRealm.rgr"
+
+class RealmTest {
+    def fails:int 0
+    def passes:int 0
+    def dir:string "."
+
+    fn check:void (name:string ok:boolean) {
+        if ok {
+            passes = (passes + 1)
+            print ("  PASS " + name)
+        } {
+            fails = (fails + 1)
+            print ("  FAIL " + name)
+        }
+    }
+
+    fn file:string (name:string) {
+        def c@(optional):string (read_file dir name)
+        if (null? c) {
+            print ("cannot read " + dir + "/" + name)
+            return ""
+        }
+        return (unwrap c)
+    }
+
+    fn realm:DomRealm (html:string) {
+        def r (new DomRealm())
+        r.start(html "https://example.com/app/" 800.0 600.0)
+        return r
+    }
+
+    fn idOf:string (r:DomRealm sel:string) {
+        return (r.eval(("String(document.querySelector(" + (DomRealm.quote(sel)) + ").__id)")))
+    }
+
+    fn click:void (r:DomRealm sel:string) {
+        def id:string (this.idOf(r sel))
+        r.input(("{\"type\":\"down\",\"target\":" + id + "}"))
+        r.input(("{\"type\":\"up\",\"target\":" + id + "}"))
+        r.tick(0.0)
+    }
+
+    fn text:string (r:DomRealm sel:string) {
+        return (r.eval(("document.querySelector(" + (DomRealm.quote(sel)) + ").textContent")))
+    }
+
+    fn plainDom:void () {
+        def r:DomRealm (this.realm("<html><head><title>T</title><script>var p = document.createElement('p'); p.id = 'x'; p.className = 'note'; p.textContent = 'made by a script'; document.body.appendChild(p); document.title = 'Changed';</script></head><body><h1>Hi</h1></body></html>"))
+        r.runScripts()
+        def snap:string (r.snapshot())
+        this.check("script adds a paragraph" ((indexOf snap "<p id=\"x\" class=\"note\" data-rd=") >= 0))
+        this.check("its text" ((indexOf snap ">made by a script</p>") >= 0))
+        this.check("title" ((r.title()) == "Changed"))
+        this.check("no change since the snapshot" ((r.changed()) == false))
+        r.eval("document.querySelector('h1').setAttribute('data-x', '1')")
+        this.check("an attribute change is a change" (r.changed()))
+    }
+
+    fn react:void () {
+        def html:string "<html><head><script src=\"react.js\"></script><script src=\"react-dom.js\"></script></head><body><div id=\"root\"></div><script src=\"app.js\"></script></body></html>"
+        def r (new DomRealm())
+        r.addScript("https://example.com/app/react.js" (this.file("tests/react/react.production.min.js")))
+        r.addScript("https://example.com/app/react-dom.js" (this.file("tests/react/react-dom.production.min.js")))
+        def app:string ""
+        app = (app + "var h = React.createElement;\n")
+        app = (app + "function App() {\n")
+        app = (app + "  var c = React.useState(0), t = React.useState(''), d = React.useState('none'), e = React.useState('no');\n")
+        app = (app + "  React.useEffect(function () { e[1]('yes'); fetch('/data.json').then(function (r) { return r.json(); }).then(function (j) { d[1](j.name); }); }, []);\n")
+        app = (app + "  return h('div', { className: 'app' },\n")
+        app = (app + "    h('button', { id: 'inc', onClick: function () { c[1](function (n) { return n + 1; }); } }, 'Count ' + c[0]),\n")
+        app = (app + "    h('input', { id: 'name', value: t[0], onChange: function (ev) { t[1](ev.target.value.toUpperCase()); } }),\n")
+        app = (app + "    h('p', { id: 'out' }, 'Hello ' + t[0]),\n")
+        app = (app + "    h('p', { id: 'data' }, d[0]),\n")
+        app = (app + "    h('span', { id: 'effect' }, e[0]),\n")
+        app = (app + "    h('a', { id: 'spa', href: '/next', onClick: function (ev) { ev.preventDefault(); c[1](100); } }, 'in-app link'),\n")
+        app = (app + "    h('a', { id: 'out-link', href: '/other' }, 'a real link'),\n")
+        app = (app + "    c[0] > 1 ? h('span', { id: 'many' }, 'many') : null);\n")
+        app = (app + "}\n")
+        app = (app + "ReactDOM.createRoot(document.getElementById('root')).render(h(App));\n")
+        r.addScript("https://example.com/app/app.js" app)
+        r.start(html "https://example.com/app/" 800.0 600.0)
+        r.runScripts()
+        this.check("react: scripts ran" ((r.summary()) == "scripts=3 failed=0 errors=0"))
+        if ((r.summary()) != "scripts=3 failed=0 errors=0") {
+            print ("    " + (r.summary()))
+            for r.errors e:string i {
+                print ("    " + e)
+            }
+        }
+        this.check("react: rendered" ((this.text(r "#inc")) == "Count 0"))
+        this.check("react: effect ran" ((this.text(r "#effect")) == "yes"))
+        ; the effect's fetch is a message to the host, answered later
+        def msgs:string (r.messages())
+        this.check("react: fetch asked of the host" ((indexOf msgs "\"tag\":\"fetch\",\"id\":1,\"url\":\"https://example.com/data.json\"") >= 0))
+        r.resource(1 200 "{\"name\":\"from the host\"}" "application/json")
+        r.tick(0.0)
+        this.check("react: fetched data shown" ((this.text(r "#data")) == "from the host"))
+        this.click(r "#inc")
+        this.check("react: click updates state" ((this.text(r "#inc")) == "Count 1"))
+        this.click(r "#inc")
+        this.check("react: conditional element" ((indexOf (r.snapshot()) "id=\"many\"") >= 0))
+        def nid:string (this.idOf(r "#name"))
+        r.input(("{\"type\":\"set\",\"target\":" + nid + ",\"value\":\"ada\"}"))
+        r.tick(0.0)
+        this.check("react: controlled input" ((this.text(r "#out")) == "Hello ADA"))
+        this.check("react: the field's value in the snapshot" ((indexOf (r.snapshot()) "value=\"ADA\"") >= 0))
+        r.messages()
+        this.click(r "#spa")
+        this.check("react: preventDefault keeps a link in the app" (((this.text(r "#inc")) == "Count 100") && ((indexOf (r.messages()) "\"open\"") < 0)))
+        this.click(r "#out-link")
+        this.check("react: a link opens its URL" ((indexOf (r.messages()) "{\"tag\":\"open\",\"url\":\"https://example.com/other\",\"target\":\"_self\"}") >= 0))
+    }
+
+    fn timers:void () {
+        def r:DomRealm (this.realm("<html><body><p id=t>0</p><script>var n = 0; setTimeout(function () { document.getElementById('t').textContent = 'later'; }, 100); setInterval(function () { n++; }, 30);</script></body></html>"))
+        r.runScripts()
+        this.check("timer: not yet" ((this.text(r "#t")) == "0"))
+        this.check("timer: due in 30 ms" ((r.dueIn()) == 30.0))
+        r.tick(60.0)
+        this.check("timer: interval twice" ((r.eval("String(n)")) == "2"))
+        r.tick(50.0)
+        this.check("timer: fired" ((this.text(r "#t")) == "later"))
+    }
+
+    fn form:void () {
+        def r:DomRealm (this.realm("<html><body><form action=\"/search\"><input name=q value=\"kissa koira\"><input type=checkbox name=all checked><button id=go>Hae</button></form></body></html>"))
+        r.runScripts()
+        this.click(r "#go")
+        this.check("form: a GET form opens its query" ((indexOf (r.messages()) "\"url\":\"https://example.com/search?q=kissa%20koira&all=on\"") >= 0))
+    }
+
+    fn errors:void () {
+        def r:DomRealm (this.realm("<html><body><script>null.x</script><script>document.body.setAttribute('data-ok', 'yes')</script></body></html>"))
+        r.runScripts()
+        this.check("errors: a failing script does not stop the next" ((indexOf (r.snapshot()) "data-ok=\"yes\"") >= 0))
+        this.check("errors: counted" ((r.summary()) == "scripts=1 failed=1 errors=1"))
+    }
+
+    fn run:void () {
+        this.plainDom()
+        this.react()
+        this.timers()
+        this.form()
+        this.errors()
+        print ("passed " + (to_string passes) + ", failed " + (to_string fails))
+    }
+
+    sfn main@(main):void () {
+        def t (new RealmTest())
+        if ((shell_arg_cnt) > 0) {
+            t.dir = (shell_arg 0)
+        }
+        t.run()
+    }
+}
