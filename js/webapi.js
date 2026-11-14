@@ -870,7 +870,26 @@
       a = r.host;
     }
   }
+  var scrollQueue = [];
+  function scriptScrolled(el) {
+    if (el._sq) return;
+    el._sq = true;
+    scrollQueue.push(el);
+    if (scrollQueue.length === 1) setTimeout(function () {
+      var q = scrollQueue; scrollQueue = [];
+      for (var i = 0; i < q.length; i++) {
+        var e = q[i];
+        if (!e._sq) continue;
+        e._sq = false;
+        if (!e.isConnected) continue;
+        scrolled(e);
+        dispatch(e === (doc && doc.documentElement) ? doc : e, new Event('scroll', { bubbles: e === (doc && doc.documentElement) }));
+      }
+    }, 0);
+  }
   function dispatch(target, ev) {
+    // (the host's own scroll sends its event now: none more at the frame)
+    if (ev && ev.type === 'scroll') { if (target._sq) target._sq = false; else if (target === doc && doc.documentElement) doc.documentElement._sq = false; }
     var path = [];
     for (var t = target; t; ) {
       path.push(t);
@@ -1003,7 +1022,14 @@
       if (ref && ref.parentNode !== this) throw DOMException("The node before which the new node is to be inserted is not a child of this node.", 'NotFoundError');
       if (c.contains(this)) throw DOMException('The new child element contains the parent.', 'HierarchyRequestError');
       if (c.nodeType === 11) {
-        var kids = c._c.slice();
+        // (the fragment emptied at once: its children taken one at a time
+        // from its front made 10 000 rows quadratic, a splice and a new
+        // index for each)
+        var kids = c._c;
+        c._c = [];
+        c._cv = (c._cv || 0) + 1;
+        for (var k0 = 0; k0 < kids.length; k0++) kids[k0].parentNode = null;
+        if (kids.length) { treeChanged(c, null, kids[0], 0); queueMutation(c, 'childList', { addedNodes: [], removedNodes: kids.slice(), previousSibling: null, nextSibling: null }); }
         for (var i = 0; i < kids.length; i++) this.insertBefore(kids[i], ref);
         return c;
       }
@@ -1929,11 +1955,17 @@
       this._attrs = [];
       this._style = null;
       this._styleSync = false;
-      this.scrollTop = 0;
-      this.scrollLeft = 0;
+      this._sTop = 0;
+      this._sLeft = 0;
       this.shadowRoot = null;
     }
     get nodeType() { return 1; }
+    // a script's scroll: a scroll event at the next frame, as a browser
+    // sends it (TanStack Virtual's scrollToIndex waits for it)
+    get scrollTop() { return this._sTop; }
+    set scrollTop(v) { v = +v || 0; if (v === this._sTop) return; this._sTop = v; scriptScrolled(this); }
+    get scrollLeft() { return this._sLeft; }
+    set scrollLeft(v) { v = +v || 0; if (v === this._sLeft) return; this._sLeft = v; scriptScrolled(this); }
     get nodeName() { return this.tagName; }
     get tagName() { return this.namespaceURI === HTML_NS ? this._qname.toUpperCase() : this._qname; }
     get attributes() { return NamedNodeMap(this); }
@@ -4099,6 +4131,7 @@
   function textOnlySize(el) {
     if (!el.isConnected || !el._c || !el._c.length) return [0, 0];
     var r = inlineRun(el);
+    if (!r && el.parentNode && el.parentNode.nodeType === 1 && boxes[el.parentNode.__id]) r = textBlockSize(el, computedOf(el), el.parentNode);
     return r || [0, 0];
   }
   function inlineRun(el, inner) {
@@ -4121,6 +4154,36 @@
     }
     return [w, h];
   }
+  // a new block of text only, of a px or % width, under a laid-out parent:
+  // its lines wrapped word by word at that width, as many line heights
+  // tall (a virtual list measures a row the moment it puts it in, before
+  // the host has laid it out: TanStack Virtual's measureElement)
+  function textBlockSize(el, cs, p) {
+    if (!/^(block|flow-root|list-item)$/.test(cs.display || '') || (cs.float && cs.float !== 'none')) return null;
+    var txt = '';
+    for (var i = 0; i < el._c.length; i++) { var c = el._c[i]; if (c.nodeType === 3) txt += c.data; else if (c.nodeType !== 8) return null; }
+    var pe = edgesOf(p), pw = boxes[p.__id][2] - pe.bl - pe.br - pe.pl - pe.pr, wv = cs.width || 'auto', w;
+    if (/px$/.test(wv)) w = parseFloat(wv);
+    else if (/^[\d.]+%$/.test(wv)) w = pw * parseFloat(wv) / 100;
+    else if (wv === 'auto' && cs.position !== 'absolute' && cs.position !== 'fixed') w = pw - (parseFloat(cs['margin-left']) || 0) - (parseFloat(cs['margin-right']) || 0);
+    else return null;
+    var ee = edgesOf(el), hx = ee.px + ee.bx, vx = ee.py + ee.by;
+    var bw = cs['box-sizing'] === 'border-box' || wv === 'auto' ? w : w + hx, inner = bw - hx;
+    if (!(inner > 0)) return null;
+    var size = parseFloat(cs['font-size']) || 16, lh = parseFloat(cs['line-height']), lineH = isFinite(lh) && /px$/.test(cs['line-height']) ? lh : size * 1.15;
+    var font = { size: size, weight: cs['font-weight'] || '400' }, lines = 0;
+    var words = txt.replace(/\s+/g, ' ').trim();
+    if (words) {
+      var nowrap = /^(nowrap|pre)$/.test(cs['white-space'] || ''), parts = nowrap ? [words] : words.split(' '), cur = 0, space = canvasTextWidth(' ', font);
+      lines = 1;
+      for (var k = 0; k < parts.length; k++) {
+        var ww = canvasTextWidth(parts[k], font);
+        if (cur > 0 && cur + space + ww > inner + 0.01) { lines++; cur = ww; } else cur += (cur > 0 ? space : 0) + ww;
+      }
+    }
+    var hv = cs.height || 'auto', h = /px$/.test(hv) ? parseFloat(hv) + (cs['box-sizing'] === 'border-box' ? 0 : vx) : lines * lineH + vx;
+    return [bw, h];
+  }
   // where such an element would be drawn: from its nearest laid-out
   // ancestor's content box, across the inline content before it (an
   // absolutely placed one at its left / top in px). Only for runs of inline
@@ -4133,6 +4196,7 @@
     if (boxes[p.__id]) { var pr = rectOf(p), pe = edgesOf(p); x = pr.left + pe.bl + pe.pl; y = pr.top + pe.bt + pe.pt; }
     else { var er = estimatedRect(p, depth + 1); if (!er) return null; x = er.left; y = er.top; }
     var cs = computedOf(el), size = inlineRun(el);
+    if (!size && boxes[p.__id]) size = textBlockSize(el, cs, p);
     if (cs.position === 'absolute' || cs.position === 'fixed') {
       var l = parseFloat(cs.left), t = parseFloat(cs.top);
       x += isFinite(l) ? l : 0; y += isFinite(t) ? t : 0;
@@ -6702,7 +6766,10 @@
       if (parent) for (var pv in parent._vars) vars[pv] = parent._vars[pv];
       for (var n in spec) if (n.slice(0, 2) === '--') vars[n] = spec[n];
       // custom properties may use each other
-      for (var vn in vars) if (vars[vn].indexOf('var(') >= 0) vars[vn] = resolveVars(vars[vn], vars, 0);
+      // (one that refers to an unset property with no fallback is
+      // guaranteed-invalid, i.e. unset itself, CSS Variables 1, 3: a
+      // child's var() of it takes its fallback, AG Grid's theme params)
+      for (var vn in vars) if (vars[vn].indexOf('var(') >= 0) { varInvalid = false; var rv = resolveVars(vars[vn], vars, 0); if (varInvalid) delete vars[vn]; else vars[vn] = rv; }
     }
     out._vars = vars;
     // inherited from the parent first
@@ -6807,6 +6874,24 @@
     } else Object.defineProperty(out, '_sid', { value: ++styleUid, enumerable: false });
     return out;
   }
+  function individualTransforms(el, cs) {
+    var parts = [], sp = function (v) { return String(v).trim().split(/\s+/); };
+    if (cs.translate && cs.translate !== 'none') { var tv = sp(cs.translate); parts.push(tv.length > 2 ? 'translate3d(' + tv[0] + ', ' + tv[1] + ', ' + tv[2] + ')' : 'translate(' + tv[0] + ', ' + (tv[1] || '0px') + ')'); }
+    if (cs.rotate && cs.rotate !== 'none') {
+      var rv = sp(cs.rotate), ang = rv[rv.length - 1];
+      if (rv.length === 1) parts.push('rotate(' + ang + ')');
+      else if (rv[0] === 'z' || rv.length === 4 && parseFloat(rv[0]) === 0 && parseFloat(rv[1]) === 0) parts.push('rotate(' + ang + ')');
+      else if (rv[0] === 'x') parts.push('rotateX(' + ang + ')');
+      else if (rv[0] === 'y') parts.push('rotateY(' + ang + ')');
+      else if (rv.length === 4) parts.push('rotate3d(' + rv.join(', ') + ')');
+    }
+    if (cs.scale && cs.scale !== 'none') { var sv = sp(cs.scale); parts.push(sv.length > 2 ? 'scale3d(' + sv.join(', ') + ')' : 'scale(' + sv[0] + ', ' + (sv[1] || sv[0]) + ')'); }
+    if (cs.transform && cs.transform !== 'none') parts.push(cs.transform);
+    var list = parts.join(' ');
+    if (list.indexOf('%') < 0) return list;
+    var tmp = Object.create(cs); tmp.transform = list;
+    return transformPercents(el, tmp);
+  }
   function transformPercents(el, out) {
     var px = function (k) { var m = /^(-?[\d.]+)px$/.exec(out[k] || ''); return m ? parseFloat(m[1]) : null; };
     var side = function (dim, a, b) {
@@ -6830,6 +6915,7 @@
     var c = computedCache.map[r.__id];
     return c ? c._fontPx : 16;
   }
+  var varInvalid = false;
   function resolveVars(v, vars, depth) {
     if (depth > 20 || v.indexOf('var(') < 0) return v;
     var out = '', i = 0;
@@ -6844,7 +6930,7 @@
       var name = (comma < 0 ? inner : inner.slice(0, comma)).trim();
       var fb = comma < 0 ? undefined : inner.slice(comma + 1).trim();
       var val = vars[name];
-      if (val === undefined || val === 'initial') val = fb === undefined ? '' : fb;
+      if (val === undefined || val === 'initial') { if (fb === undefined) varInvalid = true; val = fb === undefined ? '' : fb; }
       out += resolveVars(val, vars, depth + 1);
       i = close + 1;
     }
@@ -6889,6 +6975,19 @@
     }
     if (/^(calc|min|max|clamp)\(/i.test(v)) return calcPx(v, ctx);
     return null;
+  }
+  // each calc()/min()/max() in v that has px-convertible terms, in px
+  function calcLengths(v, ctx) {
+    var out = '', i = 0, re = /(calc|min|max|clamp)\(/gi, m;
+    while ((m = re.exec(v)) !== null) {
+      if (m.index < i) continue;
+      var close = findClose(v, m.index + m[1].length, '(', ')');
+      if (close < 0) break;
+      var px = calcPx(v.slice(m.index, close + 1), ctx);
+      out += v.slice(i, m.index) + (px === null ? v.slice(m.index, close + 1) : fmtPx(px));
+      i = close + 1; re.lastIndex = i;
+    }
+    return out + v.slice(i);
   }
   // calc() with px-convertible terms; a % keeps it unresolved (null)
   function calcPx(v, ctx) {
@@ -6999,6 +7098,10 @@
       if (v === 'lighter') return String(Math.max(100, (parent ? parseInt(parent['font-weight'], 10) || 400 : 400) - 300));
       return v;
     }
+    // (a translation's calc() in px when it has no percentage: the host's
+    // transform takes lengths, Shoelace's switch thumb)
+    if ((name === 'translate' || name === 'transform') && /calc\(|min\(|max\(/i.test(v)) v = calcLengths(v, ctx);
+    if (name === 'translate') return v.replace(/(-?[\d.]+)(rem|em)\b/g, function (m, n, u) { return fmtPx(parseFloat(n) * (u === 'rem' ? ctx.rem : ctx.em)); });
     if (name === 'box-shadow' || name === 'transform' || name === 'text-shadow') return v.replace(/(-?[\d.]+)(rem|em)\b/g, function (m, n, u) { return fmtPx(parseFloat(n) * (u === 'rem' ? ctx.rem : ctx.em)); });
     return v;
   }
@@ -7368,6 +7471,9 @@
       Object.defineProperty(cs, '_ownPs', { value: parentStyle, enumerable: false, configurable: true, writable: true });
     }
     o.s = s;
+    // the individual transforms (translate, rotate, scale) before the
+    // transform list, CSS Transforms 2, 6.1: the host takes one list
+    if ((cs.translate && cs.translate !== 'none') || (cs.rotate && cs.rotate !== 'none') || (cs.scale && cs.scale !== 'none')) s.transform = individualTransforms(n, cs);
     // (a top layer box's static position is the initial containing block's
     // start corner in the root's writing mode, CSS Position 3, 4.1)
     if (n._top && (cs.position === 'absolute' || cs.position === 'fixed') && ['top', 'right', 'bottom', 'left'].every(function (k) { return !cs[k] || cs[k] === 'auto'; })) {
@@ -7401,6 +7507,17 @@
       var fw = fsz * (0.6 * fsize + (/monospace/.test(cs['font-family'] || '') ? 0.75 : 1.275));
       if (cs['box-sizing'] === 'border-box') fw += (parseFloat(cs['padding-left']) || 0) + (parseFloat(cs['padding-right']) || 0) + (parseFloat(cs['border-left-width']) || 0) + (parseFloat(cs['border-right-width']) || 0);
       s.width = (Math.round(fw * 100) / 100) + 'px';
+    }
+    // (a percentage-wide text field in a flex row that is itself as wide
+    // as its content: the row's width is the field's size in characters,
+    // which the percentage then fills, Bootstrap's navbar search)
+    else if (n.localName === 'input' && /%$/.test(cs.width || '') && /^(text|search|tel|url|email|password|number)$/.test(n.type) && parentStyle && /^(inline-)?flex$/.test(parentStyle.display || '') &&
+        (!parentStyle.width || parentStyle.width === 'auto') && !/column/.test(parentStyle['flex-direction'] || '') && (!cs['min-width'] || cs['min-width'] === 'auto')) {
+      var fsz2 = parseFloat(cs['font-size']) || 13.333, fsize2 = parseInt(n.getAttribute('size'), 10);
+      if (!(fsize2 > 0)) fsize2 = 20;
+      var fw2 = fsz2 * (0.6 * fsize2 + (/monospace/.test(cs['font-family'] || '') ? 0.75 : 1.275));
+      if (cs['box-sizing'] === 'border-box') fw2 += (parseFloat(cs['padding-left']) || 0) + (parseFloat(cs['padding-right']) || 0) + (parseFloat(cs['border-left-width']) || 0) + (parseFloat(cs['border-right-width']) || 0);
+      s['min-width'] = (Math.round(fw2 * 100) / 100) + 'px';
     }
     var a = null;
     for (var i = 0; i < n._attrs.length; i++) {

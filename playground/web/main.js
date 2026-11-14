@@ -294,6 +294,24 @@ for (const [evName, type] of [["pointerdown", "down"], ["pointerup", "up"], ["po
     pg.input(JSON.stringify({ type, x: p.x, y: p.y }));
   });
 }
+// the wheel scrolls the page in RangerDOM (webapi.js: wheel event, then
+// the scroll of the box under the pointer), keys go to its focused element
+canvas.addEventListener("wheel", (ev) => {
+  if (!pg || busy) return;
+  ev.preventDefault();
+  const p = pagePoint(ev);
+  const unit = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? H : 1;
+  pg.input(JSON.stringify({ type: "wheel", x: p.x, y: p.y, dx: ev.deltaX * unit, dy: ev.deltaY * unit }));
+}, { passive: false });
+canvas.tabIndex = 0;
+canvas.addEventListener("pointerdown", () => canvas.focus());
+for (const [evName, type] of [["keydown", "key"], ["keyup", "keyup"]]) {
+  canvas.addEventListener(evName, (ev) => {
+    if (!pg || busy) return;
+    if (ev.key === "Tab" || ev.key.startsWith("Arrow") || ev.key === " " || ev.key === "Backspace") ev.preventDefault();
+    pg.input(JSON.stringify({ type, key: ev.key, code: ev.code, shift: ev.shiftKey, ctrl: ev.ctrlKey, alt: ev.altKey, meta: ev.metaKey }));
+  });
+}
 // between steps the page lives: its timers and animations run
 async function idle() {
   for (;;) {

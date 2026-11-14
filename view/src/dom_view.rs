@@ -3357,24 +3357,24 @@ impl DomView {
         let acc: Rc<RefCell<DomBoxes>> = Rc::new(RefCell::new(DomBoxes::new()));
         // where the boxes are in the page: the page's own scroll (the
         // root's, build) is taken back out, as web/dom subtracts it
-        let _tmp_1 = r#box.borrow().calculated_x - r#box.borrow().scroll_left;
-        DomView::collect(r#box, &pfx, _tmp_1, r#box.borrow().calculated_y - r#box.borrow().scroll_top, &acc);
-        let mut out: String = String::new();
+        // (collectIn adds every scrolled box's scroll back, the root's too)
+        let _tmp_1 = r#box.borrow().calculated_x;
+        DomView::collect(r#box, &pfx, _tmp_1, r#box.borrow().calculated_y, &acc);
+        // (the entries joined once at the end: a string grown by a copy per
+        // entry made 10 000 rows' boxes take seconds)
+        let mut parts: Vec<String> = Vec::new();
         let __n_i = acc.borrow().ids.len() as i64;
         for i in 0..__n_i {
             let id = acc.borrow().ids[i as usize].clone();
-            if i > 0 {
-                out = format!("{},", out);
-            }
             let x0: f64 = acc.borrow().x0[i as usize];
             let y0: f64 = acc.borrow().y0[i as usize];
             let mut more: String = String::new();
             if acc.borrow().scroll.contains_key(&id) {
                 more = acc.borrow().scroll.get(&id).cloned().unwrap();
             }
-            out = format!("{}\"{}\":[{},{},{},{}{}]", out, id, DomView::num(x0), DomView::num(y0), DomView::num(acc.borrow().x1[i as usize] - x0), DomView::num(acc.borrow().y1[i as usize] - y0), more);
+            parts.push(format!("\"{}\":[{},{},{},{}{}]", id, DomView::num(x0), DomView::num(y0), DomView::num(acc.borrow().x1[i as usize] - x0), DomView::num(acc.borrow().y1[i as usize] - y0), more));
         }
-        format!("{}{}{}", "{".to_string(), out, "}".to_string())
+        format!("{}{}{}", "{".to_string(), parts.join(","), "}".to_string())
     }
     /// an element's transform as a frame: about its origin (CSS's default 50%
     /// 50%), turned, scaled (the y axis flipped for a mirror), then shifted
@@ -3507,6 +3507,13 @@ impl DomView {
                 DomView::collectIn(&l, pfx, &kf.borrow().then(&g_1), acc);
             }
             return;
+        }
+        // (a scrolled box's children are laid out where its scroll puts
+        // them: web/dom takes their boxes unscrolled, and subtracts every
+        // ancestor's scrollTop itself, getBoundingClientRect)
+        let (esl, est) = (el.borrow().scroll_left, el.borrow().scroll_top);
+        if esl != 0.0 || est != 0.0 {
+            kf = kf.borrow().then(&DomFrame::shift(esl, est));
         }
         let __it_c = el.borrow().children.clone();
         for c_1 in __it_c.iter().cloned() {
@@ -4966,7 +4973,16 @@ impl DomView {
                     let adsp: String = s.borrow().getText("display");
                     let afl2: String = s.borrow().getText("float");
                     let in_line: bool = adsp.starts_with("inline") || (!afl2.is_empty() && afl2 != "none");
-                    if self.inFlex || across && (!w.is_empty() && w != "auto") && !in_line {
+                    // (an auto width under a max-width is the line's width
+                    // clamped, CSS 2.1 10.4: as 100% when padding and
+                    // border are inside it, Bootstrap's .modal-dialog)
+                    let mxw: String = s.borrow().getText("max-width");
+                    let wpad: bool = s.borrow().getText("box-sizing") == "border-box" || (DomView::zeroLen(&s.borrow().getText("padding-left")) && DomView::zeroLen(&s.borrow().getText("padding-right")) && DomView::zeroLen(&s.borrow().getText("border-left-width")) && DomView::zeroLen(&s.borrow().getText("border-right-width")));
+                    let clamp_w: bool = !self.inFlex && across && (w.is_empty() || w == "auto") && (!mxw.is_empty() && mxw != "none") && !in_line && wpad && self.wm.is_empty();
+                    if clamp_w {
+                        EVGElement::set_attribute(&e, "width", "100%".to_string());
+                    }
+                    if self.inFlex || across && (!w.is_empty() && w != "auto") && !in_line || clamp_w {
                         EVGElement::set_attribute(&e, &n, "auto".to_string());
                     }
                 }
@@ -9251,9 +9267,7 @@ impl DomView {
                 continue;
             }
             if flex {
-                self.fNodes.push(c0.clone());
-                self.fInh.push(inh.clone());
-                self.fIds.push(String::new().to_string());
+                self.flexItems(c0.clone(), inh.clone());
             } else {
                 self.flatten(c0.clone(), inh.clone(), "");
             }
@@ -10757,7 +10771,7 @@ impl DomView {
         return ord;
     }
     pub fn flatten(&mut self, c: Rc<RefCell<JsonValue>>, inh: Rc<RefCell<JsonValue>>, id: &str) {
-        if (!c.borrow().has("x") && !self.isText(&c)) && self.wrapper(&c) {
+        if (!c.borrow().has("x") && !self.isText(&c)) && (self.wrapper(&c) || DomView::contents(&c)) {
             let cinh: Rc<RefCell<JsonValue>> = self.inherit(&inh,
                 &c.borrow().get("s")
             );
@@ -10772,6 +10786,33 @@ impl DomView {
         self.fNodes.push(c.clone());
         self.fInh.push(inh.clone());
         self.fIds.push(id.to_string());
+    }
+    /// an element with `display: contents` (CSS Display 3, 2.5): no box of
+    /// its own, its children are in its parent's place (and the parent's
+    /// box is their containing block: a child's height: 100% is of it)
+    pub fn zeroLen(v: &String) -> bool {
+        v.is_empty() || v == "0" || v == "0px"
+    }
+    pub fn contents(c: &Rc<RefCell<JsonValue>>) -> bool {
+        !c.borrow().has("svg") && c.borrow().get("s").borrow().getText("display") == "contents"
+    }
+    /// a flex or grid container's items: its children, with those of a
+    /// `display: contents` child in that child's place
+    pub fn flexItems(&mut self, c: Rc<RefCell<JsonValue>>, inh: Rc<RefCell<JsonValue>>) {
+        if !c.borrow().has("x") && DomView::contents(&c) {
+            let cinh: Rc<RefCell<JsonValue>> = self.inherit(&inh,
+                &c.borrow().get("s")
+            );
+            let kids: Rc<RefCell<JsonValue>> = c.borrow().get("c");
+            let __it_g = kids.borrow().items.clone();
+            for g in __it_g.iter().cloned() {
+                self.flexItems(g.clone(), cinh.clone());
+            }
+            return;
+        }
+        self.fNodes.push(c.clone());
+        self.fInh.push(inh.clone());
+        self.fIds.push(String::new().to_string());
     }
     pub fn wrapper(&self, c: &Rc<RefCell<JsonValue>>) -> bool {
         if DomView::displayOf(c) != "inline" {

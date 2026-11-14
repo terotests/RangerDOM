@@ -6,8 +6,15 @@ import { Virtualizer, observeElementRect, observeElementOffset, elementScroll, m
 const box = document.getElementById('box'), inner = document.getElementById('inner');
 const count = 10000;
 const text = (i) => 'Row ' + i + ' ' + 'lorem ipsum dolor sit amet '.repeat(1 + (i * 7) % 5);
-let v;
+let v, drawing = false, again = false;
+// (measureElement can call onChange while a draw is putting rows in: that
+// draw runs again after, not inside, or rows would be made twice)
 function draw() {
+  if (drawing) { again = true; return; }
+  drawing = true;
+  try { do { again = false; drawOnce(); } while (again); } finally { drawing = false; }
+}
+function drawOnce() {
   const items = v.getVirtualItems();
   inner.style.height = v.getTotalSize() + 'px';
   const keep = new Map();

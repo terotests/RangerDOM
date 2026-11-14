@@ -27,7 +27,7 @@ window.__benchCase = {
     { name: 'clear filter, scroll top', run: () => { api.setGridOption('quickFilterText', ''); api.ensureIndexVisible(0, 'top'); return wait(() => api.getDisplayedRowCount() === 2000); } }
   ],
   probe() {
-    const r = Array.from(document.querySelectorAll('.ag-center-cols-container .ag-row')).sort((a, b) => a.getAttribute('row-index') - b.getAttribute('row-index'));
+    const r = Array.from(document.querySelectorAll('.ag-center-cols-container .ag-row, .ag-grid-scrolling-container .ag-row')).sort((a, b) => a.getAttribute('row-index') - b.getAttribute('row-index'));
     const cell = (row, col) => { const c = row && row.querySelector('[col-id="' + col + '"]'); return c ? c.textContent : null; };
     return { displayed: api.getDisplayedRowCount(), domRows: r.length > 0 && r.length < 80, firstIndex: r[0] ? r[0].getAttribute('row-index') : null, firstPrice: cell(r[0], 'price'), selected: document.querySelectorAll('.ag-row-selected').length, modelW: api.getColumn('model').getActualWidth() };
   },
