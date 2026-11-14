@@ -1,0 +1,19 @@
+# RangerDOM's view as a crate (src/lib.rs): the render tree as EVG elements.
+# Placed in Ranger's gallery/domview beside gallery/domjson; a host's crate
+# names it as a path dependency, and Ranger reads it from there.
+[package]
+name = "rangerdom_view"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+ranger = { path = "../../runtime/rust/ranger" }
+rangerdom_json = { path = "../domjson" }
+
+# a target table: Ranger reads EVG from the .rgr files (rgr.rs), not this crate
+[target.'cfg(all())'.dependencies]
+rangerevg = { path = "../../runtime/rust/rangerevg" }

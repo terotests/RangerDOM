@@ -1,0 +1,18 @@
+# RangerDOM's JSON as a crate (src/lib.rs): the page a host gets from
+# __render(). Placed in Ranger's gallery/domjson; a crate that uses it names
+# it as a path dependency, and Ranger reads it from there.
+[package]
+name = "rangerdom_json"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+ranger = { path = "../../runtime/rust/ranger" }
+
+[build-dependencies]
+ranger = { path = "../../runtime/rust/ranger" }
