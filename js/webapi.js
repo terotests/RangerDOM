@@ -65,6 +65,7 @@
   // siblings when a selector has a + or ~ combinator; else the whole page
   // (changed)
   function attrChanged(el, name, was, now) {
+    if (shadowCount && el.isConnected && inShadowScope(el)) { changed(); if (name === 'slot' || name === 'name') scheduleSlots(name === 'slot' ? assignedSlotOf(el) : null); return; }
     // an element not in the page (React sets a new element's attributes
     // before it inserts it): nothing shown changes; what it kept goes
     if (!el.isConnected && doc && el.ownerDocument === doc) {
@@ -161,6 +162,7 @@
   // added or moved restyled every node.
   // (detach: gone, the element taken out, and at, where it was)
   function treeChanged(p, c, gone, at) {
+    if (shadowCount && (p.nodeType === 11 && p.host || inShadowScope(p))) { changed(); scheduleSlots(p._sr && (c || gone) ? assignedSlotOf(c || gone) : null); return; }
     // not in the page (a fragment, a parsed document): nothing shown
     if (!doc || (p !== doc && (p.ownerDocument !== doc || !p.isConnected))) { generation++; return; }
     var reach = p !== doc && p !== doc.documentElement ? selectorReach() : 0;
@@ -380,6 +382,7 @@
   // `.react-flow__edge.selectable:focus .react-flow__edge-path` has :focus
   // above the subject: what is under the two is styled again too.
   function pointerStateChanged(a, b, focus) {
+    if (shadowCount && (inShadowScope(a) || inShadowScope(b))) { changed(); return; }
     var reach = doc ? selectorReach() : 0;
     var h = focus ? Math.max(reachCache.focus, reachCache.focusWithin) : reachCache.hover;
     if (!reach) { changed(); return; }
@@ -636,6 +639,7 @@
   function scrolled(n) {
     generation++;
     textStamp++;
+    if (shadowCount) { stampUp(n); return; }
     for (; n; n = n.parentNode) n._rv = textStamp;
   }
   // a text changed under n: n and its ancestors render again
@@ -644,6 +648,7 @@
     if (n && n.localName === 'style') { changed(); return; }
     generation++;
     textStamp++;
+    if (shadowCount) { stampUp(n); return; }
     for (; n; n = n.parentNode) n._rv = textStamp;
   }
   function emptyEl(n) {
@@ -855,9 +860,25 @@
     }
   }
 
+  // the target as a listener at t sees it: a node in a shadow tree t is
+  // not in shows as that tree's host (DOM 4.2.2 retarget)
+  function retarget(a, t) {
+    for (;;) {
+      var r = a instanceof Node ? shadowRootOf(a) : null;
+      if (!r) return a;
+      if (t instanceof Node) { for (var q = t; q; q = q.nodeType === 11 && q.host ? q.host : q.parentNode) if (q === r) return a; }
+      a = r.host;
+    }
+  }
   function dispatch(target, ev) {
     var path = [];
-    for (var t = target; t; t = parentForEvent(t)) path.push(t);
+    for (var t = target; t; ) {
+      path.push(t);
+      if (shadowCount && t.nodeType === 11 && t.host) { if (!ev.composed) break; t = t.host; continue; }
+      var asl = shadowCount && t.parentNode && t.parentNode._sr ? assignedSlotOf(t) : null;
+      t = asl || parentForEvent(t);
+    }
+    if (shadowCount && path.length > 1) { ev._orig = target; dispatchShadow(target, ev, path); return !ev.defaultPrevented; }
     ev.target = target;
     ev.srcElement = target;
     ev._path = path;
@@ -885,6 +906,41 @@
     ev.currentTarget = null;
     G.event = prevEvent;
     return !ev.defaultPrevented;
+  }
+
+  // dispatch along a path through shadow trees: each listener sees the
+  // target retargeted for it
+  function dispatchShadow(target, ev, path) {
+    ev.srcElement = target;
+    ev._path = path;
+    ev._stop = false;
+    ev._stopNow = false;
+    var prevEvent = G.event;
+    G.event = ev;
+    for (var i = path.length - 1; i > 0 && !ev._stop; i--) {
+      ev.target = retarget(target, path[i]);
+      ev.eventPhase = ev.target === path[i] ? 2 : 1;
+      invoke(path[i], ev, 1);
+    }
+    if (!ev._stop) {
+      ev.target = target;
+      ev.eventPhase = 2;
+      invoke(target, ev, 2);
+      if (!ev._stopNow) invokeHandler(target, ev);
+    }
+    for (var j = 1; j < path.length && !ev._stop; j++) {
+      ev.target = retarget(target, path[j]);
+      // (a host is its tree's event at target: non-bubbling ones too)
+      if (ev.target === path[j]) { ev.eventPhase = 2; invoke(path[j], ev, 3); if (!ev._stopNow) invokeHandler(path[j], ev); continue; }
+      if (!ev.bubbles) continue;
+      ev.eventPhase = 3;
+      invoke(path[j], ev, 3);
+      if (!ev._stopNow) invokeHandler(path[j], ev);
+    }
+    ev.target = retarget(target, doc);
+    ev.eventPhase = 0;
+    ev.currentTarget = null;
+    G.event = prevEvent;
   }
 
   function reportError(e) {
@@ -921,14 +977,15 @@
       var i = indexIn(this); return i > 0 ? p._c[i - 1] : null;
     }
     get isConnected() {
-      for (var n = this; n; n = n.parentNode) if (n.nodeType === 9) return true;
+      for (var n = this; n; n = n.nodeType === 11 && n.host ? n.host : n.parentNode) if (n.nodeType === 9) return true;
       return false;
     }
+    get assignedSlot() { return shadowCount ? assignedSlotOf(this) : null; }
     get nodeValue() { return null; }
     set nodeValue(v) {}
     get baseURI() { return doc ? doc.URL : ''; }
     hasChildNodes() { return this._c.length > 0; }
-    getRootNode() { var n = this; while (n.parentNode) n = n.parentNode; return n; }
+    getRootNode(o) { var n = this; for (;;) { while (n.parentNode) n = n.parentNode; if (o && o.composed && n.nodeType === 11 && n.host) n = n.host; else return n; } }
     contains(o) { for (var n = o; n; n = n.parentNode) if (n === this) return true; return false; }
     isSameNode(o) { return o === this; }
     isEqualNode(o) { return !!o && o.nodeType === this.nodeType && serialize(o, true) === serialize(this, true); }
@@ -1258,6 +1315,132 @@
       if (fn(n) === true) return;
       for (var j = n._c.length - 1; j >= 0; j--) stack.push(n._c[j]);
     }
+  }
+
+  // ---- Shadow DOM: the flat tree (DOM 4.2.2, CSS Scoping 2) -------------
+  // A host renders its shadow tree in place of its children; a <slot> in
+  // it renders the host's children assigned to it (by their slot
+  // attribute; the first slot of a name takes them), else its own. Styles
+  // inherit along this tree, events pass from a shadow tree to its host,
+  // the shadow root's sheets style only its tree (and :host, ::slotted()).
+  // shadowCount: no shadow root anywhere, none of this is looked at.
+  var shadowCount = 0, shadowRoots = [];
+  function shadowRootOf(n) {
+    for (var q = n; q; q = q.parentNode) if (q.nodeType === 11 && q.host) return q;
+    return null;
+  }
+  // n in a shadow tree, a host's child or a host: its style is not the
+  // page's selectors' business alone (changed() restyles the page)
+  function inShadowScope(n) {
+    if (!shadowCount || !n) return false;
+    if (n._sr) return true;
+    var p = n.parentNode;
+    if (p && p._sr) return true;
+    return !!shadowRootOf(n);
+  }
+  function slotNameOf(n) { return n.nodeType === 1 ? (attrOf(n, 'slot') || '') : ''; }
+  // the first slot of each name in sr, found once per change
+  function slotsOf(sr) {
+    if (sr._slotGen === generation && sr._slots) return sr._slots;
+    var m = {}, all = [];
+    eachElement(sr, function (e) { if (e.localName === 'slot' && e.namespaceURI === HTML_NS) { all.push(e); var nm = attrOf(e, 'name') || ''; if (!m[nm]) m[nm] = e; } });
+    m._all = all;
+    sr._slots = m; sr._slotGen = generation;
+    return m;
+  }
+  function assignedSlotOf(n) {
+    var p = n.parentNode;
+    if (!p || !p._sr || (n.nodeType !== 1 && n.nodeType !== 3)) return null;
+    return slotsOf(p._sr)[slotNameOf(n)] || null;
+  }
+  function slotted(slot) {
+    var sr = shadowRootOf(slot);
+    if (!sr) return [];
+    var nm = attrOf(slot, 'name') || '';
+    if (slotsOf(sr)[nm] !== slot) return [];
+    var out = [], kids = sr.host._c;
+    for (var i = 0; i < kids.length; i++) { var k = kids[i]; if ((k.nodeType === 1 || k.nodeType === 3) && slotNameOf(k) === nm) out.push(k); }
+    return out;
+  }
+  function flatten(slot, out) {
+    var a = slotted(slot);
+    if (!a.length) a = slot._c;
+    for (var i = 0; i < a.length; i++) {
+      var k = a[i];
+      if (k.nodeType === 1 && k.localName === 'slot' && shadowRootOf(k)) flatten(k, out); else out.push(k);
+    }
+    return out;
+  }
+  // the focused element is in el's shadow tree (or one inside it): the host
+  // matches :focus (CSS Scoping 3.1.1)
+  function focusInShadow(el) {
+    for (var r = shadowRootOf(doc._active); r; r = shadowRootOf(r.host)) if (r.host === el) return true;
+    return false;
+  }
+  function upFlat(n) { return shadowCount ? flatParent(n) : n.parentNode; }
+  // the children n renders
+  function flatKids(n) {
+    if (!shadowCount) return n._c;
+    if (n._sr) return n._sr._c;
+    if (n.localName === 'slot' && n.namespaceURI === HTML_NS && shadowRootOf(n)) { var a = slotted(n); return a.length ? a : n._c; }
+    return n._c;
+  }
+  // the element n is rendered in (its style's parent), null at the top
+  function flatParent(n) {
+    var p = n.parentNode;
+    if (!p) return null;
+    if (shadowCount) {
+      if (p.nodeType === 11 && p.host) return p.host;
+      if (p._sr) return assignedSlotOf(n) || p;
+    }
+    return p.nodeType === 1 ? p : null;
+  }
+  // elements in rendering order: shadow trees in place of their hosts'
+  // children, slots with what they take
+  function eachFlat(root, fn) {
+    var stack = [];
+    var top = flatKids(root);
+    for (var i = top.length - 1; i >= 0; i--) stack.push(top[i]);
+    while (stack.length) {
+      var n = stack.pop();
+      if (n.nodeType !== 1) continue;
+      if (fn(n) === true) return;
+      var k = flatKids(n);
+      for (var j = k.length - 1; j >= 0; j--) stack.push(k[j]);
+    }
+  }
+  // n and what renders it render again (a text or scroll change): across
+  // a shadow root to its host, from a host's child to its slot
+  function stampUp(n) {
+    for (var q = n; q; ) {
+      q._rv = textStamp;
+      if (shadowCount && q._sr) { var sl = slotsOf(q._sr)._all; for (var i = 0; i < sl.length; i++) for (var u = sl[i]; u && u !== q._sr; u = u.parentNode) u._rv = textStamp; }
+      q = q.nodeType === 11 && q.host ? q.host : q.parentNode;
+    }
+  }
+  // slotchange (DOM 4.2.2.5): each slot whose assigned nodes are not the
+  // ones they were, after the change (a microtask)
+  var slotCheckQueued = false, slotHints = [];
+  // (hint: a slot the change is for, signalled first, in change order)
+  function scheduleSlots(hint) {
+    if (hint && slotHints.indexOf(hint) < 0) slotHints.push(hint);
+    if (slotCheckQueued || !shadowCount) return;
+    slotCheckQueued = true;
+    Promise.resolve().then(function () {
+      slotCheckQueued = false;
+      var hints = slotHints;
+      slotHints = [];
+      for (var r = -1; r < shadowRoots.length; r++) {
+        var all = r < 0 ? hints : slotsOf(shadowRoots[r])._all;
+        for (var i = 0; i < all.length; i++) {
+          var sl = all[i], sig = slotted(sl).map(function (k) { return k.__id; }).join(',');
+          if (sl._slotSig === undefined) { sl._slotSig = sig; if (!sig) continue; }
+          else if (sl._slotSig === sig) continue;
+          sl._slotSig = sig;
+          dispatch(sl, new Event('slotchange', { bubbles: true }));
+        }
+      }
+    });
   }
 
   class DocumentFragment extends Node {
@@ -1760,6 +1943,7 @@
     set className(v) { this.setAttribute('class', v); }
     get classList() { return this._cl || (this._cl = new DOMTokenList(this, 'class')); }
     get slot() { return this.getAttribute('slot') || ''; }
+    set slot(v) { this.setAttribute('slot', v); }
     _norm(n) { n = String(n); return this.namespaceURI === HTML_NS ? n.toLowerCase() : n; }
     _find(n) { for (var i = 0; i < this._attrs.length; i++) if (this._attrs[i].name === n) return i; return -1; }
     getAttribute(n) { var i = this._find(this._norm(n)); return i < 0 ? null : this._attrs[i]._v; }
@@ -1871,9 +2055,13 @@
     scrollIntoView(arg) { scrollIntoView(this, arg); }
     scrollIntoViewIfNeeded(center) { scrollIntoView(this, { block: center === false ? 'nearest' : 'center', inline: 'nearest' }); }
     attachShadow(init) {
+      if (this._sr) throw DOMException("Failed to execute 'attachShadow' on 'Element': Shadow root cannot be created on a host which already hosts a shadow tree.", 'NotSupportedError');
       var r = new ShadowRoot(this, init);
       this.shadowRoot = init && init.mode === 'closed' ? null : r;
       this._sr = r;
+      shadowCount++;
+      shadowRoots.push(r);
+      changed();
       return r;
     }
     animate(keyframes, options) { var a = new Animation(new KeyframeEffect(this, keyframes, options)); a.play(); return a; }
@@ -1888,7 +2076,16 @@
   mixin(Element, ParentNode);
 
   class ShadowRoot extends DocumentFragment {
-    constructor(host, init) { super(); this.host = host; this.mode = (init && init.mode) || 'open'; }
+    constructor(host, init) { super(); this.host = host; this.mode = (init && init.mode) || 'open'; this.delegatesFocus = !!(init && init.delegatesFocus); this._adopted = []; }
+    get adoptedStyleSheets() { return this._adopted; }
+    set adoptedStyleSheets(v) { this._adopted = Array.from(v || []); changed(); }
+    get activeElement() {
+      var a = doc && doc._active;
+      for (; a; a = shadowRootOf(a) ? shadowRootOf(a).host : null) if (shadowRootOf(a) === this) return a;
+      return null;
+    }
+    get styleSheets() { var out = []; eachElement(this, function (e) { if (e.localName === 'style' && e.namespaceURI === HTML_NS) out.push(sheetOfStyle(e)); }); return out; }
+    elementFromPoint(x, y) { var e = hitTest(x, y); for (; e; e = shadowRootOf(e) ? shadowRootOf(e).host : null) if (shadowRootOf(e) === this) return e; return null; }
     get innerHTML() { return serializeChildren(this); }
     set innerHTML(v) { removeAll(this); this.appendChild(parseFragment(String(v), null)); }
   }
@@ -2830,7 +3027,12 @@
     get innerHTML() { return serializeChildren(this.content); }
     set innerHTML(v) { removeAll(this.content); this.content.appendChild(parseFragment(String(v), null)); }
   }
-  class HTMLSlotElement extends HTMLElement { assignedNodes() { return []; } assignedElements() { return []; } }
+  class HTMLSlotElement extends HTMLElement {
+    get name() { return this.getAttribute('name') || ''; }
+    set name(v) { this.setAttribute('name', v); }
+    assignedNodes(o) { return o && o.flatten ? flatten(this, []).filter(function (n) { return o.flatten || true; }) : slotted(this); }
+    assignedElements(o) { return (o && o.flatten ? flatten(this, []) : slotted(this)).filter(function (n) { return n.nodeType === 1; }); }
+  }
   class HTMLDialogElement extends HTMLElement {
     show() { this.open = true; }
     showModal() { this.open = true; this._modal = true; topAdd(this); }
@@ -3200,6 +3402,8 @@
     get defaultView() { return this === doc ? G : null; }
     get activeElement() {
       var a = this._active;
+      // (one in a shadow tree: its host, as the page sees it)
+      while (a && shadowCount && shadowRootOf(a)) a = shadowRootOf(a).host;
       if (a && a.isConnected) return a;
       return this.body || this.documentElement;
     }
@@ -3262,7 +3466,7 @@
       return f;
     }
     getElementsByName(n) { var out = []; eachElement(this, function (e) { if (e.getAttribute('name') === n) out.push(e); }); return NodeList(out); }
-    elementFromPoint(x, y) { return hitTest(x, y); }
+    elementFromPoint(x, y) { var e = hitTest(x, y); return shadowCount && e ? retarget(e, this) : e; }
     caretRangeFromPoint(x, y) {
       var e = hitTest(x, y);
       if (!e) return null;
@@ -3271,7 +3475,7 @@
       return r;
     }
     caretPositionFromPoint(x, y) { var r = this.caretRangeFromPoint(x, y); return r ? { offsetNode: r.startContainer, offset: r.startOffset, getClientRect: function () { return r.getBoundingClientRect(); } } : null; }
-    elementsFromPoint(x, y) { var e = hitTest(x, y), out = []; for (; e && e.nodeType === 1; e = e.parentNode) out.push(e); return out; }
+    elementsFromPoint(x, y) { var e = hitTest(x, y), out = []; if (shadowCount && e) e = retarget(e, this); for (; e && e.nodeType === 1; e = upFlat(e)) if (!shadowCount || !shadowRootOf(e)) out.push(e); return out; }
     getSelection() { return selection; }
     get timeline() { return documentTimeline; }
     getAnimations() { var out = []; eachElement(this, function (e) { if (e._waapi) e._waapi.forEach(function (a) { if (animationRelevant(a)) out.push(a); }); }); return out; }
@@ -3975,7 +4179,7 @@
   }
   // e or an ancestor has a transform: the host's hit test does not see it
   function transformedUnder(e) {
-    for (var n = e; n && n.nodeType === 1; n = n.parentNode) {
+    for (var n = e; n && n.nodeType === 1; n = upFlat(n)) {
       var tr = computedOf(n).transform;
       if (tr && tr !== 'none') return true;
     }
@@ -4050,7 +4254,7 @@
     var best = null, bestKey = null, order = 0;
     if (!doc) return null;
     var orderOf = {};
-    eachElement(doc, function (e) {
+    (shadowCount ? eachFlat : eachElement)(doc, function (e) {
       orderOf[e.__id] = order++;
       var r = rectOf(e);
       if (!(x >= r.left && x < r.right && y >= r.top && y < r.bottom) || !hittable(e)) return;
@@ -4079,7 +4283,7 @@
   // positive z), its z-index and its tree order
   function paintKey(e, orderOf) {
     var chain = [];
-    for (var n = e; n && n.nodeType === 1; n = n.parentNode) chain.push(n);
+    for (var n = e; n && n.nodeType === 1; n = upFlat(n)) chain.push(n);
     chain.reverse();
     var key = [];
     for (var i = 0; i < chain.length; i++) {
@@ -4105,7 +4309,7 @@
   // escapes clippers below its containing block, a fixed one all of them
   function clippedAway(e, x, y) {
     var cs = computedOf(e), escape = cs.position === 'absolute' ? 1 : cs.position === 'fixed' ? 2 : 0;
-    for (var n = e.parentNode; n && n.nodeType === 1 && n !== doc.documentElement; n = n.parentNode) {
+    for (var n = upFlat(e); n && n.nodeType === 1 && n !== doc.documentElement; n = upFlat(n)) {
       var ncs = computedOf(n);
       if (escape === 2) { if (ncs.transform && ncs.transform !== 'none') escape = 0; else continue; }
       // (the containing block's own overflow clips: it and what is above)
@@ -4150,7 +4354,7 @@
   // and tested against e's untransformed size.
   function insideTransformed(e, x, y) {
     var chain = [];
-    for (var n = e; n && n.nodeType === 1; n = n.parentNode) { var tr = computedOf(n).transform; if (tr && tr !== 'none') chain.push(tr); }
+    for (var n = e; n && n.nodeType === 1; n = upFlat(n)) { var tr = computedOf(n).transform; if (tr && tr !== 'none') chain.push(tr); }
     if (!chain.length || !boxes[e.__id]) return true;
     var m = [1, 0, 0, 1];
     for (var i = chain.length - 1; i >= 0; i--) {
@@ -4640,7 +4844,7 @@
           // whole selector invalid, CSS Selectors 3.9)
           if (!KNOWN_PE.test(name)) return null;
           pseudoElement = name;
-          c.push({ t: 'pseudoel', n: name });
+          c.push(arg !== null ? { t: 'pseudoel', n: name, arg: arg.trim() } : { t: 'pseudoel', n: name });
           i = j; continue;
         }
         if (!KNOWN_PC.test(name)) return null;
@@ -4725,13 +4929,22 @@
   function matchComplex(el, sel, scope) {
     return matchFrom(el, sel.parts, 0, scope);
   }
+  // the shadow root whose sheet's selectors are being matched (null: the
+  // document's): their combinators go up to its host, which only a
+  // compound with :host matches
+  var shadowCtx = null;
+  function upEl(n) {
+    var p = n.parentNode;
+    if (p && p.nodeType === 1) return p;
+    return p && shadowCtx && p === shadowCtx ? p.host : null;
+  }
   function matchFrom(el, parts, k, scope) {
     if (!matchCompound(el, parts[k].c, scope)) return false;
     if (k + 1 >= parts.length) return true;
     var comb = parts[k].comb;
-    if (comb === '>') { var p = el.parentNode; return !!p && p.nodeType === 1 && matchFrom(p, parts, k + 1, scope); }
+    if (comb === '>') { var p = upEl(el); return !!p && matchFrom(p, parts, k + 1, scope); }
     if (comb === ' ') {
-      for (var a = el.parentNode; a && a.nodeType === 1; a = a.parentNode) if (matchFrom(a, parts, k + 1, scope)) return true;
+      for (var a = upEl(el); a; a = upEl(a)) if (matchFrom(a, parts, k + 1, scope)) return true;
       return false;
     }
     if (comb === '+') { var s = siblingElement(el, -1); return !!s && matchFrom(s, parts, k + 1, scope); }
@@ -4749,7 +4962,14 @@
     // (a selector's attribute names are lower case, as an HTML element's are)
     return attrOf(el, name);
   }
+  function hasHostPseudo(c) {
+    if (c._host === undefined) { var h = false; for (var i = 0; i < c.length; i++) if (c[i].t === 'pseudo' && (c[i].n === 'host' || c[i].n === 'host-context')) h = true; Object.defineProperty(c, '_host', { value: h, enumerable: false }); }
+    return c._host;
+  }
   function matchCompound(el, c, scope) {
+    // (the host, from inside its shadow tree, is only :host; elsewhere
+    // :host is nothing)
+    if (shadowCtx && el === shadowCtx.host ? !hasHostPseudo(c) : hasHostPseudo(c) && !shadowCtx) return false;
     for (var i = 0; i < c.length; i++) {
       var s = c[i];
       switch (s.t) {
@@ -4865,9 +5085,13 @@
       case 'visited': return false;
       case 'target': return false;
       case 'defined': return true;
-      case 'focus': return !!doc && doc._active === el;
+      case 'focus': return !!doc && (doc._active === el || (shadowCount && !!el._sr && focusInShadow(el)));
       case 'focus-visible': return !!doc && doc._active === el && doc._focusVisible !== false;
-      case 'focus-within': return !!doc && !!doc._active && el.contains(doc._active);
+      case 'focus-within':
+        if (!doc || !doc._active) return false;
+        if (!shadowCount) return el.contains(doc._active);
+        for (var fw = doc._active; fw; fw = fw.parentNode && fw.parentNode.nodeType === 11 && fw.parentNode.host ? fw.parentNode.host : fw.parentNode) if (fw === el) return true;
+        return false;
       case 'hover': return !!hoverEl && el.contains(hoverEl);
       case 'active': return !!activeEl && el.contains(activeEl);
       case 'valid': case 'invalid': {
@@ -4891,7 +5115,19 @@
       case 'popover-open': return !!el._popOpen;
       case 'fullscreen': return false;
       case 'autofill': case '-webkit-autofill': return false;
-      case 'host': return false;
+      case 'host': case 'host-context': {
+        if (!shadowCtx || el !== shadowCtx.host) return false;
+        if (s.arg === undefined || s.arg === null || s.arg === '') return s.n === 'host';
+        var sv = shadowCtx, ok = false;
+        shadowCtx = null;
+        try {
+          var ls = parseSelectorList(s.arg);
+          if (s.n === 'host') ok = matchList(el, ls);
+          else for (var hc = el; hc && !ok; hc = flatParent(hc)) ok = matchList(hc, ls);
+        } catch (e) { ok = false; }
+        shadowCtx = sv;
+        return ok;
+      }
       default: return false;
     }
   }
@@ -5567,7 +5803,7 @@
   // the user agent's sheet: display and the few looks a page relies on
   var UA_CSS = [
     'html,address,blockquote,body,dd,div,dl,dt,fieldset,form,frame,frameset,h1,h2,h3,h4,h5,h6,noframes,ol,p,ul,center,dir,hr,menu,pre,article,aside,footer,header,hgroup,main,nav,section,search,figure,figcaption,details,summary,legend,dialog,optgroup{display:block}',
-    'head,script,style,link,meta,title,template,noscript,datalist,param,base,[hidden]:not([hidden=until-found]),area,map{display:none}',
+    'head,script,style,link,meta,title,template,noscript,datalist,param,base,[hidden]:not([hidden=until-found]),area,map{display:none}slot{display:contents}',
     'li{display:list-item}table{display:table;border-collapse:separate;border-spacing:2px;box-sizing:border-box}tr{display:table-row}thead{display:table-header-group}tbody{display:table-row-group}tfoot{display:table-footer-group}td,th{display:table-cell;padding:1px;vertical-align:inherit}thead,tbody,tfoot,tr{vertical-align:middle}th{font-weight:700;text-align:center}caption{display:table-caption;text-align:center}col{display:table-column}colgroup{display:table-column-group}',
     'body{margin:8px}p,blockquote,figure,dl,pre{margin-top:1em;margin-bottom:1em}ul,ol,menu{margin-top:1em;margin-bottom:1em;padding-left:40px}ol{list-style-type:decimal}ul ul,ol ul,ul ol,ol ol{margin-top:0;margin-bottom:0}dd{margin-left:40px}blockquote,figure{margin-left:40px;margin-right:40px}',
     'h1{font-size:2em;margin-top:.67em;margin-bottom:.67em;font-weight:700}h2{font-size:1.5em;margin-top:.83em;margin-bottom:.83em;font-weight:700}h3{font-size:1.17em;margin-top:1em;margin-bottom:1em;font-weight:700}h4{margin-top:1.33em;margin-bottom:1.33em;font-weight:700}h5{font-size:.83em;margin-top:1.67em;margin-bottom:1.67em;font-weight:700}h6{font-size:.67em;margin-top:2.33em;margin-bottom:2.33em;font-weight:700}',
@@ -5618,10 +5854,68 @@
     if (pe) { var po = cascade1(el, pe); lastPseudo = { el: el, pe: pe, gen: styleGen, out: po }; return po; }
     return cascade1(el);
   }
+  // a shadow root's sheets: its <style>s, then its adopted ones
+  function shadowSheets(sr) {
+    if (sr._sheetGen === styleGen && sr._sheets) return sr._sheets;
+    var out = [];
+    eachElement(sr, function (e) { if (e.localName === 'style' && e.namespaceURI === HTML_NS) out.push(sheetOfStyle(e)); });
+    for (var i = 0; i < sr._adopted.length; i++) out.push(sr._adopted[i]);
+    out = out.filter(function (x) { return x && !x.disabled; });
+    sr._sheets = out; sr._sheetGen = styleGen;
+    return out;
+  }
+  // the rules of a shadow tree's sheets for the tree's host (:host) and
+  // for the host's children its slots take (::slotted()): below the
+  // page's rules in the cascade (CSS Scoping 3.3, the outer context wins)
+  function innerHits(el, pe, hits) {
+    var sv = shadowCtx;
+    if (el._sr && !pe) {
+      var hs = shadowSheets(el._sr);
+      shadowCtx = el._sr;
+      for (var s = 0; s < hs.length; s++) {
+        var cand = [];
+        candidates(hs[s], el, cand, null);
+        for (var i = 0; i < cand.length; i++) {
+          var r = cand[i];
+          if (r.sel.pseudo || !hasHostPseudo(r.sel.parts[0].c)) continue;
+          if (r.media && !mediaMatches(r.media)) continue;
+          if (matchComplex(el, r.sel, null)) hits.push({ r: r, sheet: -1000 + s, ua: false, inner: true });
+        }
+      }
+    }
+    var slot = !pe && el.parentNode && el.parentNode._sr ? assignedSlotOf(el) : null;
+    if (slot) {
+      var ss = shadowSheets(el.parentNode._sr);
+      shadowCtx = el.parentNode._sr;
+      for (var t = 0; t < ss.length; t++) {
+        var pidx = ss[t]._pindex && ss[t]._pindex.slotted;
+        if (!pidx) continue;
+        for (var key in pidx) for (var j = 0; j < pidx[key].length; j++) {
+          var sr2 = pidx[key][j];
+          if (sr2.media && !mediaMatches(sr2.media)) continue;
+          var c0 = sr2.sel.parts[0].c, pel = null;
+          for (var q = 0; q < c0.length; q++) if (c0[q].t === 'pseudoel' && c0[q].n === 'slotted') pel = c0[q];
+          if (!pel || pel.arg === undefined) continue;
+          var inner = shadowCtx;
+          shadowCtx = null;
+          var okArg = false;
+          try { okArg = matchList(el, parseSelectorList(pel.arg)); } catch (e) { okArg = false; }
+          shadowCtx = inner;
+          if (!okArg) continue;
+          var slotSide = { parts: [{ c: c0.filter(function (x) { return x !== pel; }), comb: sr2.sel.parts[0].comb }].concat(sr2.sel.parts.slice(1)) };
+          if (matchComplex(slot, slotSide, null)) hits.push({ r: sr2, sheet: -500 + t, ua: false, inner: true });
+        }
+      }
+    }
+    shadowCtx = sv;
+  }
   function cascade1(el, pe) {
     var d = el.ownerDocument || doc;
-    var list = [ua()].concat(d === doc ? cascadeSheets(d).filter(function (s) { return !s.disabled; }) : []);
+    var esr = shadowCount ? shadowRootOf(el) : null;
+    var list = [ua()].concat(esr ? shadowSheets(esr) : d === doc ? cascadeSheets(d).filter(function (s) { return !s.disabled; }) : []);
     var hits = [];
+    var svCtx = shadowCtx;
+    shadowCtx = esr;
     for (var s = 0; s < list.length; s++) {
       var sheet = list[s];
       if (pe && !(pe === 'backdrop' ? sheet._backdrop : sheet._pseudo)) continue;
@@ -5639,6 +5933,8 @@
         hits.push({ r: r, sheet: s, ua: !!sheet._ua });
       }
     }
+    shadowCtx = svCtx;
+    if (shadowCount && !pe) innerHits(el, pe, hits);
     // (a pseudo-element no rule names: none, nothing built)
     if (pe && !hits.length) return null;
     // the same rules, inline style and presentational attributes give the
@@ -5660,7 +5956,7 @@
       var hit = specCache.map[ckey];
       if (hit) return hit;
     }
-    hits.sort(function (a, b) { return (a.ua === b.ua ? 0 : a.ua ? -1 : 1) || cmpSpec(a.r.sel.spec, b.r.sel.spec) || a.sheet - b.sheet || a.r.order - b.r.order; });
+    hits.sort(function (a, b) { return (a.ua === b.ua ? 0 : a.ua ? -1 : 1) || (!a.inner === !b.inner ? 0 : a.inner ? -1 : 1) || cmpSpec(a.r.sel.spec, b.r.sel.spec) || a.sheet - b.sheet || a.r.order - b.r.order; });
     // (seq: when each key was last set, for computeStyle to tell a logical
     // longhand and the physical property it maps to apart, the later winning)
     var out = {}, imp = {}, seq = {}, nseq = 0, auth = {};
@@ -6277,7 +6573,8 @@
     if (computedCache.gen !== styleGen) { computedCache = { gen: styleGen, map: {} }; treePending.clear(); }
     var c = computedCache.map[el.__id];
     if (c) return c;
-    var parent = el.parentNode && el.parentNode.nodeType === 1 ? computedOf(el.parentNode) : null;
+    var pel = shadowCount ? flatParent(el) : el.parentNode && el.parentNode.nodeType === 1 ? el.parentNode : null;
+    var parent = pel ? computedOf(pel) : null;
     c = computeStyle(el, parent);
     if ((c.animation && c.animation !== 'none') || (c['animation-name'] && c['animation-name'] !== 'none')) applyAnimations(el, c, parent);
     else if (el._anims) el._anims = null;
@@ -6865,6 +7162,12 @@
     for (var k in INITIAL) decl._set(k, c[k] !== undefined ? c[k] : INITIAL[k], '');
     for (var n in c) if (n.charAt(0) !== '_') decl._set(n, c[n], '');
     for (var v in c._vars) decl._set(v, c._vars[v], '');
+    // (text-decoration as a shorthand: its line longhand, which the
+    // cascade keeps under the shorthand's name)
+    if (c['text-decoration'] && !c['text-decoration-line']) {
+      var tdl = String(c['text-decoration']).split(/\s+/).filter(function (w) { return /^(underline|overline|line-through|blink)$/.test(w); });
+      decl._set('text-decoration-line', tdl.length ? tdl.join(' ') : 'none', '');
+    }
     var b = boxes[el.__id];
     if (b && el.isConnected && c.display !== 'none') {
       if (!/^\d/.test(decl._p.width) || decl._p.width === 'auto') decl._p.width = fmtPx(b[2]);
@@ -7032,7 +7335,7 @@
     // (a box of the top layer is rendered at the end of the root's, render)
     if (n._top && n !== topNow) return null;
     var cs = computedOf(n);
-    if (cs.display === 'none' || cs.display === 'contents' && !n._c.length) return null;
+    if (cs.display === 'none' || cs.display === 'contents' && !flatKids(n).length) return null;
     // a collapsed table row or row group takes no room (CSS 2.1 17.5.5)
     if (cs.visibility === 'collapse' && /^table-(row|row-group|header-group|footer-group)$/.test(cs.display)) return null;
     // a collapsed column takes no room either, nor the cells wholly in it
@@ -7166,7 +7469,7 @@
     // same list from frame to frame, so not sent again)
     if (isImg && n.__s3d) { o.s3d = n.__s3d.j; o.s3w = n.__s3d.w; o.s3h = n.__s3d.h; o.s3t = n.__s3d.t; }
     var kids = [];
-    var src = n.localName === 'template' || picUrl ? [] : n._c;
+    var src = n.localName === 'template' || picUrl ? [] : flatKids(n);
     if (/^(input|textarea|select|img|br|hr|iframe|canvas|video|audio|svg:?)$/.test(n.localName) && n.namespaceURI === HTML_NS) src = n.localName === 'select' ? [] : src;
     if (n.localName === 'canvas' && n.namespaceURI === HTML_NS) {
       // a canvas shows what is drawn on it, not its fallback content
@@ -8210,6 +8513,7 @@
       if (found) return;
       if (n.__id === id) { found = n; return; }
       for (var i = 0; i < n._c.length && !found; i++) walk(n._c[i]);
+      if (n._sr && !found) walk(n._sr);
     })(doc);
     return found;
   }
