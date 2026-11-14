@@ -52,7 +52,10 @@ pub struct Playground {
 
 impl Playground {
     pub fn new() -> Playground {
-        Playground { engine: Engine::new(), scripts: Vec::new(), errors: Vec::new(), w: 800.0, h: 600.0, page_json: String::new(), last_gen: String::new(), root: None, lay: None }
+        // (CEr's register machine: its default is still the stack machine)
+        let mut engine = Engine::new();
+        engine.vm.regs = true;
+        Playground { engine: engine, scripts: Vec::new(), errors: Vec::new(), w: 800.0, h: 600.0, page_json: String::new(), last_gen: String::new(), root: None, lay: None }
     }
 
     fn note(&mut self) -> String {

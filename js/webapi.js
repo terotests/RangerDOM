@@ -430,27 +430,53 @@
     var reach = 1, struct = 0, hover = 0, focus = 0, within = 0, has = 0, counted = 0, sib = [];
     var sheets = [ua()].concat(cascadeSheets(doc));
     for (var i = 0; i < sheets.length && reach; i++) {
-      var rules = sheets[i]._rules || [];
-      for (var j = 0; j < rules.length; j++) {
-        var t = String(rules[j].text || '');
-        if (/\sof\s/i.test(t)) { reach = 0; break; }
-        // :has() of what is under the subject (li:has(input)): a change
-        // reaches the changed element's ancestors too (hasReached); one
-        // relative to siblings (:has(+ x)) or above the subject: the page
-        if (/:has\(/i.test(t)) {
-          if (/:has\(\s*[+~]/i.test(t) || pseudoPlace(t, /:has\(/i) === 2) { reach = 0; break; }
-          has = 1;
-        }
-        if (/[+~]/.test(t)) { var sl = siblingLefts(t); if (sl.length) { reach = 2; sib = sib.concat(sl); } }
-        if (struct < 2 && STRUCT.test(t)) struct = Math.max(struct, pseudoPlace(t, STRUCT));
-        if (!counted && COUNTED.test(t)) counted = 1;
-        if (hover < 2 && HOVER.test(t)) hover = Math.max(hover, pseudoPlace(t, HOVER));
-        if (focus < 2 && FOCUS.test(t)) focus = Math.max(focus, pseudoPlace(t, FOCUS));
-        if (within < 2 && FOCUS_WITHIN.test(t)) within = Math.max(within, pseudoPlace(t, FOCUS_WITHIN));
-      }
+      var sr = sheetReach(sheets[i]);
+      if (!sr.reach) { reach = 0; break; }
+      if (sr.reach === 2) { reach = 2; sib = sib.concat(sr.sib); }
+      if (sr.struct > struct) struct = sr.struct;
+      if (sr.hover > hover) hover = sr.hover;
+      if (sr.focus > focus) focus = sr.focus;
+      if (sr.focusWithin > within) within = sr.focusWithin;
+      if (sr.has) has = 1;
+      if (sr.counted) counted = 1;
     }
     reachCache = { gen: styleGen, reach: reach, struct: struct, hover: hover, focus: focus, focusWithin: within, has: has, counted: counted, sib: sib };
     return reach;
+  }
+  // one sheet's part of selectorReach, read from its rules once (until
+  // _rebuild gives it new ones): a page that puts in its sheets one by one
+  // (AG Grid's theme: 25) read every rule of all of them again for each,
+  // and a selector list's text once for each selector in it
+  function sheetReach(sheet) {
+    var rules = sheet._rules || [];
+    if (sheet._reach && sheet._reachOf === rules) return sheet._reach;
+    var reach = 1, struct = 0, hover = 0, focus = 0, within = 0, has = 0, counted = 0, sib = [], last = null;
+    for (var j = 0; j < rules.length; j++) {
+      var t = rules[j].text;
+      // (the selectors of one list follow each other with the list's text)
+      if (t === last) continue;
+      last = t;
+      t = String(t || '');
+      // (every test below needs a pseudo-class or a + or ~)
+      if (t.indexOf(':') < 0 && t.indexOf('+') < 0 && t.indexOf('~') < 0) continue;
+      if (/\sof\s/i.test(t)) { reach = 0; break; }
+      // :has() of what is under the subject (li:has(input)): a change
+      // reaches the changed element's ancestors too (hasReached); one
+      // relative to siblings (:has(+ x)) or above the subject: the page
+      if (/:has\(/i.test(t)) {
+        if (/:has\(\s*[+~]/i.test(t) || pseudoPlace(t, /:has\(/i) === 2) { reach = 0; break; }
+        has = 1;
+      }
+      if (/[+~]/.test(t)) { var sl = siblingLefts(t); if (sl.length) { reach = 2; sib = sib.concat(sl); } }
+      if (struct < 2 && STRUCT.test(t)) struct = Math.max(struct, pseudoPlace(t, STRUCT));
+      if (!counted && COUNTED.test(t)) counted = 1;
+      if (hover < 2 && HOVER.test(t)) hover = Math.max(hover, pseudoPlace(t, HOVER));
+      if (focus < 2 && FOCUS.test(t)) focus = Math.max(focus, pseudoPlace(t, FOCUS));
+      if (within < 2 && FOCUS_WITHIN.test(t)) within = Math.max(within, pseudoPlace(t, FOCUS_WITHIN));
+    }
+    sheet._reachOf = rules;
+    sheet._reach = { reach: reach, struct: struct, hover: hover, focus: focus, focusWithin: within, has: has, counted: counted, sib: sib };
+    return sheet._reach;
   }
   // Invalidation sets (as Blink's): what a change of one feature of an
   // element (a class, an id, an attribute, a state pseudo-class) can change
@@ -1721,14 +1747,15 @@
     return out;
   }
   function splitComma(v) {
-    var out = [], depth = 0, cur = '';
-    for (var i = 0; i < v.length; i++) {
-      var c = v.charAt(i);
-      if (c === '(') depth++;
-      if (c === ')') depth--;
-      if (depth === 0 && c === ',') { out.push(cur.trim()); cur = ''; } else cur += c;
+    if (v.indexOf(',') < 0) return [v.trim()];
+    var out = [], depth = 0, start = 0, n = v.length;
+    for (var i = 0; i < n; i++) {
+      var c = v.charCodeAt(i);
+      if (c === 40) depth++;
+      else if (c === 41) depth--;
+      else if (c === 44 && depth === 0) { out.push(v.slice(start, i).trim()); start = i + 1; }
     }
-    out.push(cur.trim());
+    out.push(v.slice(start).trim());
     return out;
   }
   var BORDER_STYLES = /^(none|hidden|dotted|dashed|solid|double|groove|ridge|inset|outset)$/;
@@ -4976,14 +5003,14 @@
     return s;
   }
   function findClose(t, i, open, close) {
-    var depth = 0, q = null;
-    for (var k = i; k < t.length; k++) {
-      var ch = t.charAt(k);
-      if (q) { if (ch === '\\') { k++; continue; } if (ch === q) q = null; continue; }
-      if (ch === '"' || ch === "'") { q = ch; continue; }
-      if (ch === '\\') { k++; continue; }
-      if (ch === open) depth++;
-      else if (ch === close) { depth--; if (depth === 0) return k; }
+    var depth = 0, q = 0, o = open.charCodeAt(0), c = close.charCodeAt(0), n = t.length;
+    for (var k = i; k < n; k++) {
+      var ch = t.charCodeAt(k);
+      if (q) { if (ch === 92) { k++; continue; } if (ch === q) q = 0; continue; }
+      if (ch === 34 || ch === 39) { q = ch; continue; }
+      if (ch === 92) { k++; continue; }
+      if (ch === o) depth++;
+      else if (ch === c) { depth--; if (depth === 0) return k; }
     }
     return -1;
   }
@@ -6123,29 +6150,89 @@
     }
     shadowCtx = sv;
   }
+  // The sheets of one scope (the document's, a shadow root's) as one rule
+  // set: every sheet's rules under their keys in one index, each rule with
+  // its sheet's place in the list. An element's candidates are one lookup
+  // per key, not one per key and sheet (AG Grid's theme is 25 sheets; a
+  // CSS-in-JS page has more). Kept while the list and each sheet's rules
+  // are the same ones, so a change that leaves the sheets alone (styleGen)
+  // costs a comparison of the lists (each scope keeps its last set).
+  var ruleSetBuild = 0;
+  function ruleSetOf(list, have) {
+    if (have && have.list.length === list.length) {
+      var same = true;
+      for (var q = 0; q < list.length && same; q++) same = have.list[q] === list[q] && have.of[q] === list[q]._index;
+      if (same) return have;
+    }
+    var rs = { list: list.slice(), of: [], idx: Object.create(null), pidx: Object.create(null) };
+    var build = ++ruleSetBuild;
+    function merge(from, into, s, sheet) {
+      for (var k in from) {
+        var l = from[k], to = into[k] || (into[k] = []);
+        for (var i = 0; i < l.length; i++) {
+          var r = l[i];
+          // (a rule under several keys: one entry, taken once per element)
+          if (r._wb !== build || r._ws !== s) { r._wb = build; r._ws = s; r._w = { r: r, sheet: s, ua: !!sheet._ua, sh: sheet, multi: !!r._multi, cs: 0 }; }
+          to.push(r._w);
+        }
+      }
+    }
+    for (var s = 0; s < list.length; s++) {
+      var sheet = list[s];
+      rs.of.push(sheet._index);
+      if (sheet._index) merge(sheet._index, rs.idx, s, sheet);
+      if (sheet._pindex) for (var pn in sheet._pindex) merge(sheet._pindex[pn], rs.pidx[pn] || (rs.pidx[pn] = Object.create(null)), s, sheet);
+    }
+    return rs;
+  }
+  var docRuleSet = { gen: -1, d: null, rs: null };
+  function scopeRuleSet(d, esr) {
+    if (esr) {
+      if (esr._rsGen !== styleGen || !esr._rs) { esr._rs = ruleSetOf([ua()].concat(shadowSheets(esr)), esr._rs); esr._rsGen = styleGen; }
+      return esr._rs;
+    }
+    if (docRuleSet.gen !== styleGen || docRuleSet.d !== d) {
+      docRuleSet = { gen: styleGen, d: d, rs: ruleSetOf([ua()].concat(d === doc ? cascadeSheets(d).filter(function (x) { return !x.disabled; }) : []), docRuleSet.rs) };
+    }
+    return docRuleSet.rs;
+  }
+  function setCandidates(rs, el, out, pe) {
+    var idx = pe ? rs.pidx[pe] : rs.idx;
+    if (!idx) return;
+    var stamp = ++candStamp, l, i, w;
+    var id = attrOf(el, 'id');
+    if (id && (l = idx['#' + id])) for (i = 0; i < l.length; i++) { w = l[i]; if (w.multi) { if (w.cs === stamp) continue; w.cs = stamp; } out.push(w); }
+    var cls = attrOf(el, 'class');
+    if (cls) {
+      var set = classSet(el);
+      for (var cn in set) if ((l = idx['.' + cn])) for (i = 0; i < l.length; i++) { w = l[i]; if (w.multi) { if (w.cs === stamp) continue; w.cs = stamp; } out.push(w); }
+    }
+    var ln = el.localName;
+    if ((l = idx[ln])) for (i = 0; i < l.length; i++) { w = l[i]; if (w.multi) { if (w.cs === stamp) continue; w.cs = stamp; } out.push(w); }
+    if (el.namespaceURI !== HTML_NS && ln !== ln.toLowerCase() && (l = idx[ln.toLowerCase()])) for (i = 0; i < l.length; i++) { w = l[i]; if (w.multi) { if (w.cs === stamp) continue; w.cs = stamp; } out.push(w); }
+    if ((l = idx['*'])) for (i = 0; i < l.length; i++) { w = l[i]; if (w.multi) { if (w.cs === stamp) continue; w.cs = stamp; } out.push(w); }
+    if (el.parentNode && el.parentNode.nodeType === 9 && (l = idx[':root'])) for (i = 0; i < l.length; i++) { w = l[i]; if (w.multi) { if (w.cs === stamp) continue; w.cs = stamp; } out.push(w); }
+    var at = el._attrs;
+    for (var a = 0; a < at.length; a++) if ((l = idx['[' + at[a].name.toLowerCase()])) for (i = 0; i < l.length; i++) { w = l[i]; if (w.multi) { if (w.cs === stamp) continue; w.cs = stamp; } out.push(w); }
+  }
   function cascade1(el, pe) {
     var d = el.ownerDocument || doc;
     var esr = shadowCount ? shadowRootOf(el) : null;
-    var list = [ua()].concat(esr ? shadowSheets(esr) : d === doc ? cascadeSheets(d).filter(function (s) { return !s.disabled; }) : []);
     var hits = [];
     var svCtx = shadowCtx;
     shadowCtx = esr;
-    for (var s = 0; s < list.length; s++) {
-      var sheet = list[s];
-      if (pe && !(pe === 'backdrop' ? sheet._backdrop : sheet._pseudo)) continue;
-      var cand = [];
-      candidates(sheet, el, cand, pe);
-      for (var i = 0; i < cand.length; i++) {
-        var r = cand[i];
-        if (pe ? r.sel.pseudo !== pe : r.sel.pseudo) continue;
-        if (r.media) {
-          // (kept with the rule for the viewport it was answered for)
-          if (r._mqW !== viewport.w || r._mqH !== viewport.h) { r._mqW = viewport.w; r._mqH = viewport.h; r._mq = mediaMatches(r.media); }
-          if (!r._mq) continue;
-        }
-        if (!matchComplex(el, r.sel, null)) continue;
-        hits.push({ r: r, sheet: s, ua: !!sheet._ua });
+    var cand = [];
+    setCandidates(scopeRuleSet(d, esr), el, cand, pe);
+    for (var i = 0; i < cand.length; i++) {
+      var w = cand[i], r = w.r;
+      if (pe ? r.sel.pseudo !== pe || !(pe === 'backdrop' ? w.sh._backdrop : w.sh._pseudo) : r.sel.pseudo) continue;
+      if (r.media) {
+        // (kept with the rule for the viewport it was answered for)
+        if (r._mqW !== viewport.w || r._mqH !== viewport.h) { r._mqW = viewport.w; r._mqH = viewport.h; r._mq = mediaMatches(r.media); }
+        if (!r._mq) continue;
       }
+      if (!matchComplex(el, r.sel, null)) continue;
+      hits.push(w);
     }
     shadowCtx = svCtx;
     if (shadowCount && !pe) innerHits(el, pe, hits);
@@ -6161,10 +6248,20 @@
       ckey += '|' + (attrOf(el, 'style') || '');
       if (el._style) { var est = el._style; for (var eq = 0; eq < est._order.length; eq++) ckey += ';' + est._order[eq] + ':' + est._p[est._order[eq]] + (est._prio[est._order[eq]] ? '!' : ''); }
       if (el.namespaceURI !== HTML_NS) ckey += '|' + el.namespaceURI;
+      // (of an HTML element only the attributes presentationalHints reads:
+      // AG Grid gives every cell a comp-id of its own, so no two cells
+      // shared their declarations)
+      var html = el.namespaceURI === HTML_NS;
       for (var ak = 0; ak < el._attrs.length; ak++) {
         var an = el._attrs[ak].name;
-        if (an === 'class' || an === 'id' || an === 'style' || an.slice(0, 5) === 'data-' || an.slice(0, 5) === 'aria-') continue;
+        if (html ? !HINT_ATTRS[an.toLowerCase()] : an === 'class' || an === 'id' || an === 'style' || an.slice(0, 5) === 'data-' || an.slice(0, 5) === 'aria-') continue;
         ckey += '|' + an + '=' + el._attrs[ak]._v;
+      }
+      // (a cell's hints come from its table's attributes too)
+      if (html && (el.localName === 'td' || el.localName === 'th')) {
+        var tb0 = el.parentNode;
+        while (tb0 && tb0.nodeType === 1 && tb0.localName !== 'table') tb0 = tb0.parentNode;
+        if (tb0 && tb0.nodeType === 1) ckey += '|t:' + tb0.getAttribute('cellpadding') + ',' + tb0.getAttribute('border');
       }
       if (specCache.gen !== styleGen) specCache = { gen: styleGen, map: {}, n: 0 };
       var hit = specCache.map[ckey];
@@ -6229,6 +6326,30 @@
   // parent style, has the same computed style (Blink's matched properties
   // cache); the object is shared, so nothing may change it afterwards
   var sharedCache = { gen: -1, map: {}, n: 0 };
+  // the attributes presentationalHints reads from an HTML element
+  var HINT_ATTRS = { width: 1, height: 1, align: 1, bgcolor: 1, valign: 1, cellspacing: 1, cellpadding: 1, border: 1, clear: 1 };
+  // what a child's computed style takes from its parent's, as a number:
+  // the custom properties, the font size and the inherited properties
+  // (and display: a flex or grid container's children are blocks). Two
+  // parents alike in these give their children with the same declarations
+  // the same style, whatever else differs (a grid's rows differ in their
+  // transform only, and none of their cells shared a style).
+  var ikMap = {}, ikUid = 0, varsUid = 0, varsMemo = { gen: -1, map: {}, n: 0 };
+  function varsId(vars) {
+    var vid = vars._vid;
+    if (vid === undefined) { vid = ++varsUid; Object.defineProperty(vars, '_vid', { value: vid, enumerable: false }); }
+    return vid;
+  }
+  function inheritKey(ps) {
+    var k = ps._ik;
+    if (k !== undefined) return k;
+    var t = (ps._vars ? varsId(ps._vars) : 0) + '\u0001' + ps._fontPx + '\u0001' + (ps._fsKw === false ? 0 : 1) + '\u0001' + ps.display;
+    for (var ip in INHERITED) { var v = ps[ip]; t += '\u0001'; if (v !== undefined) t += v; }
+    k = ikMap[t];
+    if (k === undefined) k = ikMap[t] = ++ikUid;
+    Object.defineProperty(ps, '_ik', { value: k, enumerable: false });
+    return k;
+  }
   function presentationalHints(el, out) {
     if (el.namespaceURI === SVG_NS) {
       var pres = ['fill', 'stroke', 'stroke-width', 'opacity', 'fill-opacity', 'stroke-opacity', 'display', 'visibility', 'transform', 'fill-rule', 'stroke-linecap', 'stroke-linejoin', 'stop-color', 'stop-opacity'];
@@ -6896,11 +7017,14 @@
 
   function computeStyle(el, parent, pe, extra) {
     var spec = pe ? cascade(el, pe) : cascade(el);
-    var skey = null;
+    var skey = null, ikey = null, tookOwn = false;
     if (!pe && !extra && spec._sid && el !== (doc && doc.documentElement) && (!parent || parent._sid) && !(el._waapi && el._waapi.length)) {
       skey = spec._sid + ':' + (parent ? parent._sid : 0);
-      if (sharedCache.gen !== styleGen) sharedCache = { gen: styleGen, map: {}, n: 0 };
+      if (sharedCache.gen !== styleGen) { sharedCache = { gen: styleGen, map: {}, n: 0 }; ikMap = {}; }
       var shared = sharedCache.map[skey];
+      // (or by what the parent hands down, when the declarations take
+      // nothing else from it: no `inherit`)
+      if (!shared && parent) { ikey = spec._sid + ';' + inheritKey(parent); shared = sharedCache.map[ikey]; }
       if (shared) { el._ia = shared._ia0; return shared; }
     }
     // (an animation's keyframe: its declarations over the cascade's)
@@ -6912,7 +7036,17 @@
     for (var n0 in spec) if (n0.charCodeAt(0) === 45 && n0.charCodeAt(1) === 45) { ownVar = true; break; }
     if (parent && !ownVar && parent._vars) vars = parent._vars;
     else {
+      // (the same parent's properties and the same own ones: the same
+      // object, made once; a grid's rows each set a few, and their cells
+      // then shared no style, see inheritKey)
+      var vkey = String(parent && parent._vars ? varsId(parent._vars) : 0);
+      for (var nk in spec) if (nk.charCodeAt(0) === 45 && nk.charCodeAt(1) === 45) vkey += '\u0001' + nk + '\u0002' + spec[nk];
+      if (varsMemo.gen !== styleGen) varsMemo = { gen: styleGen, map: {}, n: 0 };
+      vars = varsMemo.map[vkey];
+    }
+    if (!vars) {
       vars = {};
+      if (varsMemo.n < 20000) { varsMemo.map[vkey] = vars; varsMemo.n++; }
       if (parent) for (var pv in parent._vars) vars[pv] = parent._vars[pv];
       for (var n in spec) if (n.slice(0, 2) === '--') vars[n] = spec[n];
       // custom properties may use each other
@@ -6974,7 +7108,7 @@
         if (lh && !(name in lh)) { for (var k0 in lh) { if (lh[k0] === undefined) continue; var k = physicalOf(k0, ownWm, ownDir) || k0; out[k] = computeValue(k, lh[k0], ctx, parent, out); } continue; }
       }
       var kw = v.toLowerCase();
-      if (kw === 'inherit') { out[name] = parent && parent._cc && parent._cc[name] ? 'currentcolor' : parent && parent[name] !== undefined ? parent[name] : INITIAL[name]; continue; }
+      if (kw === 'inherit') { tookOwn = true; out[name] = parent && parent._cc && parent._cc[name] ? 'currentcolor' : parent && parent[name] !== undefined ? parent[name] : INITIAL[name]; continue; }
       if (kw === 'initial' || kw === 'revert' || kw === 'revert-layer') { out[name] = INITIAL[name]; continue; }
       if (kw === 'unset') { out[name] = INHERITED[name] && parent ? parent[name] : INITIAL[name]; continue; }
       out[name] = computeValue(name, v, ctx, parent, out);
@@ -7019,7 +7153,7 @@
         !((out.animation && out.animation !== 'none') || (out['animation-name'] && out['animation-name'] !== 'none')) && !(el._waapi && el._waapi.length)) {
       Object.defineProperty(out, '_sid', { value: ++styleUid, enumerable: false });
       Object.defineProperty(out, '_ia0', { value: el._ia, enumerable: false });
-      sharedCache.map[skey] = out;
+      sharedCache.map[ikey !== null && !tookOwn ? ikey : skey] = out;
       sharedCache.n++;
     } else Object.defineProperty(out, '_sid', { value: ++styleUid, enumerable: false });
     return out;
