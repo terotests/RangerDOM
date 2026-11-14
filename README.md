@@ -62,6 +62,21 @@ so a bundle that imports nothing runs), generators and `eval` (CEr has
 neither yet), layout (the host lays the page out and may tell the realm
 where its boxes are with `layout`).
 
+## The page in EVG (Rust crates)
+
+Two Cargo crates, written in the Rust Ranger reads, so cargo and every
+Ranger target build them:
+
+| Crate | Role |
+| --- | --- |
+| `json/` (`rangerdom_json`) | `JsonParser` / `JsonValue`: the tree `__render()` gives, and `DomText` |
+| `view/` (`rangerdom_view`) | `DomView`: that tree as [EVG](https://github.com/terotests/evg) elements, laid out and drawn by EVG on any host (SDL, Kotlin, Go or Rust WASM, EVGBrowser); `DomMemo` keeps the elements and their layout from frame to frame, so a frame costs what changed |
+
+Both name the Ranger runtime as `../../runtime/rust/ranger` and the view
+names `../domjson`, so a project copies them into `<Ranger>/gallery/domjson`
+and `gallery/domview` (MFilesAPI's `scripts/ranger-deps.sh` does). Ranger
+reads EVG from `lib/evg`; cargo takes it from `runtime/rust/rangerevg`.
+
 ## Building and testing
 
 ```sh

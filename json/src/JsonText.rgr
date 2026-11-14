@@ -1,0 +1,17 @@
+; SPDX-License-Identifier: MIT
+;
+; The text the parser walks, in the target's own units (UTF-8 bytes in C++,
+; Go and Rust, UTF-16 units in JavaScript and Kotlin), without converting
+; the string: strings are copied in runs, so they pass through untouched.
+
+class JsonText {
+    sfn str_len:int (s:string) {
+        return (strlen s)
+    }
+    sfn char_at:int (s:string i:int) {
+        return (charAt s i)
+    }
+    sfn substr:string (s:string a:int b:int) {
+        return (substring s a b)
+    }
+}
