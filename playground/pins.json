@@ -2,11 +2,18 @@
   "ranger": {
     "git": "https://github.com/terotests/Ranger.git",
     "rev": "d3221f897d232451089fe10012777deb17c2fa1a",
-    "sparse": ["dist", "compiler", "lib"]
+    "sparse": [
+      "dist",
+      "compiler",
+      "lib",
+      "runtime"
+    ]
   },
   "evg": {
     "git": "https://github.com/terotests/evg.git",
     "rev": "a1255b292e7719aa15793743930d4acef7af3db3",
-    "sparse": ["storm"]
+    "sparse": [
+      "storm"
+    ]
   }
 }

@@ -29,6 +29,8 @@ jobs:
         with:
           node-version: 22
       - run: npm install
+      # the engine as WebAssembly (playground/wasm)
+      - run: rustup target add wasm32-wasip1
       # the libraries under test and esbuild (test subjects, not RangerDOM)
       - run: npm ci
         working-directory: bench

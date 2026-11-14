@@ -8,6 +8,7 @@
 //   node playground/build.mjs              # -> playground/dist/
 //   node playground/build.mjs --out site   # somewhere else (the Pages build)
 //   node playground/build.mjs --no-cases   # the engine and the page only
+//   node playground/build.mjs --no-wasm    # without rangerdom_pg.wasm
 //
 // The engine bundle (rangerdom_pg.js) is playground/src/Playground.rgr
 // compiled to JavaScript in a staged tree, because view/ and json/ reach EVG
@@ -15,6 +16,14 @@
 // are the commits playground/pins.json names, fetched into .deps/ (RANGER_DIR
 // and EVG_DIR name checkouts of your own instead: a Ranger tree, and an evg
 // tree whose storm/ is EVG). The cases are bench/build-cases.mjs's.
+//
+// rangerdom_pg.wasm, the engine the page uses by default, is playground/wasm
+// (the same engine written as a crate) built with cargo for wasm32-wasip1 in
+// the Ranger tree, where its crates' relative paths lead: lib/evg,
+// gallery/domview and gallery/domjson (view/, json/), gallery/cer (CEr) and
+// gallery/rangerdom_pg (playground/wasm with js/). Needs cargo and
+// `rustup target add wasm32-wasip1`; without them the page falls back to the
+// JavaScript engine.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -26,6 +35,7 @@ const argv = process.argv.slice(2);
 const outAt = argv.indexOf("--out");
 const OUT = outAt >= 0 ? path.resolve(argv[outAt + 1]) : path.join(HERE, "dist");
 const withCases = !argv.includes("--no-cases");
+const withWasm = !argv.includes("--no-wasm");
 const pins = JSON.parse(fs.readFileSync(path.join(HERE, "pins.json"), "utf8"));
 
 // <dir> at <rev> of <git>, only the <sparse> paths
@@ -136,6 +146,34 @@ fs.writeFileSync(path.join(OUT, "rangerdom_pg.js"),
 for (const f of fs.readdirSync(path.join(HERE, "web"))) fs.cpSync(path.join(HERE, "web", f), path.join(OUT, f), { recursive: true });
 for (const f of ["evg-webgl.js", "evg-measure.js"]) fs.copyFileSync(path.join(EVG, "gl", f), path.join(OUT, f));
 fs.writeFileSync(path.join(OUT, ".nojekyll"), "");
+
+if (withWasm) {
+  const G = path.join(RANGER, "gallery");
+  const place = (from, to) => {
+    fs.rmSync(path.join(RANGER, to), { recursive: true, force: true });
+    fs.cpSync(from, path.join(RANGER, to), { recursive: true, filter: (p) => !p.includes(`${path.sep}target`) });
+  };
+  place(EVG, "lib/evg");
+  place(path.join(ROOT, "view"), "gallery/domview");
+  place(path.join(ROOT, "json"), "gallery/domjson");
+  place(path.join(ROOT, "vendor", "ranger", "cer"), "gallery/cer");
+  fs.mkdirSync(path.join(G, "rangerdom_pg"), { recursive: true });
+  for (const f of ["Cargo.toml", "src"]) place(path.join(HERE, "wasm", f), `gallery/rangerdom_pg/${f}`);
+  place(path.join(ROOT, "js"), "gallery/rangerdom_pg/js");
+  console.log("==> rangerdom_pg.wasm (cargo, wasm32-wasip1)");
+  const crate = path.join(G, "rangerdom_pg");
+  try {
+    execFileSync("cargo", ["build", "--release", "--lib", "--target", "wasm32-wasip1"], {
+      cwd: crate, stdio: ["ignore", "inherit", "inherit"],
+      // deep pages lay out deep: the module's one stack is 32 MB
+      env: { ...process.env, RUSTFLAGS: "-C link-arg=-zstack-size=33554432" },
+    });
+    fs.copyFileSync(path.join(crate, "target", "wasm32-wasip1", "release", "rangerdom_pg.wasm"), path.join(OUT, "rangerdom_pg.wasm"));
+  } catch (e) {
+    console.error("rangerdom_pg.wasm was not built (cargo with the wasm32-wasip1 target?): the page will use rangerdom_pg.js");
+    if (process.env.CI) process.exit(1);
+  }
+}
 
 if (withCases) {
   execFileSync(process.execPath, [path.join(ROOT, "bench", "build-cases.mjs"), "--out", path.join(OUT, "cases")], { stdio: "inherit" });

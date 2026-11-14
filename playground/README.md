@@ -20,16 +20,18 @@ node bench/run.mjs                # headless: report + pictures in bench/out
 
 | File | Role |
 | --- | --- |
-| `src/Playground.rgr` | the engine: DomRealm + DomView + EVG layout + display list, compiled to `rangerdom_pg.js` |
+| `wasm/` | the engine as a crate (CEr + view/ + json/ + EVG), built to `rangerdom_pg.wasm`: what the page uses by default; `examples/case.rs` runs a built case natively (`cargo run --release --example case -- playground/dist/cases/<name>`, in the staged crate) |
+| `src/Playground.rgr` | the same engine in Ranger, compiled to `rangerdom_pg.js` (`?engine=js`, and the fallback without the WebAssembly build) |
 | `build.mjs` | fetches the Ranger compiler and EVG at the commits in `pins.json`, stages the tree view/ and json/ expect, compiles, copies the page and the cases |
 | `web/` | the page: `main.js` drives both sides and times them |
 | `pins.json` | the Ranger compiler and EVG commits |
 
 URL parameters: `?case=<name>`, `&auto=1` (run every step at once;
 `window.__pgResult` holds the result), `&size=W,H` (default 1200,800),
-`&budget=ms` (once a RangerDOM step took longer, the case's later steps run
+`&engine=wasm|js`, `&budget=ms` (once a RangerDOM step took longer, the case's later steps run
 in the browser only; default 5000, 0 for none).
 
-Timings: the RangerDOM side here is the JavaScript build of CEr, EVG and the
-view, so its numbers are those of an interpreter compiled to JavaScript, not
-of the native or WebAssembly builds.
+Timings: the WebAssembly engine is the cargo build of CEr, EVG and the view;
+`?engine=js` runs the JavaScript build (several times slower). The
+WebAssembly build measures text with EVG's own metrics, the JavaScript one
+with the browser's canvas.

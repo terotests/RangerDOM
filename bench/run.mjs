@@ -30,7 +30,7 @@ const SITE = path.resolve(opts.site);
 const OUT = path.resolve(opts.out);
 fs.mkdirSync(OUT, { recursive: true });
 
-const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".json": "application/json", ".png": "image/png", ".svg": "image/svg+xml", ".woff2": "font/woff2" };
+const types = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".json": "application/json", ".png": "image/png", ".svg": "image/svg+xml", ".woff2": "font/woff2", ".wasm": "application/wasm" };
 const server = http.createServer((req, res) => {
   const p = path.join(SITE, decodeURIComponent(new URL(req.url, "http://x").pathname));
   const file = fs.existsSync(p) && fs.statSync(p).isDirectory() ? path.join(p, "index.html") : p;

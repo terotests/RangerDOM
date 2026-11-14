@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT
 //
 // The playground page: a case (bench/cases) in this browser (an iframe) and
-// in RangerDOM (rangerdom_pg.js: the page's scripts in CEr with webapi.js,
-// its render tree laid out by EVG, the display list drawn by evg-webgl.js),
+// in RangerDOM (rangerdom_pg.wasm or rangerdom_pg.js: the page's scripts in
+// CEr with webapi.js, its render tree laid out by EVG, the display list
+// drawn by evg-webgl.js),
 // the same steps in both, timed.
 //
 //   ?case=<name>     open that case
 //   &auto=1          run its steps at once; window.__pgResult has the result
+//   &engine=wasm|js  RangerDOM as WebAssembly (default; cargo build of
+//                    playground/wasm) or as JavaScript (rangerdom_pg.js)
 //   &size=W,H        the page's viewport (default 1200,800)
 //   &budget=ms       once a step took longer than this in RangerDOM, the
 //                    case's later steps run in the browser only (default
@@ -14,6 +17,7 @@
 //                    is slow, and a 10 000-row step can exhaust the tab.
 import { renderDisplayList } from "./evg-webgl.js";
 import { installCanvasMeasurer } from "./evg-measure.js";
+import { loadWasmPlayground } from "./rangerdom-wasm.js";
 
 const params = new URLSearchParams(location.search);
 const [W, H] = (params.get("size") || "1200,800").split(",").map(Number);
@@ -24,7 +28,9 @@ const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
 const frame = () => new Promise((ok) => requestAnimationFrame(() => ok()));
 const fmt = (v) => (v === null || v === undefined || Number.isNaN(v) ? "–" : v < 10 ? v.toFixed(1) : Math.round(v).toString());
 
-const mod = globalThis.RangerDomPg;
+let mod = null; // rangerdom_pg.js, loaded only for the JavaScript engine
+let Engine = null; // the Playground class main() picks
+let engineName = "";
 const canvas = $("rd");
 const iframe = $("native");
 canvas.width = Math.round(W * DPR);
@@ -125,7 +131,7 @@ const rdProbe = () => { try { return JSON.parse(realmValue("JSON.stringify(windo
 async function rdLoad(name) {
   const base = new URL(`cases/${name}/`, location.href).href;
   const html = await (await fetch(base + "index.html")).text();
-  pg = new mod.Playground();
+  pg = new Engine();
   pg.reset();
   for (const src of [...html.matchAll(/<script src="([^"]+)"/g)].map((m) => m[1])) {
     pg.addScript(new URL(src, base).href, await (await fetch(base + src)).text());
@@ -312,7 +318,22 @@ $("all").onclick = () => everyCase();
   fit();
   if (!gl) setStatus("WebGL 2 is not available: the RangerDOM pane stays empty");
   await document.fonts.ready;
-  installCanvasMeasurer(mod);
+  if (params.get("engine") !== "js") {
+    try {
+      Engine = await loadWasmPlayground("rangerdom_pg.wasm");
+      engineName = "WebAssembly";
+    } catch (e) {
+      console.warn("no WebAssembly engine, using JavaScript:", e);
+    }
+  }
+  if (!Engine) {
+    await new Promise((ok, no) => { const sc = document.createElement("script"); sc.src = "rangerdom_pg.js"; sc.onload = ok; sc.onerror = () => no(new Error("no RangerDOM engine (rangerdom_pg.wasm or rangerdom_pg.js)")); document.head.appendChild(sc); });
+    mod = globalThis.RangerDomPg;
+    Engine = mod.Playground;
+    engineName = "JavaScript";
+    installCanvasMeasurer(mod);
+  }
+  $("engine").textContent = engineName;
   cases = await (await fetch("cases/index.json")).json();
   const nav = $("cases");
   for (const c of cases) {
