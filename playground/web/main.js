@@ -112,8 +112,14 @@ async function pump(done, ms) {
     // (what was drawn is shown before the page's next frame runs)
     if (due === 0 && !drew) await sleep(0); else await frame();
   }
-  for (let k = 0; k < 8; k++) {
-    pg.tick(0);
+  // (a page's animation frames run one per tick: the frames it has asked
+  // for are given their 17 ms each here, without the wait, and the page is
+  // drawn when none is due; what the layout then tells the page may ask
+  // for more)
+  for (let k = 0; k < 24; k++) {
+    pg.tick(k === 0 ? 0 : 17);
+    const due = pg.dueIn();
+    if (due >= 0 && due <= 17 && k < 20) continue;
     if (!pg.dirty()) break;
     draw();
   }
