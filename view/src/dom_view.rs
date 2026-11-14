@@ -5003,6 +5003,41 @@ impl DomView {
                 }
             }
         }
+        // a multi-column box (column-count, column-width or columns): EVG's
+        // multicol, its count, gap and width in px (0 / -1: auto)
+        let mcc: String = s.borrow().getText("column-count");
+        let mcw: String = s.borrow().getText("column-width");
+        let mcs: String = s.borrow().getText("columns");
+        if (!mcc.is_empty() && mcc != "auto") || (!mcw.is_empty() && mcw != "auto") || (!mcs.is_empty() && mcs != "auto" && mcs != "auto auto") {
+            let mut count: i64 = 0;
+            let mut cwid: f64 = -1.0;
+            let mut parts: Vec<String> = mcs.split(" ").map(|s| s.to_string()).collect::<Vec<String>>();
+            parts.push(mcc.clone());
+            parts.push(mcw.clone());
+            for p in parts.iter().cloned() {
+                if p.ends_with("px") {
+                    cwid = DomView::pxOf(&p);
+                }
+                if !p.is_empty() && !p.ends_with("px") && p != "auto" {
+                    let pc: Option<f64> = p.parse::<f64>().ok();
+                    if pc.is_some() {
+                        count = (pc.unwrap()).floor() as i64;
+                    }
+                }
+            }
+            let mut fsz: f64 = DomView::pxOf(&s.borrow().getText("font-size"));
+            if fsz == 0.0 {
+                fsz = 16.0;
+            }
+            let gv: String = s.borrow().getText("column-gap");
+            let mut gap: f64 = fsz;
+            if gv.ends_with("px") {
+                gap = DomView::pxOf(&gv);
+            }
+            if count > 1 || cwid > 0.0 {
+                EVGElement::set_attribute(e, "multicol", format!("{} {} {}", count, DomView::fmt(gap), DomView::fmt(cwid)));
+            }
+        }
         // (a box in a block's flow keeps its height: a block's children
         // overflow it, they do not shrink, CSS 2.1 10.6.3)
         let bgd: String = self.outerS.borrow().getText("display");
