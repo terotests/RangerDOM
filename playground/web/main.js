@@ -103,12 +103,14 @@ async function pump(done, ms) {
   const end = performance.now() + ms;
   for (;;) {
     tick();
-    if (pg.dirty()) draw();
+    const drew = pg.dirty();
+    if (drew) draw();
     drain();
     if (done()) break;
     if (performance.now() > end) { errors.push(`timed out after ${ms} ms`); break; }
     const due = pg.dueIn();
-    if (due === 0) await sleep(0); else await frame();
+    // (what was drawn is shown before the page's next frame runs)
+    if (due === 0 && !drew) await sleep(0); else await frame();
   }
   for (let k = 0; k < 8; k++) {
     pg.tick(0);
