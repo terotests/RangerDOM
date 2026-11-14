@@ -14,6 +14,8 @@ fn main() {
     let t = Instant::now();
     pg.start(&html, &format!("{}index.html", base), 1200.0, 800.0);
     println!("start {:?}", t.elapsed());
+    // PG_NOSYNC: sizes read after a change wait for the next frame's layout
+    if std::env::var("PG_NOSYNC").is_ok() { pg.value("__syncLayout(false)"); }
     let t = Instant::now();
     pg.run_scripts();
     println!("scripts {:?}", t.elapsed());
@@ -38,4 +40,7 @@ fn main() {
     let s = run(&mut pg, "__bench.start()");
     let n = s.matches("\",\"").count() + 1;
     for k in 0..n.min(steps) { run(&mut pg, &format!("__bench.run({})", k)); }
+    // PG_PAINT=file: the display list after the steps; PG_EVAL=js: its value
+    if let Ok(f) = std::env::var("PG_PAINT") { pg.render(); pg.layout(); std::fs::write(f, pg.paint()).unwrap(); }
+    if let Ok(e) = std::env::var("PG_EVAL") { println!("EVAL {}", pg.value(&e)); }
 }
