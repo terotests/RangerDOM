@@ -142,12 +142,30 @@ class RealmTest {
         this.check("errors: counted" ((r.summary()) == "scripts=1 failed=1 errors=1"))
     }
 
+    fn parser:void () {
+        def r:DomRealm (this.realm("<html><body><div id=c></div></body></html>"))
+        r.runScripts()
+        def got (r.eval("var t = document.createElement('template'); t.innerHTML = '<p><?lit$1$>a<!x>b</ y><!-->c</p>'; var o = []; for (var n = t.content.firstChild.firstChild; n; n = n.nextSibling) o.push(n.nodeType + ':' + (n.data || '')); o.join(',')"))
+        this.check("parser: bogus comments (<? <! </ ) and <!-->, as Lit's markers need" (got == "8:?lit$1$,3:a,8:x,3:b,8: y,8:,3:c"))
+    }
+
+    fn shadow:void () {
+        def r:DomRealm (this.realm("<html><body><div id=h><span id=s>light</span><i slot=n id=n>named</i></div></body></html>"))
+        r.runScripts()
+        def got (r.eval("var h = document.getElementById('h'); var sr = h.attachShadow({ mode: 'open' }); sr.innerHTML = '<style>:host{color:rgb(0,0,200)}::slotted(span){font-weight:700}</style><p id=p><slot name=n></slot>|<slot></slot></p><button id=b>x</button>'; var log = []; h.addEventListener('click', function (e) { log.push(e.target.id); }); sr.getElementById('b').click(); var p = sr.getElementById('p'); [getComputedStyle(p).color, getComputedStyle(document.getElementById('s')).fontWeight, sr.querySelector('slot:not([name])').assignedNodes().map(function (x) { return x.id; }).join(), p.isConnected, document.querySelector('#p') === null, log.join()].join(';')"))
+        this.check("shadow: :host, ::slotted, slots, isConnected, retargeted click" (got == "rgb(0, 0, 200);700;s;true;true;h"))
+        def snap (r.eval("__render()"))
+        this.check("shadow: the host renders its shadow tree, a slot what it takes" (((indexOf snap "\"x\":\"named\"") >= 0) && ((indexOf snap "\"x\":\"x\"") >= 0)))
+    }
+
     fn run:void () {
         this.plainDom()
         this.react()
         this.timers()
         this.form()
         this.errors()
+        this.parser()
+        this.shadow()
         print ("passed " + (to_string passes) + ", failed " + (to_string fails))
     }
 
