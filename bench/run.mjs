@@ -8,6 +8,7 @@
 //
 //   node bench/run.mjs [--site=playground/dist] [--only=a,b] [--out=bench/out]
 //                      [--budget=ms: the playground's ?budget]
+//                      [--query=k=v&k2=v2: more of its parameters, e.g. sync=0]
 //
 // Needs a built playground (node playground/build.mjs) and Playwright.
 import fs from "node:fs";
@@ -20,7 +21,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
 const opts = { site: path.join(ROOT, "playground", "dist"), only: "", out: path.join(HERE, "out"), budget: "" };
 for (const a of process.argv.slice(2)) {
-  const m = a.match(/^--(site|only|out|budget)=(.*)$/);
+  const m = a.match(/^--(site|only|out|budget|query)=(.*)$/);
   if (!m) throw new Error("unknown argument " + a);
   opts[m[1]] = m[2];
 }
@@ -50,7 +51,7 @@ for (const name of names) {
   const pageErrors = [];
   page.on("pageerror", (e) => pageErrors.push(String(e)));
   const t0 = Date.now();
-  await page.goto(`${base}?case=${encodeURIComponent(name)}&auto=1${opts.budget ? "&budget=" + opts.budget : ""}`);
+  await page.goto(`${base}?case=${encodeURIComponent(name)}&auto=1${opts.budget ? "&budget=" + opts.budget : ""}${opts.query ? "&" + opts.query : ""}`);
   let r;
   try {
     await page.waitForFunction(() => window.__pgResult, null, { timeout: 180000, polling: 250 });

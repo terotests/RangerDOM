@@ -11,6 +11,8 @@
 //   &engine=wasm|js  RangerDOM as WebAssembly (default; cargo build of
 //                    playground/wasm) or as JavaScript (rangerdom_pg.js)
 //   &size=W,H        the page's viewport (default 1200,800)
+//   &sync=0          sizes read after a change come from the last frame's
+//                    layout (default: laid out at once, as a browser does)
 //   &budget=ms       once a step took longer than this in RangerDOM, the
 //                    case's later steps run in the browser only (default
 //                    5000; 0 runs every step). The JavaScript build of CEr
@@ -39,7 +41,7 @@ canvas.style.width = W + "px";
 canvas.style.height = H + "px";
 iframe.style.width = W + "px";
 iframe.style.height = H + "px";
-const gl = canvas.getContext("webgl2", { antialias: true, premultipliedAlpha: false, stencil: true, preserveDrawingBuffer: true });
+const gl = canvas.getContext("webgl2", { antialias: true, premultipliedAlpha: true, stencil: true, preserveDrawingBuffer: true });
 
 // both panes scaled to the column
 function fit() {
@@ -140,6 +142,8 @@ async function rdLoad(name) {
   resetAcc();
   const t0 = performance.now();
   pg.start(html, base + "index.html", W, H);
+  // ?sync=0: a size read after a change waits for the next frame's layout
+  if (params.get("sync") === "0") pg.eval("__syncLayout(false)");
   pg.runScripts();
   clock = performance.now();
   draw();
@@ -167,6 +171,159 @@ async function nativeRun(call) {
   return { line, drawn, probe };
 }
 
+// ------------------------------------------------------------- the picture
+// What the browser drew and what RangerDOM drew, compared where it can be
+// told without a screenshot of the iframe (a page cannot take one):
+//   flat points: a grid over the viewport; where the browser has a plain
+//     background (no text, image, border, shadow, gradient or control
+//     within 3 px) its colour is the backgrounds there composited with
+//     their opacities, and the canvas pixel there has to be that colour.
+//     Catches translucent colours blended wrongly, missing or extra fills.
+//   text: each visible run of text in the browser has to leave some ink
+//     in the same rectangle of the canvas. Catches a body drawn blank.
+// The probe says what the page reports; this says what it shows.
+const PIC_GRID = 24; // px between flat points
+const PIC_TOL = 48; // |dr| + |dg| + |db|
+function rgbaOf(v) {
+  const m = /rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*([\d.]+%?))?\s*\)/.exec(v || "");
+  if (!m) return null;
+  let a = m[4] === undefined ? 1 : m[4].endsWith("%") ? parseFloat(m[4]) / 100 : +m[4];
+  return [+m[1], +m[2], +m[3], a];
+}
+const PLAIN_SKIP = /^(img|svg|canvas|video|iframe|input|select|textarea|button|option|progress|meter|object|embed|picture|path|use|image|hr)$/i;
+// the colour the browser shows at (x, y), or null when it is not a plain
+// background there: every box stacked at the point (elementsFromPoint, top
+// first), the same 3 px around (no edge of any of them near), their
+// background colours composited with their opacities over the white page
+function flatColor(w, x, y, opacityOf) {
+  const d = w.document;
+  const st = d.elementsFromPoint(x, y);
+  if (!st.length) return null;
+  for (const [dx, dy] of [[-3, 0], [3, 0], [0, -3], [0, 3]]) {
+    const o = d.elementsFromPoint(x + dx, y + dy);
+    if (o.length !== st.length || o.some((e, i) => e !== st[i])) return null;
+  }
+  const layers = [];
+  for (const e of st) {
+    if (PLAIN_SKIP.test(e.localName) || e.namespaceURI !== "http://www.w3.org/1999/xhtml" || e.shadowRoot) return null;
+    const cs = w.getComputedStyle(e);
+    if (cs.backgroundImage !== "none" || cs.boxShadow !== "none" || cs.filter !== "none" || (cs.backdropFilter && cs.backdropFilter !== "none") || cs.mixBlendMode !== "normal" || (cs.maskImage && cs.maskImage !== "none") || (cs.webkitMaskImage && cs.webkitMaskImage !== "none")) return null;
+    if (cs.outlineStyle !== "none" && parseFloat(cs.outlineWidth) > 0) return null;
+    const r = e.getBoundingClientRect();
+    const side = (k) => (cs["border" + k + "Style"] !== "none" ? parseFloat(cs["border" + k + "Width"]) || 0 : 0);
+    const bl = side("Left"), bt = side("Top"), br = side("Right"), bb = side("Bottom");
+    if ((bl && x < r.left + bl + 3) || (bt && y < r.top + bt + 3) || (br && x > r.right - br - 3) || (bb && y > r.bottom - bb - 3)) return null;
+    // over its scroll bar
+    if (cs.overflow !== "visible" && e.clientWidth && (x > r.left + e.clientLeft + e.clientWidth - 1 || y > r.top + e.clientTop + e.clientHeight - 1)) return null;
+    // text of its own near the point
+    for (const t of e.childNodes) {
+      if (t.nodeType !== 3 || !t.data.trim()) continue;
+      const range = d.createRange();
+      range.selectNodeContents(t);
+      for (const q of range.getClientRects()) if (x > q.left - 3 && x < q.right + 3 && y > q.top - 3 && y < q.bottom + 3) return null;
+    }
+    const c = rgbaOf(cs.backgroundColor), op = opacityOf(e);
+    if (c && c[3] > 0) layers.push([c, c[3] * op]);
+    if (c && c[3] >= 1 && op >= 1) break;
+  }
+  let col = [255, 255, 255];
+  for (let i = layers.length - 1; i >= 0; i--) {
+    const [c, a] = layers[i];
+    col = [0, 1, 2].map((k) => col[k] * (1 - a) + c[k] * a);
+  }
+  return col;
+}
+// the runs of text the browser shows, as rectangles in the viewport
+function textRuns(w, max) {
+  const d = w.document, out = [];
+  const walk = d.createTreeWalker(d.body || d.documentElement, 4);
+  for (let t = walk.nextNode(); t && out.length < max; t = walk.nextNode()) {
+    if (!t.data.trim()) continue;
+    const p = t.parentElement;
+    if (!p || /^(script|style|noscript|option|textarea|title)$/i.test(p.localName)) continue;
+    const cs = w.getComputedStyle(p);
+    if (cs.visibility !== "visible" || +cs.opacity < 0.3 || cs.color === "transparent" || (rgbaOf(cs.color) || [0, 0, 0, 1])[3] < 0.3) continue;
+    const range = d.createRange();
+    range.selectNodeContents(t);
+    for (const q of range.getClientRects()) {
+      if (q.width < 4 || q.height < 6 || q.left < 0 || q.top < 0 || q.right > W || q.bottom > H) continue;
+      if (d.elementFromPoint(q.left + q.width / 2, q.top + q.height / 2) !== p && !p.contains(d.elementFromPoint(q.left + q.width / 2, q.top + q.height / 2))) continue;
+      out.push([q.left, q.top, q.width, q.height]);
+      if (out.length >= max) break;
+    }
+  }
+  return out;
+}
+function pictureCheck() {
+  const w = iframe.contentWindow;
+  if (!gl || !w || !w.document || !w.document.body) return null;
+  const pw = canvas.width, ph = canvas.height;
+  const px = new Uint8Array(pw * ph * 4);
+  gl.readPixels(0, 0, pw, ph, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  // (premultiplied over the white page behind the canvas)
+  const at = (x, y) => {
+    const cx = Math.min(pw - 1, Math.max(0, Math.round(x * DPR))), cy = ph - 1 - Math.min(ph - 1, Math.max(0, Math.round(y * DPR)));
+    const i = (cy * pw + cx) * 4, a = px[i + 3] / 255;
+    return [px[i] + 255 * (1 - a), px[i + 1] + 255 * (1 - a), px[i + 2] + 255 * (1 - a)];
+  };
+  // (an element's opacity times its ancestors')
+  const ops = new Map();
+  const opacityOf = (e) => {
+    if (!e || e.nodeType !== 1) return 1;
+    let v = ops.get(e);
+    if (v === undefined) { v = (+w.getComputedStyle(e).opacity) * opacityOf(e.parentElement); ops.set(e, v); }
+    return v;
+  };
+  // boxes the pointer passes through are drawn all the same
+  const unhide = w.document.createElement("style");
+  unhide.textContent = "*, *::before, *::after { pointer-events: auto !important; }";
+  (w.document.head || w.document.documentElement).appendChild(unhide);
+  let points = 0, off = 0, worst = null;
+  for (let y = PIC_GRID / 2; y < H; y += PIC_GRID) {
+    for (let x = PIC_GRID / 2; x < W; x += PIC_GRID) {
+      let want;
+      try { want = flatColor(w, x, y, opacityOf); } catch (_) { want = null; }
+      if (!want) continue;
+      points++;
+      // the nearest of the point and 2 px around it: a letter a pixel or
+      // two away in RangerDOM is not a wrong background
+      let got = null, dist = Infinity;
+      for (const [dx, dy] of [[0, 0], [-2, 0], [2, 0], [0, -2], [0, 2]]) {
+        const c = at(x + dx, y + dy);
+        const dd = Math.abs(c[0] - want[0]) + Math.abs(c[1] - want[1]) + Math.abs(c[2] - want[2]);
+        if (dd < dist) { dist = dd; got = c; }
+      }
+      if (dist > PIC_TOL) { off++; if (!worst || dist > worst.dist) worst = { x, y, dist: Math.round(dist), browser: want.map(Math.round), rangerdom: got.map(Math.round) }; }
+    }
+  }
+  let runs = [];
+  try { runs = textRuns(w, 400); } catch (_) {}
+  let blank = 0, firstBlank = null;
+  for (const [x, y, rw, rh] of runs) {
+    // ink: a pixel that differs from the run's corner (its background)
+    const bg = at(x + 0.5, y + 0.5);
+    let ink = false;
+    for (let yy = y + 1; yy < y + rh - 1 && !ink; yy += 1 / DPR) {
+      for (let xx = x + 1; xx < x + rw - 1; xx += 1 / DPR) {
+        const c = at(xx, yy);
+        if (Math.abs(c[0] - bg[0]) + Math.abs(c[1] - bg[1]) + Math.abs(c[2] - bg[2]) > 90) { ink = true; break; }
+      }
+    }
+    if (!ink) { blank++; if (!firstBlank) firstBlank = [x, y, rw, rh].map(Math.round); }
+  }
+  unhide.remove();
+  // a few points or runs off is a font's edge or a frame of an animation
+  const ok = off <= Math.max(2, points * 0.03) && blank <= Math.max(1, runs.length * 0.05);
+  return { ok, points, off, worst, runs: runs.length, blank, firstBlank };
+}
+function pictureText(p) {
+  if (!p) return "";
+  let t = `picture: ${p.off}/${p.points} flat points differ, ${p.blank}/${p.runs} text runs blank in RangerDOM`;
+  if (p.worst) t += `\nworst point (${p.worst.x}, ${p.worst.y}): browser rgb(${p.worst.browser}), RangerDOM rgb(${p.worst.rangerdom})`;
+  if (p.firstBlank) t += `\nfirst blank run at (${p.firstBlank[0]}, ${p.firstBlank[1]}) ${p.firstBlank[2]}×${p.firstBlank[3]}`;
+  return t;
+}
+
 // ------------------------------------------------------------- a case
 let cases = [];
 let current = null;
@@ -174,7 +331,8 @@ let state = null; // { steps: [names], next, rows: [] }
 
 function row(r) {
   const tr = document.createElement("tr");
-  const same = JSON.stringify(r.nativeProbe) === JSON.stringify(r.rdProbe);
+  const sameProbe = JSON.stringify(r.nativeProbe) === JSON.stringify(r.rdProbe);
+  const same = sameProbe && (!r.picture || r.picture.ok);
   r.same = same;
   const cells = [r.name, fmt(r.native.js), fmt(r.native.drawn), fmt(r.rd.js), fmt(r.rd.render), fmt(r.rd.layout), fmt(r.rd.paint), fmt(r.rd.gl), fmt(r.rd.drawn)];
   for (const c of cells) { const td = document.createElement("td"); td.textContent = c; tr.appendChild(td); }
@@ -189,7 +347,8 @@ function row(r) {
   }
   td.className = same ? "ok" : "bad";
   td.textContent = same ? "yes" : "no";
-  if (!same) td.title = "browser: " + JSON.stringify(r.nativeProbe) + "\nRangerDOM: " + JSON.stringify(r.rdProbe);
+  td.title = (sameProbe ? "the pages report the same" : "browser: " + JSON.stringify(r.nativeProbe) + "\nRangerDOM: " + JSON.stringify(r.rdProbe)) + (r.picture ? "\n" + pictureText(r.picture) : "");
+  if (sameProbe && !same) td.textContent = "no (picture)";
   tr.appendChild(td);
   $("steps").tBodies[0].appendChild(tr);
 }
@@ -226,6 +385,7 @@ async function open(name) {
   const rdDrawn = performance.now() - t0;
   state = { steps: (native.line && native.line.steps) || (rdLine && rdLine.steps) || [], next: 0, rows: [] };
   const r = { name: "load + setup", native: { js: native.line && native.line.setup, drawn: nLoad + native.drawn }, rd: { js: rdLine && rdLine.setup, render: acc.render, layout: acc.layout, paint: acc.paint, gl: acc.gl, drawn: rLoad + rdDrawn }, nativeProbe: native.probe, rdProbe: rdProbe() };
+  r.picture = pictureCheck();
   state.rows.push(r);
   row(r);
   showErrors();
@@ -250,6 +410,7 @@ async function step() {
     const line = await rdRun(`__bench.run(${k})`, 20000);
     const drawn = performance.now() - t0;
     r = { name: state.steps[k], native: { js: native.line && native.line.total, drawn: native.drawn }, rd: { js: line && line.total, render: acc.render, layout: acc.layout, paint: acc.paint, gl: acc.gl, drawn }, nativeProbe: native.probe, rdProbe: rdProbe() };
+    r.picture = pictureCheck();
     if (BUDGET > 0 && drawn > BUDGET) state.over = true;
   }
   state.rows.push(r);
