@@ -1,0 +1,50 @@
+<nav class="navbar navbar-expand-lg bg-body-tertiary border-bottom">
+  <div class="container-fluid">
+    <a class="navbar-brand" href="#">Bench Co</a>
+    <ul class="navbar-nav me-auto">
+      <li class="nav-item"><a class="nav-link active" href="#">Home</a></li>
+      <li class="nav-item"><a class="nav-link" href="#">Reports</a></li>
+      <li class="nav-item dropdown">
+        <a id="dd" class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false">More</a>
+        <ul class="dropdown-menu"><li><a class="dropdown-item" href="#">Action</a></li><li><a class="dropdown-item" href="#">Another action</a></li><li><hr class="dropdown-divider"></li><li><a class="dropdown-item" href="#">Something else</a></li></ul>
+      </li>
+    </ul>
+    <form class="d-flex" role="search"><input class="form-control me-2" type="search" placeholder="Search"><button class="btn btn-outline-success" type="button">Search</button></form>
+  </div>
+</nav>
+<div class="container-fluid py-3">
+  <div class="row g-3">
+    <div class="col-3">
+      <div class="list-group">
+        <a href="#" class="list-group-item list-group-item-action active">Overview</a>
+        <a href="#" class="list-group-item list-group-item-action">Orders <span class="badge text-bg-primary rounded-pill float-end">14</span></a>
+        <a href="#" class="list-group-item list-group-item-action">Customers</a>
+        <a href="#" class="list-group-item list-group-item-action disabled">Archive</a>
+      </div>
+      <div class="accordion mt-3" id="acc">
+        <div class="accordion-item"><h2 class="accordion-header"><button id="acc1" class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#c1">Filters</button></h2>
+          <div id="c1" class="accordion-collapse collapse show" data-bs-parent="#acc"><div class="accordion-body"><div class="form-check"><input class="form-check-input" type="checkbox" id="f1" checked><label class="form-check-label" for="f1">Open</label></div><div class="form-check form-switch"><input class="form-check-input" type="checkbox" id="f2"><label class="form-check-label" for="f2">Mine only</label></div></div></div></div>
+        <div class="accordion-item"><h2 class="accordion-header"><button id="acc2" class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#c2">Saved views</button></h2>
+          <div id="c2" class="accordion-collapse collapse" data-bs-parent="#acc"><div class="accordion-body">No saved views yet.</div></div></div>
+      </div>
+    </div>
+    <div class="col-9">
+      <div class="row row-cols-3 g-3 mb-3" id="cards"></div>
+      <ul class="nav nav-tabs" role="tablist">
+        <li class="nav-item"><button id="tab1" class="nav-link active" data-bs-toggle="tab" data-bs-target="#p1" type="button">Table</button></li>
+        <li class="nav-item"><button id="tab2" class="nav-link" data-bs-toggle="tab" data-bs-target="#p2" type="button">Form</button></li>
+      </ul>
+      <div class="tab-content border border-top-0 p-2">
+        <div class="tab-pane fade show active" id="p1"><table class="table table-sm table-striped table-hover align-middle"><thead><tr><th>#</th><th>Customer</th><th>Status</th><th class="text-end">Total</th></tr></thead><tbody id="rows"></tbody></table>
+          <nav><ul class="pagination pagination-sm"><li class="page-item disabled"><a class="page-link">Previous</a></li><li class="page-item active"><a class="page-link" href="#">1</a></li><li class="page-item"><a class="page-link" href="#">2</a></li><li class="page-item"><a class="page-link" href="#">Next</a></li></ul></nav></div>
+        <div class="tab-pane fade" id="p2"><form id="form" class="row g-2 needs-validation" novalidate>
+          <div class="col-md-6"><label class="form-label" for="fn">First name</label><input class="form-control" id="fn" required></div>
+          <div class="col-md-6"><label class="form-label" for="em">Email</label><div class="input-group"><span class="input-group-text">@</span><input type="email" class="form-control" id="em" required><div class="invalid-feedback">Enter an email.</div></div></div>
+          <div class="col-md-4"><label class="form-label" for="st">State</label><select class="form-select" id="st" required><option value="">Choose...</option><option>Uusimaa</option></select></div>
+          <div class="col-12"><button class="btn btn-primary" type="button">Submit</button></div></form></div>
+      </div>
+      <button id="openModal" type="button" class="btn btn-secondary mt-2" data-bs-toggle="modal" data-bs-target="#m">Details</button>
+    </div>
+  </div>
+</div>
+<div class="modal fade" id="m" tabindex="-1"><div class="modal-dialog"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">Order details</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><p>Order #1042 for <strong>ACME</strong>.</p><div class="progress"><div class="progress-bar" style="width: 60%">60%</div></div></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button><button type="button" class="btn btn-primary">Save</button></div></div></div></div>
