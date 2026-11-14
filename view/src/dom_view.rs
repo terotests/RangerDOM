@@ -1534,6 +1534,19 @@ impl DomView {
         }
         b
     }
+    /// a run's line above and under its baseline (splitOf), with the
+    /// padding and border of a box around it (runOf's wrapper, an
+    /// inline-flex badge): those are above and under the run too
+    fn runSplit(el: &Rc<RefCell<EVGElement>>, t: &Rc<RefCell<EVGElement>>) -> Vec<f64> {
+        let own: Vec<f64> = DomView::splitOf(t);
+        if Rc::ptr_eq(t, el) {
+            return own;
+        }
+        let ebw: f64 = DomView::mPx(el.borrow().r#box.as_ref().unwrap().borrow().border_width.clone());
+        let ept: f64 = DomView::mPx(el.borrow().r#box.as_ref().unwrap().borrow().padding_top.clone());
+        let epb: f64 = DomView::mPx(el.borrow().r#box.as_ref().unwrap().borrow().padding_bottom.clone());
+        vec![own[0] + ept + ebw, own[1] + epb + ebw].clone()
+    }
     /// a text element on a line that reaches `above` over the baseline and
     /// `below` under it: margins make up the difference
     fn onStrut(el: &Rc<RefCell<EVGElement>>, above: f64, below: f64) {
@@ -1541,7 +1554,7 @@ impl DomView {
         if t.is_none() {
             return;
         }
-        let own: Vec<f64> = DomView::splitOf(&t.clone().unwrap());
+        let own: Vec<f64> = DomView::runSplit(el, &t.clone().unwrap());
         let up: f64 = above - own[0];
         let down: f64 = below - own[1];
         // (the strut's room is the line's: it collapses with no margin)
@@ -3071,6 +3084,9 @@ impl DomView {
         if face == "DejaVu Sans Mono" {
             return fs * 0.60205 + ws;
         }
+        if face == "Arial (browser)" {
+            return fs * 0.27783 + ws;
+        }
         fs * 0.2598 + ws
     }
     /// --- after layout -------------------------------------------------------------
@@ -3792,7 +3808,7 @@ impl DomView {
             if bfs <= 0.0 {
                 bfs = 16.0;
             }
-            let bface: String = DomView::faceOf(&o.borrow().getText("font-family"), &o.borrow().getText("font-weight"))[0].clone();
+            let bface: String = DomView::metricFace(&o);
             let basc: f64 = (bfs * DomView::ascentEm(&bface) + 0.5).floor();
             let mut rew: String = String::new();
             for es in tin.split(";").map(|s| s.to_string()).collect::<Vec<String>>().iter().cloned() {
@@ -4027,7 +4043,11 @@ impl DomView {
             }
             EVGElement::set_attribute(&e, &k, v.clone());
         }
-        let face: Vec<String> = DomView::faceOf(&inh.borrow().getText("font-family"), &inh.borrow().getText("font-weight"));
+        let mut face: Vec<String> = DomView::faceOf(&inh.borrow().getText("font-family"), &inh.borrow().getText("font-weight"));
+        // (the browser's Arial has no semibold face: 600 is drawn bold)
+        if face[0].clone() == "Arial-Semibold" && inh.borrow().getText("_fm") == "browser" {
+            face = vec!["Arial".to_string(), "bold".to_string()].clone();
+        }
         EVGElement::set_attribute(&e, "font-family", face[0].clone());
         // (the text-decoration lines that reach it; an underline through a
         // face of solid glyphs is left only under the spaces, skip-ink)
@@ -8703,9 +8723,13 @@ impl DomView {
                 } else {
                     tpl = format!("{}{}", tpl, cw);
                 }
+            } else if tw.ends_with("%") && DomView::pxOf(&tw) <= 0.0 && cw.ends_with("px") {
+                // (a percentage table: a column with a width in px keeps
+                // it, the others share the rest)
+                tpl = format!("{}{}", tpl, cw);
             } else if DomView::pxOf(&tw) <= 0.0 {
-                // (no width, or a percentage: the content's widths, the
-                // free room shared out by the grid)
+                // (no width: the content's widths, the free room shared
+                // out by the grid)
                 if cw.is_empty() {
                     tpl = format!("{}auto", tpl);
                 } else {
@@ -10498,7 +10522,7 @@ impl DomView {
         for it0 in line.iter().cloned() {
             let t0: Option<Rc<RefCell<EVGElement>>> = DomView::runOf(&it0);
             if t0.is_some() {
-                let sp: Vec<f64> = DomView::splitOf(&t0.clone().unwrap());
+                let sp: Vec<f64> = DomView::runSplit(&it0, &t0.clone().unwrap());
                 above = DomView::maxOf(above, sp[0]);
                 below = DomView::maxOf(below, sp[1]);
             }

@@ -6060,7 +6060,7 @@
     'text-align': 'start', 'white-space': 'normal', 'cursor': 'auto', 'pointer-events': 'auto', 'box-sizing': 'content-box',
     'transform': 'none', 'box-shadow': 'none', 'text-decoration-line': 'none', 'row-gap': 'normal', 'column-gap': 'normal',
     'letter-spacing': 'normal', 'text-transform': 'none', 'float': 'none', 'clear': 'none', 'transition-duration': '0s',
-    'animation-name': 'none', 'list-style-type': 'disc', 'vertical-align': 'baseline', 'outline-style': 'none', 'outline-width': '0px',
+    'animation-name': 'none', 'animation-duration': '0s', 'animation-delay': '0s', 'animation-timing-function': 'ease', 'animation-iteration-count': '1', 'animation-direction': 'normal', 'animation-fill-mode': 'none', 'animation-play-state': 'running', 'list-style-type': 'disc', 'vertical-align': 'baseline', 'outline-style': 'none', 'outline-width': '0px',
     'text-overflow': 'clip', 'word-break': 'normal', 'overflow-wrap': 'normal', 'grid-template-columns': 'none', 'grid-template-rows': 'none',
     'direction': 'ltr', 'object-fit': 'fill', 'user-select': 'auto', 'filter': 'none', 'backdrop-filter': 'none', 'content': 'normal',
     'fill': 'rgb(0, 0, 0)', 'stroke': 'none', 'inset': 'auto', 'stop-color': 'rgb(0, 0, 0)', 'stop-opacity': '1'
@@ -6621,8 +6621,11 @@
     var na = ra.match(NUM_RE) || [], nb = rb.match(NUM_RE) || [], k = 0, ci = 0;
     var out = sa.replace(/#/g, function () { var x = parseFloat(na[k]), y = parseFloat(nb[k++]); return String(+(x + (y - x) * t).toFixed(4)); });
     return out.replace(/\u0001/g, function () {
-      var x = colA[ci], y = colB[ci++], ch = [0, 1, 2].map(function (q) { return Math.round(Math.max(0, Math.min(255, x[q] + (y[q] - x[q]) * t))); });
-      var al = +Math.max(0, Math.min(1, x[3] + (y[3] - x[3]) * t)).toFixed(4);
+      // (premultiplied, CSS Color 4 12.3: transparent to red stays red
+      // as it fades in, not a dark red)
+      var x = colA[ci], y = colB[ci++];
+      var alr = Math.max(0, Math.min(1, x[3] + (y[3] - x[3]) * t)), al = +alr.toFixed(4);
+      var ch = [0, 1, 2].map(function (q) { var v = alr > 0 ? (x[q] * x[3] + (y[q] * y[3] - x[q] * x[3]) * t) / alr : x[q] + (y[q] - x[q]) * t; return Math.round(Math.max(0, Math.min(255, v))); });
       return al === 1 ? 'rgb(' + ch.join(', ') + ')' : 'rgba(' + ch.join(', ') + ', ' + al + ')';
     });
   }
@@ -7589,6 +7592,23 @@
     if (c['text-decoration'] && !c['text-decoration-line']) {
       var tdl = String(c['text-decoration']).split(/\s+/).filter(function (w) { return /^(underline|overline|line-through|blink)$/.test(w); });
       decl._set('text-decoration-line', tdl.length ? tdl.join(' ') : 'none', '');
+    }
+    // (the animation shorthand's longhands, which the cascade keeps
+    // under the shorthand's name)
+    if (c.animation && c.animation !== 'none') {
+      var al = animationList(c);
+      if (al.length) {
+        var aj = function (f) { return al.map(f).join(', '); };
+        var ms = function (v) { return (v / 1000) + 's'; };
+        decl._set('animation-name', aj(function (a) { return a.name; }), '');
+        decl._set('animation-duration', aj(function (a) { return ms(a.duration); }), '');
+        decl._set('animation-delay', aj(function (a) { return ms(a.delay); }), '');
+        decl._set('animation-timing-function', aj(function (a) { return a.timing; }), '');
+        decl._set('animation-iteration-count', aj(function (a) { return a.count === Infinity ? 'infinite' : String(a.count); }), '');
+        decl._set('animation-direction', aj(function (a) { return a.direction; }), '');
+        decl._set('animation-fill-mode', aj(function (a) { return a.fill; }), '');
+        decl._set('animation-play-state', aj(function (a) { return a.play; }), '');
+      }
     }
     var b = boxes[el.__id];
     if (b && el.isConnected && c.display !== 'none') {
