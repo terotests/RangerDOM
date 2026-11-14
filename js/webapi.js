@@ -4263,6 +4263,9 @@
       if (lt > i) text(decodeEntities(html.slice(i, lt)));
       i = lt;
       if (html.substr(i, 4) === '<!--') {
+        // (<!--> and <!---> close at once: an empty comment)
+        var abrupt = html.charAt(i + 4) === '>' ? 5 : html.substr(i + 4, 2) === '->' ? 6 : 0;
+        if (abrupt) { cur().appendChild(d.createComment('')); i += abrupt; continue; }
         var end = html.indexOf('-->', i + 4);
         if (end < 0) end = n;
         cur().appendChild(d.createComment(html.slice(i + 4, end)));
@@ -4283,8 +4286,18 @@
         continue;
       }
       if (html.charAt(i + 1) === '/') {
-        var m = /^<\/([a-zA-Z][^\s\/>]*)\s*>/.exec(html.slice(i, i + 200));
-        if (!m) { text('<'); i++; continue; }
+        var m = /^<\/([a-zA-Z][^\s\/>]*)[^>]*>/.exec(html.slice(i, i + 200));
+        if (!m) {
+          // </> is dropped; </ and anything but a letter is a bogus
+          // comment up to the next > (HTML tokenizer: end tag open state)
+          if (html.charAt(i + 2) === '>') { i += 3; continue; }
+          if (i + 2 >= n) { text('</'); i = n; continue; }
+          var eb = html.indexOf('>', i + 2);
+          if (eb < 0) eb = n;
+          if (!xml) cur().appendChild(d.createComment(html.slice(i + 2, eb)));
+          i = eb + 1;
+          continue;
+        }
         var name = m[1].toLowerCase();
         // (an XML prefix the page declared: the local name)
         if (xml && name.indexOf(':') > 0 && xmlPrefixes[name.split(':')[0]]) name = name.slice(name.indexOf(':') + 1);
@@ -4299,7 +4312,16 @@
       }
       var tm = /^<([a-zA-Z][^\s\/>]*)/.exec(html.slice(i, i + 200));
       if (!tm || html.charAt(i + 1) === '!' || html.charAt(i + 1) === '?') {
-        if (html.charAt(i + 1) === '!' || html.charAt(i + 1) === '?') { var e4 = html.indexOf('>', i); i = e4 < 0 ? n : e4 + 1; continue; }
+        if (html.charAt(i + 1) === '!' || html.charAt(i + 1) === '?') {
+          // a bogus comment (HTML tokenizer): <? keeps its ?, <! drops the
+          // !; Lit writes its child markers as <?lit$123$>. (XML: a
+          // processing instruction or declaration, skipped)
+          var e4 = html.indexOf('>', i);
+          if (e4 < 0) e4 = n;
+          if (!xml) cur().appendChild(d.createComment(html.slice(html.charAt(i + 1) === '?' ? i + 1 : i + 2, e4)));
+          i = e4 + 1;
+          continue;
+        }
         text('<'); i++; continue;
       }
       var tag = tm[1];

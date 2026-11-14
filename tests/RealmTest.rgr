@@ -142,12 +142,20 @@ class RealmTest {
         this.check("errors: counted" ((r.summary()) == "scripts=1 failed=1 errors=1"))
     }
 
+    fn parser:void () {
+        def r:DomRealm (this.realm("<html><body><div id=c></div></body></html>"))
+        r.runScripts()
+        def got (r.eval("var t = document.createElement('template'); t.innerHTML = '<p><?lit$1$>a<!x>b</ y><!-->c</p>'; var o = []; for (var n = t.content.firstChild.firstChild; n; n = n.nextSibling) o.push(n.nodeType + ':' + (n.data || '')); o.join(',')"))
+        this.check("parser: bogus comments (<? <! </ ) and <!-->, as Lit's markers need" (got == "8:?lit$1$,3:a,8:x,3:b,8: y,8:,3:c"))
+    }
+
     fn run:void () {
         this.plainDom()
         this.react()
         this.timers()
         this.form()
         this.errors()
+        this.parser()
         print ("passed " + (to_string passes) + ", failed " + (to_string fails))
     }
 
