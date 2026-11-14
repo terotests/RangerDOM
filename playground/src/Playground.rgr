@@ -1,0 +1,106 @@
+; SPDX-License-Identifier: MIT
+; ==============================================================================
+; Playground: one page in RangerDOM, laid out and drawn by EVG, for the
+; browser playground (playground/web). The page's scripts run in CEr with
+; webapi.js (DomRealm); its render tree (__render()) becomes EVG elements
+; (DomView, view/), EVG lays them out, the boxes go back to the page
+; (getBoundingClientRect, hit tests) and the display list comes out as JSON
+; for the WebGL painter (evg-webgl.js).
+;
+; playground/build.mjs compiles this in a staged tree (build/pg-stage):
+; src/ (RangerDOM's realm), gallery/domview and gallery/domjson (view/ and
+; json/), lib/evg (EVG at the commit playground/pins.json names). The paths
+; below are that tree's.
+; ==============================================================================
+
+Import "../../src/DomRealm.rgr"
+Import "../../gallery/domview/src/lib.rs"
+Import "../../lib/evg/EVGDisplayList.rgr"
+Import "../../lib/evg/EVGHostTextMeasurer.rgr"
+
+class Playground {
+    def realm:DomRealm (new DomRealm())
+    def w:double 800.0
+    def h:double 600.0
+    def pageJson:string ""
+    def lastGen:string ""
+    def root:EVGElement (EVGElement.createDiv())
+    def lay:EVGLayout (new EVGLayout)
+    def elements:int 0
+
+    ; a new page: scripts are added (addScript) before start
+    fn reset:void () {
+        realm = (new DomRealm())
+        pageJson = ""
+        lastGen = ""
+    }
+    fn addScript:void (url:string text:string) {
+        realm.addScript(url text)
+    }
+    fn addStyle:void (css:string url:string) {
+        realm.addStyle(css url)
+    }
+    fn start:void (html:string url:string width:double height:double) {
+        w = width
+        h = height
+        realm.start(html url width height)
+    }
+    fn runScripts:void () {
+        realm.runScripts()
+    }
+    ; has the page changed since the last render
+    fn dirty:boolean () {
+        def g:string (realm.eval("__generation()"))
+        return (g != lastGen)
+    }
+    ; the page's render tree (cascade and boxes in CEr) as JSON
+    fn render:string () {
+        lastGen = (realm.eval("__generation()"))
+        pageJson = (realm.eval("__render()"))
+        return pageJson
+    }
+    ; EVG lays the last render out; the boxes go back to the page
+    fn layout:string () {
+        def p:JsonParser (JsonParser.parse(pageJson))
+        def page:JsonValue (p.value())
+        root = (EVGElement.createDiv())
+        root.width = (EVGUnit.px(w))
+        root.height = (EVGUnit.px(h))
+        root.setAttribute("white-space" "nowrap")
+        root.setAttribute("font-family" "Arial")
+        def b:EVGElement (DomView.build(page 0 w h))
+        root.addChild(b)
+        lay = (new EVGLayout)
+        lay.setPageSize(w h)
+        lay.layout(root)
+        DomView.settle(b)
+        def boxes:string (DomView.boxes(b 0))
+        realm.layout(("{\"boxes\":" + boxes + "}"))
+        return boxes
+    }
+    ; the laid-out page as EVG's display list (JSON)
+    fn paint:string () {
+        def dl:EVGDisplayList (new EVGDisplayList)
+        dl.setTextEngine((lay.getTextEngine()))
+        dl.build(root)
+        return (dl.toJson())
+    }
+    fn input:string (json:string) {
+        return (realm.input(json))
+    }
+    fn tick:int (ms:double) {
+        return (realm.tick(ms))
+    }
+    fn dueIn:double () {
+        return (realm.dueIn())
+    }
+    fn eval:string (src:string) {
+        return (realm.eval(src))
+    }
+    fn messages:string () {
+        return (realm.messages())
+    }
+    fn summary:string () {
+        return (realm.summary())
+    }
+}

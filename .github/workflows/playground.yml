@@ -1,0 +1,64 @@
+# Builds the UI library playground (playground/, bench/) and publishes it on
+# GitHub Pages from main: each case in the browser and in RangerDOM (EVG,
+# WebGL), side by side. Repository settings -> Pages -> Source: "GitHub Actions".
+# On a pull request it builds and runs the headless comparison (bench/run.mjs)
+# and keeps the report as an artifact.
+name: playground
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: playground-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      # the engine as WebAssembly (playground/wasm)
+      - run: rustup target add wasm32-wasip1
+      # the libraries under test and esbuild (test subjects, not RangerDOM)
+      - run: npm ci
+        working-directory: bench
+      - name: Build the playground
+        run: node playground/build.mjs --out site
+      - name: Headless comparison
+        run: |
+          npm install --no-save playwright@1.49.1
+          npx playwright install --with-deps chromium
+          node bench/run.mjs --site=site --out=bench/out
+          cp bench/out/report.md bench/out/report.json site/
+        continue-on-error: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: playground-report
+          path: bench/out/
+        if: always()
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

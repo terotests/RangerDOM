@@ -1,0 +1,38 @@
+# The playground's engine as WebAssembly: RangerDOM's realm (CEr with
+# js/*.js), its view (view/, json/) and EVG, with the functions main.js calls
+# exported (src/lib.rs). playground/build.mjs places this crate in the pinned
+# Ranger tree as gallery/rangerdom_pg (beside gallery/domview, domjson and
+# cer), where these paths lead, and builds it for wasm32-unknown-unknown.
+[package]
+name = "rangerdom_pg"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+# shared-cell: EVG's Rust holds a cell while a call it makes changes the
+# same object, which std's RefCell refuses (runtime/rust/ranger/src/cell.rs)
+ranger = { path = "../../runtime/rust/ranger", features = ["shared-cell"] }
+rangerevg = { path = "../../runtime/rust/rangerevg" }
+rangerdom_json = { path = "../domjson" }
+rangerdom_view = { path = "../domview" }
+cer = { path = "../cer" }
+
+# CEr names Ranger's runtime by git; here it is the tree's own
+[patch."https://github.com/terotests/Ranger.git"]
+ranger = { path = "../../runtime/rust/ranger", features = ["shared-cell"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+overflow-checks = false
+debug = false
+
+[workspace]

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RangerDOM playground</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>RangerDOM playground</h1>
+  <p>Each UI library page runs twice: in this browser, and in RangerDOM (webapi.js on CEr, laid out by EVG, drawn with WebGL). Same page, same steps, timings and what each page reports side by side.</p>
+</header>
+<div id="app">
+  <nav id="cases" aria-label="Cases"></nav>
+  <main>
+    <section id="head">
+      <h2 id="title">Loading…</h2>
+      <p id="lib"></p>
+      <p id="about"></p>
+      <div class="bar">
+        <button id="run" disabled>Run all steps</button>
+        <button id="step" disabled>Next step</button>
+        <button id="reload" disabled>Reload</button>
+        <button id="all" disabled>Run every case</button>
+        <span id="status" role="status"></span>
+      </div>
+    </section>
+    <section id="panes">
+      <figure>
+        <figcaption>Browser <span class="sub">native DOM, CSS and painting</span></figcaption>
+        <div class="frame" id="nativeBox"><iframe id="native" title="The case in this browser"></iframe></div>
+      </figure>
+      <figure>
+        <figcaption>RangerDOM → EVG → WebGL <span class="sub"><span id="engine"></span> build; pointer works on the canvas</span></figcaption>
+        <div class="frame" id="rdBox"><canvas id="rd" aria-label="The case rendered by RangerDOM"></canvas></div>
+      </figure>
+    </section>
+    <section>
+      <table id="steps">
+        <thead>
+          <tr><th rowspan="2">Step</th><th colspan="2">Browser (ms)</th><th colspan="6">RangerDOM (ms)</th><th rowspan="2">Same result</th></tr>
+          <tr><th>script</th><th>until drawn</th><th>script</th><th>render</th><th>layout</th><th>display list</th><th>WebGL</th><th>until drawn</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p class="note">script: the step's own JavaScript until its promise settled (the page's performance.now()). RangerDOM render: webapi.js's cascade and render tree in CEr; layout: EVG's layout of that tree (and the boxes back to the page); display list: EVG's draw commands; WebGL: the painter. until drawn: from the step's start until the page stopped changing and was drawn. Same result: the case's probe (what the page shows, as JSON) is equal in both.</p>
+      <pre id="errors" hidden></pre>
+      <div id="summary" hidden></div>
+    </section>
+  </main>
+</div>
+<script type="module" src="main.js"></script>
+</body>
+</html>

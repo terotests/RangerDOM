@@ -91,3 +91,11 @@ node tools/gen-scripts.mjs   # after changing js/*.js
 MIT (`LICENSE`). CEr, which a program using this package compiles in, is
 AGPL-3.0-or-later; React in `tests/react/` is MIT (its licence files are
 beside it).
+
+## Playground
+
+`playground/` runs the UI library cases of `bench/` (shadcn/ui, PrimeReact,
+Shoelace, AG Grid, Bootstrap, js-framework-benchmark, ...) in the browser
+and in RangerDOM laid out by EVG and drawn with WebGL, side by side with
+timings; it is published on GitHub Pages from `main`. See
+[playground/README.md](playground/README.md).

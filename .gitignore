@@ -1,3 +1,7 @@
 node_modules/
 vendor/
 build/
+.deps/
+playground/dist/
+bench/node_modules
+bench/out/
