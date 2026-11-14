@@ -40,6 +40,18 @@ fn main() {
     let s = run(&mut pg, "__bench.start()");
     let n = s.matches("\",\"").count() + 1;
     for k in 0..n.min(steps) { run(&mut pg, &format!("__bench.run({})", k)); }
+    // PG_WHEEL=x,y,dy,n: n wheel turns of dy at (x, y), each followed by frames
+    if let Ok(w) = std::env::var("PG_WHEEL") {
+        let v: Vec<f64> = w.split(',').map(|s| s.parse().unwrap_or(0.0)).collect();
+        for _ in 0..(v[3] as usize) {
+            let t = Instant::now();
+            let mut acc = [0f64; 3];
+            pg.input(&format!("{{\"type\":\"wheel\",\"x\":{},\"y\":{},\"dx\":0,\"dy\":{}}}", v[0], v[1], v[2]));
+            let ti = t.elapsed().as_secs_f64() * 1e3;
+            for _ in 0..6 { pg.tick(16.0); if pg.dirty() { draw(&mut pg, &mut acc); } }
+            println!("wheel input {:.0} ms, total {:.0} ms render {:.0} layout {:.0} paint {:.0}", ti, t.elapsed().as_secs_f64() * 1e3, acc[0], acc[1], acc[2]);
+        }
+    }
     // PG_PAINT=file: the display list after the steps; PG_EVAL=js: its value
     if let Ok(f) = std::env::var("PG_PAINT") { pg.render(); pg.layout(); std::fs::write(f, pg.paint()).unwrap(); }
     if let Ok(e) = std::env::var("PG_EVAL") { println!("EVAL {}", pg.value(&e)); }
