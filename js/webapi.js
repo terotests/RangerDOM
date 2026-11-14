@@ -2010,11 +2010,17 @@
     get nodeType() { return 1; }
     // a script's scroll: a scroll event at the next frame, as a browser
     // sends it (TanStack Virtual's scrollToIndex waits for it)
+<<<<<<< HEAD
     // (a scrolled box's offset is clamped by a layout: read after its
     // content shrank, it is laid out first)
     get scrollTop() { if (this._scl) reflow(); return this._sTop; }
     set scrollTop(v) { v = Math.max(0, +v || 0); if (v === this._sTop) return; this._sTop = v; keptScroll(this); scriptScrolled(this); }
     get scrollLeft() { if (this._scl) reflow(); return this._sLeft; }
+=======
+    get scrollTop() { return this._sTop; }
+    set scrollTop(v) { v = Math.max(0, +v || 0); if (v === this._sTop) return; this._sTop = v; keptScroll(this); scriptScrolled(this); }
+    get scrollLeft() { return this._sLeft; }
+>>>>>>> origin/claude/project-thread-hsgmdp
     set scrollLeft(v) { v = +v || 0; if (v === this._sLeft) return; this._sLeft = v; keptScroll(this); scriptScrolled(this); }
     get nodeName() { return this.tagName; }
     get tagName() { return this.namespaceURI === HTML_NS ? this._qname.toUpperCase() : this._qname; }
@@ -8506,6 +8512,7 @@
   // calc() of % and px terms only, with numbers multiplying them, as one
   // value: `calc(50% - 30%*.5)` is 35% (the host reads one % and one px
   // term at most); anything else as it was
+<<<<<<< HEAD
   function insetFill(s) {
     var v = s['box-shadow'].trim(), m = /^inset\s+(.*)$/.exec(v) || /^(.*?)\s+inset$/.exec(v);
     if (!m || v.indexOf(',', v.lastIndexOf(')') + 1) >= 0) return;
@@ -8522,6 +8529,8 @@
     s['background-color'] = a >= 1 ? 'rgb(' + mix(0) + ', ' + mix(1) + ', ' + mix(2) + ')' : 'rgba(' + mix(0) + ', ' + mix(1) + ', ' + mix(2) + ', ' + (Math.round(a * 1000) / 1000) + ')';
     delete s['box-shadow'];
   }
+=======
+>>>>>>> origin/claude/project-thread-hsgmdp
   function flatCalc(v) {
     var m = /^calc\((.*)\)$/.exec(v);
     if (!m || /calc|var|\(/.test(m[1])) return v;
