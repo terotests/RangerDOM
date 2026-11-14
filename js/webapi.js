@@ -897,6 +897,27 @@
     }
   }
   var scrollQueue = [];
+  // the elements scrolled away from their start, for the layout to bring
+  // back into range when their content shrinks (a grid filtered from 2 000
+  // rows to 250 while scrolled to row 1 000: the browser clamps scrollTop
+  // to the new end and sends a scroll event, and the grid draws the rows
+  // there)
+  var scrollers = [];
+  function keptScroll(el) { if (!el._scl && (el._sTop || el._sLeft)) { el._scl = true; scrollers.push(el); } }
+  function clampScrolls() {
+    var keep = [];
+    for (var i = 0; i < scrollers.length; i++) {
+      var e = scrollers[i];
+      if (!e.isConnected || (!e._sTop && !e._sLeft)) { e._scl = false; continue; }
+      keep.push(e);
+      if (!boxes[e.__id] || e === (doc && doc.documentElement)) continue;
+      var mt = Math.max(0, sizeOf(e, 'sh') - sizeOf(e, 'ch')), ml = Math.max(0, sizeOf(e, 'sw') - sizeOf(e, 'cw')), moved = false;
+      if (e._sTop > mt) { e._sTop = mt; moved = true; }
+      if (e._sLeft > ml) { e._sLeft = ml; moved = true; }
+      if (moved) scriptScrolled(e);
+    }
+    scrollers = keep;
+  }
   function scriptScrolled(el) {
     if (el._sq) return;
     el._sq = true;
@@ -1990,9 +2011,9 @@
     // a script's scroll: a scroll event at the next frame, as a browser
     // sends it (TanStack Virtual's scrollToIndex waits for it)
     get scrollTop() { return this._sTop; }
-    set scrollTop(v) { v = +v || 0; if (v === this._sTop) return; this._sTop = v; scriptScrolled(this); }
+    set scrollTop(v) { v = Math.max(0, +v || 0); if (v === this._sTop) return; this._sTop = v; keptScroll(this); scriptScrolled(this); }
     get scrollLeft() { return this._sLeft; }
-    set scrollLeft(v) { v = +v || 0; if (v === this._sLeft) return; this._sLeft = v; scriptScrolled(this); }
+    set scrollLeft(v) { v = +v || 0; if (v === this._sLeft) return; this._sLeft = v; keptScroll(this); scriptScrolled(this); }
     get nodeName() { return this.tagName; }
     get tagName() { return this.namespaceURI === HTML_NS ? this._qname.toUpperCase() : this._qname; }
     get attributes() { return NamedNodeMap(this); }
@@ -7721,7 +7742,7 @@
         var v = cs[k];
         if (INHERITED[k] && parentStyle && parentStyle[k] === v) continue;
         if (!INHERITED[k] && INITIAL[k] === v) continue;
-        s[k] = v;
+        s[k] = typeof v === 'string' && v.charCodeAt(0) === 99 && v.slice(0, 5) === 'calc(' ? flatCalc(v) : v;
       }
       // (a border with no colour of its own is in the element's colour)
       if (cs.color) for (var sdi = 0; sdi < 4; sdi++) {
@@ -8458,6 +8479,52 @@
     if (!s['background-color'] && n.localName === 'dialog' && n._modal) s['background-color'] = 'rgba(0, 0, 0, 0.1)';
     return { i: n.__id + 'bd', t: 'div', s: s };
   }
+  // calc() of % and px terms only, with numbers multiplying them, as one
+  // value: `calc(50% - 30%*.5)` is 35% (the host reads one % and one px
+  // term at most); anything else as it was
+  function flatCalc(v) {
+    var m = /^calc\((.*)\)$/.exec(v);
+    if (!m || /calc|var|\(/.test(m[1])) return v;
+    var body = m[1].replace(/(-?[\d.]+)(%|px)\s*\*\s*(-?[\d.]+)(?![\w%])/g, function (_, a, u, b) { return (parseFloat(a) * parseFloat(b)) + u; })
+      .replace(/(-?[\d.]+)\s*\*\s*(-?[\d.]+)(%|px)/g, function (_, a, b, u) { return (parseFloat(a) * parseFloat(b)) + u; });
+    var re = /\s*([+-])?\s*(-?[\d.]+)(%|px)\s*/g, t, pc = 0, px = 0, at = 0, first = true;
+    while ((t = re.exec(body)) && t.index === at) {
+      if (!first && !t[1]) return v;
+      var n = parseFloat(t[2]) * (t[1] === '-' ? -1 : 1);
+      if (t[3] === '%') pc += n; else px += n;
+      at = re.lastIndex; first = false;
+    }
+    if (at !== body.length || first) return v;
+    var r = function (x) { return Math.round(x * 10000) / 10000; };
+    if (!px) return r(pc) + '%';
+    if (!pc) return r(px) + 'px';
+    return 'calc(' + r(pc) + '% ' + (px < 0 ? '- ' : '+ ') + r(Math.abs(px)) + 'px)';
+  }
+  // A BOX WITH AN SVG MASK OVER ITS BACKGROUND COLOUR IS THAT SVG IN THE
+  // COLOUR. The host draws no masks; an icon set made of `background-color:
+  // currentColor` pseudo-elements masked by SVG pictures (a data grid's sort
+  // and filter icons, a checkbox's tick) drew as squares of the colour.
+  // Every colour the SVG paints becomes the background colour (a mask takes
+  // only its alpha), and the box becomes that picture: an img of it, which
+  // the host draws scaled into the box. The SVG as a data: URL, '' when the
+  // mask is not one; s loses its background colour when it is.
+  function maskAsImage(s) {
+    var mi = s['mask-image'] || s['-webkit-mask-image'];
+    if (!mi || mi === 'none') return '';
+    // (encodeURIComponent leaves ( ) ' alone: a quoted url runs to its quote)
+    var m = /^url\(\s*(['"])(data:image\/svg\+xml[\s\S]*)\1\s*\)$/i.exec(mi.trim()) || /^url\(\s*()(data:image\/svg\+xml[^)]*)\)$/i.exec(mi.trim());
+    var bg = s['background-color'];
+    if (!m || !bg || bg === 'transparent' || bg === 'rgba(0, 0, 0, 0)') return '';
+    var uri = m[2], comma = uri.indexOf(','), svg;
+    if (comma < 0) return '';
+    try { svg = /;base64$/i.test(uri.slice(0, comma)) ? atob(uri.slice(comma + 1)) : decodeURIComponent(uri.slice(comma + 1)); } catch (e) { return ''; }
+    svg = svg.replace(/\b(fill|stroke|stop-color)\s*=\s*(["'])(?!none\2)[^"']*\2/gi, '$1="' + bg + '"')
+      .replace(/\b(fill|stroke|stop-color)\s*:\s*(?!none)[^;"'}]+/gi, '$1:' + bg);
+    var tag = /<svg\b[^>]*>/i.exec(svg);
+    if (tag && !/\sfill\s*=/i.test(tag[0])) svg = svg.replace(/<svg\b/i, '<svg fill="' + bg + '"');
+    delete s['background-color'];
+    return 'data:image/svg+xml,' + encodeURIComponent(svg);
+  }
   function pseudoBox(n, cs, pe) {
     var d = n.ownerDocument || doc;
     if (d !== doc) return null;
@@ -8501,9 +8568,11 @@
       var v = ps[k];
       if (INHERITED[k] && cs[k] === v) continue;
       if (!INHERITED[k] && INITIAL[k] === v) continue;
-      s[k] = v;
+      s[k] = typeof v === 'string' && v.slice(0, 5) === 'calc(' ? flatCalc(v) : v;
     }
     if (!s.display) s.display = 'inline';
+    var mask = text ? '' : maskAsImage(s);
+    if (mask) { o.t = 'img'; o.a = { src: mask }; }
     o.s = s;
     if (text) o.c = ps['white-space'] === 'pre-line' && text.indexOf('\n') >= 0 ? preLineParts(o.i + 't', text) : [{ i: o.i + 't', x: text }];
     return o;
@@ -10360,6 +10429,7 @@
         if (sv._usedBox !== (uw !== null ? uw : sb[2]) + ',' + (uh !== null ? uh : sb[3])) textChanged(sv);
       }
     }
+    if (m.boxes && scrollers.length) clampScrolls();
     if (sizeChanged) { mediaChanged(); invoke(G, new UIEvent('resize', { view: G }), 2); if (typeof G.onresize === 'function') G.onresize(new UIEvent('resize')); }
     if (resizeObservers.length) fireResize();
     if (intersectionObservers.length) fireIntersect();
