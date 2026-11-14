@@ -871,6 +871,27 @@
     }
   }
   var scrollQueue = [];
+  // the elements scrolled away from their start, for the layout to bring
+  // back into range when their content shrinks (a grid filtered from 2 000
+  // rows to 250 while scrolled to row 1 000: the browser clamps scrollTop
+  // to the new end and sends a scroll event, and the grid draws the rows
+  // there)
+  var scrollers = [];
+  function keptScroll(el) { if (!el._scl && (el._sTop || el._sLeft)) { el._scl = true; scrollers.push(el); } }
+  function clampScrolls() {
+    var keep = [];
+    for (var i = 0; i < scrollers.length; i++) {
+      var e = scrollers[i];
+      if (!e.isConnected || (!e._sTop && !e._sLeft)) { e._scl = false; continue; }
+      keep.push(e);
+      if (!boxes[e.__id] || e === (doc && doc.documentElement)) continue;
+      var mt = Math.max(0, sizeOf(e, 'sh') - sizeOf(e, 'ch')), ml = Math.max(0, sizeOf(e, 'sw') - sizeOf(e, 'cw')), moved = false;
+      if (e._sTop > mt) { e._sTop = mt; moved = true; }
+      if (e._sLeft > ml) { e._sLeft = ml; moved = true; }
+      if (moved) scriptScrolled(e);
+    }
+    scrollers = keep;
+  }
   function scriptScrolled(el) {
     if (el._sq) return;
     el._sq = true;
@@ -1963,9 +1984,9 @@
     // a script's scroll: a scroll event at the next frame, as a browser
     // sends it (TanStack Virtual's scrollToIndex waits for it)
     get scrollTop() { return this._sTop; }
-    set scrollTop(v) { v = +v || 0; if (v === this._sTop) return; this._sTop = v; scriptScrolled(this); }
+    set scrollTop(v) { v = Math.max(0, +v || 0); if (v === this._sTop) return; this._sTop = v; keptScroll(this); scriptScrolled(this); }
     get scrollLeft() { return this._sLeft; }
-    set scrollLeft(v) { v = +v || 0; if (v === this._sLeft) return; this._sLeft = v; scriptScrolled(this); }
+    set scrollLeft(v) { v = +v || 0; if (v === this._sLeft) return; this._sLeft = v; keptScroll(this); scriptScrolled(this); }
     get nodeName() { return this.tagName; }
     get tagName() { return this.namespaceURI === HTML_NS ? this._qname.toUpperCase() : this._qname; }
     get attributes() { return NamedNodeMap(this); }
@@ -5543,6 +5564,17 @@
     return out;
   }
   function parseRulesInto(text, rules, sheet) {
+    // (a long text is cut at its top-level rules first, each parsed on its
+    // own: the engine keeps one string's UTF-16 units for its regular
+    // expressions and characters, and every switch between a 75 000
+    // character theme and a declaration made them again)
+    if (text.length > 4096) {
+      var chunks = cssChunks(text);
+      if (chunks.length > 1) {
+        for (var ci = 0; ci < chunks.length; ci++) parseRulesInto(chunks[ci], rules, sheet);
+        return;
+      }
+    }
     var i = 0, n = text.length;
     while (i < n) {
       while (i < n && /\s/.test(text.charAt(i))) i++;
@@ -5554,6 +5586,15 @@
       var prelude = text.slice(i, j).trim();
       if (j >= n) break;
       if (text.charAt(j) === ';') { i = j + 1; continue; }
+      if (prelude.charAt(0) !== '@') {
+        // a style rule: its declarations and nested rules are split off
+        // in the same walk that finds the block's end
+        var decls = [];
+        var nested = [];
+        i = splitNestedIn(text, j + 1, decls, nested) + 1;
+        styleRuleInto(prelude, decls, nested, rules, sheet);
+        continue;
+      }
       var close = cssBlockEnd(text, j);
       if (close < 0) close = n;
       var body = text.slice(j + 1, close);
@@ -5587,14 +5628,15 @@
         }
         continue;
       }
+    }
+  }
+  function styleRuleInto(prelude, decls, nested, rules, sheet) {
+    {
       // nested rules (CSS nesting) are flattened: `&` is the parent
       // (white space to JavaScript that is not CSS's: a vertical tab is
       // invalid there and the others are name characters, so the
       // selector matches nothing)
-      if (/[\v\u00a0\u1680\u2000-\u200f\u2028\u2029\u202f\u205f\u3000\ufeff]/.test(prelude)) continue;
-      var decls = [];
-      var nested = [];
-      splitNested(body, decls, nested);
+      if (/[\v\u00a0\u1680\u2000-\u200f\u2028\u2029\u202f\u205f\u3000\ufeff]/.test(prelude)) return;
       var r = new CSSStyleRule(prelude, parseDeclarations(decls.join(';')));
       r.parentStyleSheet = sheet;
       rules.push(r);
@@ -5608,38 +5650,107 @@
       }
     }
   }
+  // t cut after each of its top-level blocks, in one walk that touches no
+  // other string (cssScan's rules for strings, escapes, url( and blocks)
+  function cssChunks(t) {
+    var out = [], re = /["'\\()\[\]{}]|url\(/gi, st = [], n = t.length, start = 0, m;
+    re.lastIndex = 0;
+    while ((m = re.exec(t))) {
+      var k = m.index, ch = m[0];
+      if (ch === '"' || ch === "'") {
+        var q = ch.charCodeAt(0);
+        k++;
+        while (k < n) { var cc = t.charCodeAt(k); if (cc === q || cc === 10) break; if (cc === 92) k++; k++; }
+        re.lastIndex = k + 1;
+        continue;
+      }
+      if (ch === '\\') { re.lastIndex = k + 2; continue; }
+      if (ch.length > 1) { re.lastIndex = cssUrlEnd(t, k); continue; }
+      if (ch === '(') st.push(')');
+      else if (ch === '[') st.push(']');
+      else if (ch === '{') st.push('}');
+      else if (st.length && ch === st[st.length - 1]) {
+        st.pop();
+        if (ch === '}' && st.length === 0) { out.push(t.slice(start, k + 1)); start = k + 1; }
+      }
+    }
+    if (start < n) out.push(t.slice(start));
+    return out;
+  }
+  // where the walk goes on after `url(` at k: past its `)` when it is an
+  // unquoted url (no quote after the white space, no name character
+  // before), else at its `(`
+  function cssUrlEnd(t, k) {
+    var n = t.length, u = k + 4;
+    while (u < n && (t.charCodeAt(u) === 32 || (t.charCodeAt(u) >= 9 && t.charCodeAt(u) <= 13))) u++;
+    var uc = u < n ? t.charCodeAt(u) : 34;
+    var pc = k > 0 ? t.charCodeAt(k - 1) : 32;
+    var named = (pc >= 48 && pc <= 57) || (pc >= 65 && pc <= 90) || (pc >= 97 && pc <= 122) || pc === 95 || pc === 45;
+    if (u >= k + 64 || uc === 34 || uc === 39 || named) return k + 3;
+    k += 4;
+    while (k < n && t.charCodeAt(k) !== 41) { if (t.charCodeAt(k) === 92) k++; k++; }
+    return k + 1;
+  }
   // where the first of `stops` is in t from i on, outside strings, escapes
   // and the blocks ( [ { (each closed only by its own closer; a closer
   // with no block open is a token like any other, CSS Syntax 5.4.7);
   // t.length if none is. A string ends at its quote or at a newline.
   function cssScan(t, i, stops) {
+    // (a regular expression finds the next character that matters, so the
+    // text between is not walked one character at a time: a theme's
+    // 75 000 characters of CSS took the walk 0.3 s in the engine)
+    if (!cssScanRes) cssScanRes = {};
+    var re = cssScanRes[stops];
+    if (!re) re = cssScanRes[stops] = new RegExp('["\'\\\\()\\[\\]{}' + stops.replace(/[\]\\^\-]/g, '\\$&') + ']|url\\(', 'gi');
     var n = t.length, st = [];
-    for (var k = i; k < n; k++) {
-      var ch = t.charAt(k);
+    re.lastIndex = i;
+    for (;;) {
+      var m = re.exec(t);
+      if (!m) return n;
+      var k = m.index, ch = m[0];
       if (ch === '"' || ch === "'") {
+        var q = ch.charCodeAt(0);
         k++;
-        while (k < n && t.charAt(k) !== ch && t.charAt(k) !== '\n') { if (t.charAt(k) === '\\') k++; k++; }
+        while (k < n) { var cc = t.charCodeAt(k); if (cc === q || cc === 10) break; if (cc === 92) k++; k++; }
+        re.lastIndex = k + 1;
         continue;
       }
-      if (ch === '\\') { k++; continue; }
+      if (ch === '\\') { re.lastIndex = k + 2; continue; }
       // (an unquoted url( ... ) is one token, brackets and all)
-      if ((ch === 'u' || ch === 'U') && /^url\(\s*[^\s"']/i.test(t.slice(k, k + 64)) && !/[\w-]/.test(t.charAt(k - 1))) {
-        k += 4;
-        while (k < n && t.charAt(k) !== ')') { if (t.charAt(k) === '\\') k++; k++; }
-        continue;
-      }
+      if (ch.length > 1) { re.lastIndex = cssUrlEnd(t, k); continue; }
       if (st.length === 0 && stops.indexOf(ch) >= 0) return k;
       if (ch === '(') st.push(')');
       else if (ch === '[') st.push(']');
       else if (ch === '{') st.push('}');
       else if (st.length && ch === st[st.length - 1]) st.pop();
     }
-    return n;
   }
+  var cssScanRes = null;
   // the closer of the block opened at t[i] (t.length when none)
   function cssBlockEnd(t, i) {
     var c = t.charAt(i) === '(' ? ')' : t.charAt(i) === '[' ? ']' : '}';
     return cssScan(t, i + 1, c);
+  }
+  // splitNested over t's block from `from` on: the index of the block's
+  // closing brace (t.length when it has none)
+  function splitNestedIn(t, from, decls, nested) {
+    var i = from, n = t.length, start = from;
+    function decl(seg) { if (!/^\s*@/.test(seg)) decls.push(seg); }
+    while (i < n) {
+      var k = cssScan(t, i, ';{}');
+      if (k >= n) break;
+      var c = t.charAt(k);
+      if (c === '}') { decl(t.slice(start, k)); return k; }
+      if (c === ';') { decl(t.slice(start, k)); start = i = k + 1; continue; }
+      var close = cssBlockEnd(t, k);
+      var pre = t.slice(start, k).trim();
+      // `--x: { ... }` is a value, not a rule
+      if (/^--[\w-]+\s*:/.test(pre)) { i = close + 1; continue; }
+      nested.push({ prelude: pre, body: t.slice(k + 1, close) });
+      i = close + 1; start = i;
+    }
+    if (start < n) decl(t.slice(start));
+    return n;
   }
   function splitNested(body, decls, nested) {
     var i = 0, n = body.length, start = 0;
@@ -5677,14 +5788,43 @@
       var r = sheet._rules[i];
       r.order = i;
       var k = r.sel.key;
-      if (k === '*') k = attrKey(r.sel.parts[0].c);
+      // (a subject that is only :is() or :where(), as a theme's
+      // `:where(.ag-row:not(.x))`, by the keys of what is inside: a grid's
+      // theme had 100 of them tried on every element)
+      var keys = k === '*' ? subjectKeys(r.sel.parts[0].c, 0) : null;
+      if (k === '*' && !keys) k = attrKey(r.sel.parts[0].c);
       var into = r.sel.pseudo ? (pidx[r.sel.pseudo] || (pidx[r.sel.pseudo] = {})) : idx;
-      (into[k] || (into[k] = [])).push(r);
+      if (keys) {
+        r._multi = keys.length > 1;
+        for (var ki = 0; ki < keys.length; ki++) (into[keys[ki]] || (into[keys[ki]] = [])).push(r);
+      } else {
+        (into[k] || (into[k] = [])).push(r);
+      }
       if (r.sel.pseudo === 'before' || r.sel.pseudo === 'after' || r.sel.pseudo === 'first-letter' || r.sel.pseudo === 'first-line') sheet._pseudo = true;
       if (r.sel.pseudo === 'backdrop') sheet._backdrop = true;
     }
     sheet._index = idx;
     sheet._pindex = pidx;
+  }
+  // the keys (#id, .class, tag) of a compound whose own are only in its
+  // :is() or :where(): one per selector of the list, null when one of them
+  // has none
+  function subjectKeys(c, depth) {
+    var k = keyOf(c);
+    if (k !== '*') return [k];
+    if (depth > 3) return null;
+    for (var i = 0; i < c.length; i++) {
+      var p = c[i];
+      if (p.t !== 'pseudo' || (p.n !== 'is' && p.n !== 'where') || !p.list || !p.list.length) continue;
+      var out = [], ok = true;
+      for (var j = 0; j < p.list.length && ok; j++) {
+        var sk = subjectKeys(p.list[j].parts[0].c, depth + 1);
+        if (!sk) ok = false;
+        else for (var q = 0; q < sk.length; q++) if (out.indexOf(sk[q]) < 0) out.push(sk[q]);
+      }
+      if (ok) return out;
+    }
+    return null;
   }
   // (a subject with no id, class or tag: by :root or by an attribute it
   // needs, so that Bootstrap's [data-bs-theme=dark] and [type=button] are
@@ -5886,10 +6026,20 @@
     return uaSheet;
   }
 
+  var candStamp = 0;
   function candidates(sheet, el, out, pe) {
     var idx = pe ? sheet._pindex && sheet._pindex[pe] : sheet._index;
     if (!idx) return;
-    function take(k) { var l = idx[k]; if (l) for (var i = 0; i < l.length; i++) out.push(l[i]); }
+    // (a rule under more than one key once)
+    var stamp = ++candStamp;
+    function take(k) {
+      var l = idx[k];
+      if (l) for (var i = 0; i < l.length; i++) {
+        var r = l[i];
+        if (r._multi) { if (r._cs === stamp) continue; r._cs = stamp; }
+        out.push(r);
+      }
+    }
     var id = attrOf(el, 'id');
     if (id) take('#' + id);
     var cls = attrOf(el, 'class');
@@ -7458,7 +7608,7 @@
         var v = cs[k];
         if (INHERITED[k] && parentStyle && parentStyle[k] === v) continue;
         if (!INHERITED[k] && INITIAL[k] === v) continue;
-        s[k] = v;
+        s[k] = typeof v === 'string' && v.charCodeAt(0) === 99 && v.slice(0, 5) === 'calc(' ? flatCalc(v) : v;
       }
       // (a border with no colour of its own is in the element's colour)
       if (cs.color) for (var sdi = 0; sdi < 4; sdi++) {
@@ -8195,6 +8345,52 @@
     if (!s['background-color'] && n.localName === 'dialog' && n._modal) s['background-color'] = 'rgba(0, 0, 0, 0.1)';
     return { i: n.__id + 'bd', t: 'div', s: s };
   }
+  // calc() of % and px terms only, with numbers multiplying them, as one
+  // value: `calc(50% - 30%*.5)` is 35% (the host reads one % and one px
+  // term at most); anything else as it was
+  function flatCalc(v) {
+    var m = /^calc\((.*)\)$/.exec(v);
+    if (!m || /calc|var|\(/.test(m[1])) return v;
+    var body = m[1].replace(/(-?[\d.]+)(%|px)\s*\*\s*(-?[\d.]+)(?![\w%])/g, function (_, a, u, b) { return (parseFloat(a) * parseFloat(b)) + u; })
+      .replace(/(-?[\d.]+)\s*\*\s*(-?[\d.]+)(%|px)/g, function (_, a, b, u) { return (parseFloat(a) * parseFloat(b)) + u; });
+    var re = /\s*([+-])?\s*(-?[\d.]+)(%|px)\s*/g, t, pc = 0, px = 0, at = 0, first = true;
+    while ((t = re.exec(body)) && t.index === at) {
+      if (!first && !t[1]) return v;
+      var n = parseFloat(t[2]) * (t[1] === '-' ? -1 : 1);
+      if (t[3] === '%') pc += n; else px += n;
+      at = re.lastIndex; first = false;
+    }
+    if (at !== body.length || first) return v;
+    var r = function (x) { return Math.round(x * 10000) / 10000; };
+    if (!px) return r(pc) + '%';
+    if (!pc) return r(px) + 'px';
+    return 'calc(' + r(pc) + '% ' + (px < 0 ? '- ' : '+ ') + r(Math.abs(px)) + 'px)';
+  }
+  // A BOX WITH AN SVG MASK OVER ITS BACKGROUND COLOUR IS THAT SVG IN THE
+  // COLOUR. The host draws no masks; an icon set made of `background-color:
+  // currentColor` pseudo-elements masked by SVG pictures (a data grid's sort
+  // and filter icons, a checkbox's tick) drew as squares of the colour.
+  // Every colour the SVG paints becomes the background colour (a mask takes
+  // only its alpha), and the box becomes that picture: an img of it, which
+  // the host draws scaled into the box. The SVG as a data: URL, '' when the
+  // mask is not one; s loses its background colour when it is.
+  function maskAsImage(s) {
+    var mi = s['mask-image'] || s['-webkit-mask-image'];
+    if (!mi || mi === 'none') return '';
+    // (encodeURIComponent leaves ( ) ' alone: a quoted url runs to its quote)
+    var m = /^url\(\s*(['"])(data:image\/svg\+xml[\s\S]*)\1\s*\)$/i.exec(mi.trim()) || /^url\(\s*()(data:image\/svg\+xml[^)]*)\)$/i.exec(mi.trim());
+    var bg = s['background-color'];
+    if (!m || !bg || bg === 'transparent' || bg === 'rgba(0, 0, 0, 0)') return '';
+    var uri = m[2], comma = uri.indexOf(','), svg;
+    if (comma < 0) return '';
+    try { svg = /;base64$/i.test(uri.slice(0, comma)) ? atob(uri.slice(comma + 1)) : decodeURIComponent(uri.slice(comma + 1)); } catch (e) { return ''; }
+    svg = svg.replace(/\b(fill|stroke|stop-color)\s*=\s*(["'])(?!none\2)[^"']*\2/gi, '$1="' + bg + '"')
+      .replace(/\b(fill|stroke|stop-color)\s*:\s*(?!none)[^;"'}]+/gi, '$1:' + bg);
+    var tag = /<svg\b[^>]*>/i.exec(svg);
+    if (tag && !/\sfill\s*=/i.test(tag[0])) svg = svg.replace(/<svg\b/i, '<svg fill="' + bg + '"');
+    delete s['background-color'];
+    return 'data:image/svg+xml,' + encodeURIComponent(svg);
+  }
   function pseudoBox(n, cs, pe) {
     var d = n.ownerDocument || doc;
     if (d !== doc) return null;
@@ -8238,9 +8434,11 @@
       var v = ps[k];
       if (INHERITED[k] && cs[k] === v) continue;
       if (!INHERITED[k] && INITIAL[k] === v) continue;
-      s[k] = v;
+      s[k] = typeof v === 'string' && v.slice(0, 5) === 'calc(' ? flatCalc(v) : v;
     }
     if (!s.display) s.display = 'inline';
+    var mask = text ? '' : maskAsImage(s);
+    if (mask) { o.t = 'img'; o.a = { src: mask }; }
     o.s = s;
     if (text) o.c = ps['white-space'] === 'pre-line' && text.indexOf('\n') >= 0 ? preLineParts(o.i + 't', text) : [{ i: o.i + 't', x: text }];
     return o;
@@ -10097,6 +10295,7 @@
         if (sv._usedBox !== (uw !== null ? uw : sb[2]) + ',' + (uh !== null ? uh : sb[3])) textChanged(sv);
       }
     }
+    if (m.boxes && scrollers.length) clampScrolls();
     if (sizeChanged) { mediaChanged(); invoke(G, new UIEvent('resize', { view: G }), 2); if (typeof G.onresize === 'function') G.onresize(new UIEvent('resize')); }
     if (resizeObservers.length) fireResize();
     if (intersectionObservers.length) fireIntersect();
