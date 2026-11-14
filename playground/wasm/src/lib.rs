@@ -133,21 +133,35 @@ impl Playground {
     }
     /// EVG lays the last render out; the boxes go back to the page
     pub fn layout(&mut self) -> String {
+        #[cfg(not(target_arch = "wasm32"))]
+        let timing = std::env::var("PG_TIMING").is_ok();
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut t0 = std::time::Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut lap = |what: &str| { if timing { eprintln!("  layout {} {:?}", what, t0.elapsed()); } t0 = std::time::Instant::now(); };
+        #[cfg(target_arch = "wasm32")]
+        let lap = |_: &str| {};
         let p = JsonParser::parse(self.page_json.clone());
         let page = p.borrow_mut().value();
+        lap("parse");
         let root = EVGElement::create_div();
         root.borrow_mut().width = Some(EVGUnit::px(self.w));
         root.borrow_mut().height = Some(EVGUnit::px(self.h));
         EVGElement::set_attribute(&root, "white-space", "nowrap".to_string());
         EVGElement::set_attribute(&root, "font-family", "Arial".to_string());
         let b = DomView::build(&page, 0, self.w, self.h);
+        lap("build");
         EVGElement::add_child(&root, b.clone());
         let lay = Rc::new(RefCell::new(EVGLayout::new()));
         EVGLayout::set_page_size(&lay, self.w, self.h);
         EVGLayout::layout(&lay, root.clone());
+        lap("evg");
         DomView::settle(&b);
+        lap("settle");
         let boxes = DomView::boxes(&b, 0);
+        lap("boxes");
         self.exec(&format!("__layout({})", quote(&format!("{{\"boxes\":{}}}", boxes))));
+        lap("realm __layout");
         self.root = Some(root);
         self.lay = Some(lay);
         boxes
