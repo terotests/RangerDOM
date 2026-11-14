@@ -120,6 +120,9 @@ async function pump(done, ms) {
   drain();
 }
 function realmValue(src) { return pg.eval(src); }
+// (for a console or a headless check: an expression evaluated in the page in RangerDOM)
+window.__rdEval = (src) => (pg ? pg.eval(src) : "");
+window.__rdPaint = () => (pg ? pg.paint() : "");
 async function rdRun(call, ms) {
   realmValue("window.__pgDone = ''; (" + call + ").then(function (r) { __pgDone = JSON.stringify(r) || 'null'; }, function (e) { __pgDone = JSON.stringify({ error: String(e) }); })");
   let out = "";

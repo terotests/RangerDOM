@@ -8085,6 +8085,11 @@ impl DomView {
         let mut late_self: bool = false;
         if (ppos == "absolute" || (ppos == "fixed" || (ppos == "relative" || ppos == "sticky"))) && !pz.starts_with("-") {
             EVGElement::set_attribute(&e, "paint-late", "true".to_string());
+            // (and among them by z-index, lowest first: a sticky header
+            // with z-index 2 stays over the rows scrolled under it)
+            if pz.parse::<i64>().ok().is_some() && pz != "0" {
+                EVGElement::set_attribute(&e, "paint-z", pz.clone());
+            }
             self.lateCount += 1;
             late_self = true;
         }
