@@ -45,9 +45,9 @@ class DomRealm {
         scriptTexts = t
         def e:[string]
         errors = e
-        ; CEr's register machine (the one its benchmarks measure; the
-        ; default is still the stack machine): about a fifth faster here
-        engine.vm.regs = true
+        ; CEr's register machine (engine.vm.regs) is not turned on here: it
+        ; fails in the JavaScript build of CEr. Rust hosts turn it on themselves
+        ; (playground/wasm, MFilesAPI's UIX host).
     }
 
     ; A string as a JavaScript string literal.
