@@ -45,6 +45,9 @@ class DomRealm {
         scriptTexts = t
         def e:[string]
         errors = e
+        ; CEr's register machine (the one its benchmarks measure; the
+        ; default is still the stack machine): about a fifth faster here
+        engine.vm.regs = true
     }
 
     ; A string as a JavaScript string literal.
