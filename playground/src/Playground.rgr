@@ -44,6 +44,8 @@ class Playground {
         w = width
         h = height
         realm.start(html url width height)
+        ; its text is drawn by the browser (evg-webgl): the browser's faces
+        realm.exec("__browserFonts(true)")
     }
     fn runScripts:void () {
         realm.runScripts()

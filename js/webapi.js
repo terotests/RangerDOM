@@ -1781,6 +1781,7 @@
     if (n === 'grid-template') return ['grid-template-rows', 'grid-template-columns', 'grid-template-areas'];
     if (n === 'grid') return ['grid-template-rows', 'grid-template-columns', 'grid-template-areas', 'grid-auto-flow', 'grid-auto-rows', 'grid-auto-columns'];
     if (n === 'outline') return ['outline-width', 'outline-style', 'outline-color'];
+    if (n === 'list-style') return ['list-style-type', 'list-style-position', 'list-style-image'];
     if (n === 'font') return ['font-style', 'font-variant', 'font-weight', 'font-size', 'line-height', 'font-family'];
     return null;
   }
@@ -1885,6 +1886,21 @@
     var logical = logicalLonghands(n, v);
     if (logical) return logical;
     var parts = shorthandParts(n);
+    // list-style: a position, an image and a type in any order; none is
+    // the image's, then the type's (CSS Lists 3)
+    if (n === 'list-style') {
+      var lt = splitValue(v), nones = 0;
+      var lo = { 'list-style-type': 'disc', 'list-style-position': 'outside', 'list-style-image': 'none' };
+      for (var li = 0; li < lt.length; li++) {
+        var lv = lt[li];
+        if (/^(inside|outside)$/i.test(lv)) lo['list-style-position'] = lv.toLowerCase();
+        else if (/^(url|image|linear-gradient|radial-gradient)\(/i.test(lv)) lo['list-style-image'] = lv;
+        else if (/^none$/i.test(lv)) nones++;
+        else lo['list-style-type'] = lv;
+      }
+      if (nones && (nones > 1 || lo['list-style-image'] !== 'none' || !lt.some(function (t) { return !/^(none|inside|outside)$/i.test(t) && !/\(/.test(t); }))) lo['list-style-type'] = 'none';
+      return lo;
+    }
     if (!parts) {
       if (n === 'background') {
         var bg = [], color = null, image = null, rep = [], pos = [], size = null, att = null;
@@ -6055,7 +6071,7 @@
     'html,address,blockquote,body,dd,div,dl,dt,fieldset,form,frame,frameset,h1,h2,h3,h4,h5,h6,noframes,ol,p,ul,center,dir,hr,menu,pre,article,aside,footer,header,hgroup,main,nav,section,search,figure,figcaption,details,summary,legend,dialog,optgroup{display:block}',
     'head,script,style,link,meta,title,template,noscript,datalist,param,base,[hidden]:not([hidden=until-found]),area,map{display:none}slot{display:contents}',
     'li{display:list-item}table{display:table;border-collapse:separate;border-spacing:2px;box-sizing:border-box}tr{display:table-row}thead{display:table-header-group}tbody{display:table-row-group}tfoot{display:table-footer-group}td,th{display:table-cell;padding:1px;vertical-align:inherit}thead,tbody,tfoot,tr{vertical-align:middle}th{font-weight:700;text-align:center}caption{display:table-caption;text-align:center}col{display:table-column}colgroup{display:table-column-group}',
-    'body{margin:8px}p,blockquote,figure,dl,pre{margin-top:1em;margin-bottom:1em}ul,ol,menu{margin-top:1em;margin-bottom:1em;padding-left:40px}ol{list-style-type:decimal}ul ul,ol ul,ul ol,ol ol{margin-top:0;margin-bottom:0}dd{margin-left:40px}blockquote,figure{margin-left:40px;margin-right:40px}',
+    'body{margin:8px}p,blockquote,figure,dl,pre{margin-top:1em;margin-bottom:1em}ul,ol,menu{margin-top:1em;margin-bottom:1em;padding-left:40px}ol{list-style-type:decimal}ul ul,ol ul,ul ol,ol ol{margin-top:0;margin-bottom:0}ul ul,ol ul,menu ul,ul menu{list-style-type:circle}ul ul ul,ul ol ul,ol ul ul,ol ol ul,ul ul menu{list-style-type:square}dd{margin-left:40px}blockquote,figure{margin-left:40px;margin-right:40px}',
     'h1{font-size:2em;margin-top:.67em;margin-bottom:.67em;font-weight:700}h2{font-size:1.5em;margin-top:.83em;margin-bottom:.83em;font-weight:700}h3{font-size:1.17em;margin-top:1em;margin-bottom:1em;font-weight:700}h4{margin-top:1.33em;margin-bottom:1.33em;font-weight:700}h5{font-size:.83em;margin-top:1.67em;margin-bottom:1.67em;font-weight:700}h6{font-size:.67em;margin-top:2.33em;margin-bottom:2.33em;font-weight:700}',
     'b,strong{font-weight:700}i,em,cite,var,dfn,address{font-style:italic}u,ins{text-decoration:underline}s,del,strike{text-decoration:line-through}small{font-size:smaller}sub{vertical-align:sub;font-size:smaller}sup{vertical-align:super;font-size:smaller}code,kbd,samp,pre,tt{font-family:monospace}pre{white-space:pre}',
     'a:any-link{color:rgb(0,0,238);text-decoration:underline;cursor:pointer}hr{border-top:1px inset rgb(128,128,128);margin-top:.5em;margin-bottom:.5em}',
@@ -8986,7 +9002,7 @@
       }
       if (tops.length) root = root.slice(-2) === ']}' ? root.slice(0, -2) + ',' + tops.join(',') + ']}' : root.slice(0, -1) + ',"c":[' + tops.join(',') + ']}';
     }
-    return '{"v":' + generation + ',"w":' + JSON.stringify(viewport.w) + ',"h":' + JSON.stringify(viewport.h) + ',"root":' + (root || 'null') + ',"title":' + JSON.stringify(doc.title) + (doc.compatMode === 'BackCompat' ? ',"quirks":true' : '') + '}';
+    return '{"v":' + generation + ',"w":' + JSON.stringify(viewport.w) + ',"h":' + JSON.stringify(viewport.h) + ',"root":' + (root || 'null') + ',"title":' + JSON.stringify(doc.title) + (doc.compatMode === 'BackCompat' ? ',"quirks":true' : '') + (browserFonts ? ',"fm":"browser"' : '') + '}';
   }
 
   // ---- input from the host -------------------------------------------------
@@ -10452,6 +10468,11 @@
     return 'ok';
   };
   G.__render = function () { var was = reflowing; reflowing = true; try { return render(); } finally { reflowing = was; } };
+  // the host draws text with the browser's own faces (the playground's
+  // canvas), so a line of Arial has Arial's height, not that of the Open
+  // Sans a native host draws for it
+  var browserFonts = false;
+  G.__browserFonts = function (on) { browserFonts = !!on; generation++; return String(browserFonts); };
   G.__syncLayout = function (on) { syncLayout = !!on && typeof __hostSync === 'function'; return String(syncLayout); };
   G.__generation = function () { return String(generation); };
   G.__layout = function (json) {

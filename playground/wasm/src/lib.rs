@@ -98,6 +98,8 @@ impl Playground {
         self.exec("__installDefaults()");
         // sizes read after a change are laid out at once (SyncLayout)
         self.exec("__syncLayout(true)");
+        // its text is drawn by the browser (evg-webgl): the browser's faces
+        self.exec("__browserFonts(true)");
     }
     /// the page's scripts in a browser's order, DOMContentLoaded and load
     pub fn run_scripts(&mut self) {
