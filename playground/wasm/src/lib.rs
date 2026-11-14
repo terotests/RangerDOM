@@ -41,6 +41,9 @@ fn quote(s: &str) -> String {
 pub struct Playground {
     engine: Engine,
     scripts: Vec<(String, String)>,
+    /// compiled scripts by URL (CEr's unit text, pg_compile): a script that
+    /// has one is read from it, not parsed and compiled
+    units: Vec<(String, String)>,
     pub errors: Vec<String>,
     w: f64,
     h: f64,
@@ -55,7 +58,7 @@ impl Playground {
         // (CEr's register machine: its default is still the stack machine)
         let mut engine = Engine::new();
         engine.vm.regs = true;
-        Playground { engine: engine, scripts: Vec::new(), errors: Vec::new(), w: 800.0, h: 600.0, page_json: String::new(), last_gen: String::new(), root: None, lay: None }
+        Playground { engine: engine, scripts: Vec::new(), units: Vec::new(), errors: Vec::new(), w: 800.0, h: 600.0, page_json: String::new(), last_gen: String::new(), root: None, lay: None }
     }
 
     fn note(&mut self) -> String {
@@ -70,6 +73,21 @@ impl Playground {
         self.engine.eval(src);
         self.note()
     }
+    /// `exec` of a script whose compiled unit may be known (by `key`: a
+    /// URL, or rangerdom:<file> for js/); a unit of another CEr or another
+    /// text does not read back, and the script is then compiled as usual
+    fn exec_keyed(&mut self, key: &str, src: &str) -> String {
+        let text = self.units.iter().find(|(k, _)| k == key).map(|(_, t)| t.clone())
+            .or_else(|| CORE_UNITS.with(|c| c.borrow().iter().find(|(k, _)| k == key).map(|(_, t)| t.clone())));
+        if let Some(t) = text {
+            let u = cer::unit::decode(&t, src);
+            if u.entry >= 0 {
+                self.engine.run(u);
+                return self.note();
+            }
+        }
+        self.exec(src)
+    }
     /// an expression's value as a string ("" on an error)
     pub fn value(&mut self, src: &str) -> String {
         let r = self.engine.eval(src);
@@ -79,12 +97,23 @@ impl Playground {
     pub fn add_script(&mut self, url: &str, text: &str) {
         self.scripts.push((url.to_string(), text.to_string()));
     }
+    pub fn add_unit(&mut self, url: &str, text: &str) {
+        if url.starts_with("rangerdom:") {
+            CORE_UNITS.with(|c| {
+                let mut c = c.borrow_mut();
+                c.retain(|(k, _)| k != url);
+                c.push((url.to_string(), text.to_string()));
+            });
+        } else {
+            self.units.push((url.to_string(), text.to_string()));
+        }
+    }
     pub fn start(&mut self, html: &str, url: &str, w: f64, h: f64) {
         self.w = w;
         self.h = h;
-        self.exec(PRELUDE);
-        self.exec(WEBAPI);
-        self.exec(HOST);
+        self.exec_keyed("rangerdom:prelude.js", PRELUDE);
+        self.exec_keyed("rangerdom:webapi.js", WEBAPI);
+        self.exec_keyed("rangerdom:host.js", HOST);
         self.exec(&format!("__page({}, {})", quote(html), quote(url)));
         self.exec(&format!("__layout({{viewport: [{}, {}]}})", w, h));
         self.exec("__installDefaults()");
@@ -97,15 +126,18 @@ impl Playground {
             let at = format!("__rdScripts[{}]", i);
             let id = self.value(&format!("{}.id", at));
             let has_src = !self.value(&format!("({}.src !== null) ? 'y' : ''", at)).is_empty();
+            let mut key = String::new();
             let src = if has_src {
                 let u = self.value(&format!("{}.url", at));
-                self.scripts.iter().find(|(su, _)| *su == u).map(|(_, t)| t.clone()).unwrap_or_default()
+                let t = self.scripts.iter().find(|(su, _)| *su == u).map(|(_, t)| t.clone()).unwrap_or_default();
+                key = u;
+                t
             } else {
                 self.value(&format!("{}.text", at))
             };
             if !src.is_empty() {
                 self.exec(&format!("__beginScript({})", id));
-                let err = self.exec(&src);
+                let err = if key.is_empty() { self.exec(&src) } else { self.exec_keyed(&key, &src) };
                 self.exec(&format!("__endScript({}, {})", id, if err.is_empty() { "true" } else { "false" }));
             }
         }
@@ -190,6 +222,8 @@ impl Default for Playground {
 thread_local! {
     static PG: std::cell::RefCell<Playground> = std::cell::RefCell::new(Playground::new());
     static OUT: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// the compiled js/ scripts (pg_add_unit with a rangerdom: key)
+    static CORE_UNITS: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn text(ptr: *mut u8, len: usize) -> String {
@@ -225,6 +259,30 @@ pub extern "C" fn pg_reset() {
 pub extern "C" fn pg_add_script(up: *mut u8, ul: usize, tp: *mut u8, tl: usize) {
     let (u, t) = (text(up, ul), text(tp, tl));
     PG.with(|p| p.borrow_mut().add_script(&u, &t));
+}
+/// a compiled script for the page about to start (url) or for one of js/
+/// (rangerdom:prelude.js, rangerdom:webapi.js, rangerdom:host.js; kept
+/// over pg_reset)
+#[no_mangle]
+pub extern "C" fn pg_add_unit(up: *mut u8, ul: usize, tp: *mut u8, tl: usize) {
+    let (u, t) = (text(up, ul), text(tp, tl));
+    PG.with(|p| p.borrow_mut().add_unit(&u, &t));
+}
+/// A script compiled, as text (CEr's unit, its code cache): "" when it
+/// does not compile or holds what the text cannot. `rangerdom:<file>`
+/// names one of js/. For the build (playground/build.mjs).
+#[no_mangle]
+pub extern "C" fn pg_compile(sp: *mut u8, sl: usize) -> usize {
+    let s = text(sp, sl);
+    let src: &str = match s.as_str() {
+        "rangerdom:prelude.js" => PRELUDE,
+        "rangerdom:webapi.js" => WEBAPI,
+        "rangerdom:host.js" => HOST,
+        _ => s.as_str(),
+    };
+    let mut e = Engine::new();
+    let u = e.compile(src);
+    answer(if e.error.is_empty() { cer::unit::encode(&u, src) } else { String::new() })
 }
 #[no_mangle]
 pub extern "C" fn pg_start(hp: *mut u8, hl: usize, up: *mut u8, ul: usize, w: f64, h: f64) {

@@ -135,6 +135,11 @@ async function rdLoad(name) {
   pg.reset();
   for (const src of [...html.matchAll(/<script src="([^"]+)"/g)].map((m) => m[1])) {
     pg.addScript(new URL(src, base).href, await (await fetch(base + src)).text());
+    if (pg.addUnit) {
+      // compiled by the build (CEr's code cache), as a browser keeps its own
+      const u = await fetch(base + src + ".unit").catch(() => null);
+      if (u && u.ok) pg.addUnit(new URL(src, base).href, await u.text());
+    }
   }
   errors = [];
   resetAcc();

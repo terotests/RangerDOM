@@ -83,7 +83,10 @@
     if (name === 'style') {
       // (an inline style names no selector's feature: only what el's
       // children take from it can change under it)
-      if (!(old && ownStyleOnly(old, computedOf(el), el))) eachElement(el, dropStyle);
+      // (and the same rules match them as before, unless a selector reads
+      // the style attribute: AG Grid sets a custom property on its
+      // viewport after the first layout, which matched 210 elements again)
+      if (!(old && ownStyleOnly(old, computedOf(el), el))) eachElement(el, featureIndex()['a:style'] ? dropStyle : dropComputed);
     } else if (!old || !sameBelow(el, old, computedOf(el))) eachElement(el, dropStyle);
     // :lang() and :dir() follow the attribute down the tree, a disabled
     // fieldset's :disabled its controls
@@ -103,7 +106,10 @@
     for (var p = el.parentNode; p && p.nodeType === 1; p = p.parentNode) if (p.localName === 'form' || p.localName === 'fieldset') attrChanged(p);
   }
   var VALIDATION_ATTRS = { required: 1, pattern: 1, min: 1, max: 1, step: 1, type: 1, multiple: 1, disabled: 1, readonly: 1, value: 1, checked: 1 };
-  function dropStyle(e) { delete computedCache.map[e.__id]; e._rj = null; }
+  function dropStyle(e) { delete computedCache.map[e.__id]; e._rj = null; e._hm = null; }
+  // e's computed style goes, the rules that matched it stay (cascade1's
+  // _hm): for a change that alters no selector's answer for e
+  function dropComputed(e) { delete computedCache.map[e.__id]; e._rj = null; }
   // e styled again; what is under it too unless e's style changed only in
   // what its children do not take from it
   function restyle(e) {
@@ -2063,7 +2069,10 @@
     }
     setAttributeNode(a) { this.setAttribute(a.name, a.value); return null; }
     _attrChanged(n, old, v) {
-      attrChanged(this, n, old, v);
+      // (the value it had: no selector or inline style changes, nothing is
+      // styled or drawn again. AG Grid sets the same style text on its
+      // root at every resize; each one restyled the whole grid)
+      if (old !== v) attrChanged(this, n, old, v);
       if (VALIDATION_ATTRS[n] && /^(input|select|textarea|button|option)$/.test(this.localName)) validityChanged(this.localName === 'option' ? this.parentNode : this);
       if (n === 'style' && !this._styleSync && this._style) {
         this._styleSync = true;
@@ -6218,11 +6227,15 @@
   function cascade1(el, pe) {
     var d = el.ownerDocument || doc;
     var esr = shadowCount ? shadowRootOf(el) : null;
-    var hits = [];
+    // the rules that match el (or its pseudo-element), kept with it until
+    // its style is dropped (dropStyle) or any sheet changes: an element
+    // styled again for what its parent hands down matches the same rules
+    var hm = el._hm, hmk = pe || '', kept = hm && hm.gen === styleGen ? hm.m[hmk] : undefined;
+    var hits = kept !== undefined ? kept.slice() : [];
     var svCtx = shadowCtx;
     shadowCtx = esr;
     var cand = [];
-    setCandidates(scopeRuleSet(d, esr), el, cand, pe);
+    if (kept === undefined) setCandidates(scopeRuleSet(d, esr), el, cand, pe);
     for (var i = 0; i < cand.length; i++) {
       var w = cand[i], r = w.r;
       if (pe ? r.sel.pseudo !== pe || !(pe === 'backdrop' ? w.sh._backdrop : w.sh._pseudo) : r.sel.pseudo) continue;
@@ -6235,7 +6248,11 @@
       hits.push(w);
     }
     shadowCtx = svCtx;
-    if (shadowCount && !pe) innerHits(el, pe, hits);
+    if (kept === undefined) {
+      if (shadowCount && !pe) innerHits(el, pe, hits);
+      if (!hm || hm.gen !== styleGen) hm = el._hm = { gen: styleGen, m: {} };
+      hm.m[hmk] = hits.slice();
+    }
     // (a pseudo-element no rule names: none, nothing built)
     if (pe && !hits.length) return null;
     // the same rules, inline style and presentational attributes give the

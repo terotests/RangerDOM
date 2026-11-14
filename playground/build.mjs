@@ -178,4 +178,55 @@ if (withWasm) {
 if (withCases) {
   execFileSync(process.execPath, [path.join(ROOT, "bench", "build-cases.mjs"), "--out", path.join(OUT, "cases")], { stdio: "inherit" });
 }
+// CEr's code cache: js/ and each case's script files compiled once here by
+// the module itself (pg_compile), so that a page reads the compiled unit and
+// does not parse and compile (rangerdom_pg.units.json, <script>.unit).
+const WASM = path.join(OUT, "rangerdom_pg.wasm");
+if (withWasm && fs.existsSync(WASM)) {
+  console.log("==> compiled units");
+  let memory = null;
+  const wasi = {
+    clock_time_get(_i, _p, out) { new DataView(memory.buffer).setBigUint64(out, BigInt(Date.now()) * 1000000n, true); return 0; },
+    random_get(ptr, len) { new Uint8Array(memory.buffer, ptr, len).fill(7); return 0; },
+    environ_sizes_get(c, z) { const v = new DataView(memory.buffer); v.setUint32(c, 0, true); v.setUint32(z, 0, true); return 0; },
+    environ_get() { return 0; },
+    fd_write(_fd, iovs, n, written) {
+      const v = new DataView(memory.buffer);
+      let total = 0;
+      for (let i = 0; i < n; i++) total += v.getUint32(iovs + i * 8 + 4, true);
+      v.setUint32(written, total, true);
+      return 0;
+    },
+    proc_exit(code) { throw new Error("rangerdom wasm exited (" + code + ")"); },
+  };
+  const { instance } = await WebAssembly.instantiate(fs.readFileSync(WASM), { wasi_snapshot_preview1: wasi });
+  const x = instance.exports;
+  memory = x.memory;
+  if (x._initialize) x._initialize();
+  const compile = (src) => {
+    const b = Buffer.from(src, "utf8");
+    const p = x.pg_alloc(b.length);
+    new Uint8Array(memory.buffer, p, b.length).set(b);
+    const n = x.pg_compile(p, b.length);
+    return n ? Buffer.from(new Uint8Array(memory.buffer, x.pg_out_ptr(), n)).toString("utf8") : "";
+  };
+  const core = {};
+  for (const f of ["prelude.js", "webapi.js", "host.js"]) core[`rangerdom:${f}`] = compile(`rangerdom:${f}`);
+  fs.writeFileSync(path.join(OUT, "rangerdom_pg.units.json"), JSON.stringify(core));
+  const casesDir = path.join(OUT, "cases");
+  let count = 0, bytes = 0;
+  if (fs.existsSync(casesDir)) {
+    for (const name of fs.readdirSync(casesDir)) {
+      const page = path.join(casesDir, name, "index.html");
+      if (!fs.existsSync(page)) continue;
+      for (const m of fs.readFileSync(page, "utf8").matchAll(/<script src="([^"]+)"/g)) {
+        const file = path.join(casesDir, name, m[1]);
+        if (!fs.existsSync(file)) continue;
+        const unit = compile(fs.readFileSync(file, "utf8"));
+        if (unit) { fs.writeFileSync(file + ".unit", unit); count++; bytes += unit.length; }
+      }
+    }
+  }
+  console.log(`${count} script units, ${(bytes / 1048576).toFixed(1)} MB`);
+}
 console.log(`Wrote ${path.relative(process.cwd(), OUT) || "."}`);

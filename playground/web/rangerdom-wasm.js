@@ -58,9 +58,24 @@ export async function loadWasmPlayground(url) {
   };
   const out = (n) => (n ? dec.decode(new Uint8Array(memory.buffer, x.pg_out_ptr(), n)) : "");
 
+  // the compiled js/ scripts (build.mjs writes them beside the module):
+  // without them, or with ?units=0, every page compiles webapi.js
+  const useUnits = new URLSearchParams(location.search).get("units") !== "0";
+  if (useUnits && x.pg_add_unit) {
+    try {
+      const r = await fetch(String(url).replace(/\.wasm$/, ".units.json"));
+      if (r.ok) {
+        const units = await r.json();
+        for (const k of Object.keys(units)) { const [a, b] = put(k), [c, d] = put(units[k]); x.pg_add_unit(a, b, c, d); }
+      }
+    } catch (_) {}
+  }
+
   class WasmPlayground {
     reset() { x.pg_reset(); }
     addScript(url, text) { const [a, b] = put(url), [c, d] = put(text); x.pg_add_script(a, b, c, d); }
+    // a script's compiled unit (cases/<name>/<script>.unit), when the build made one
+    addUnit(url, text) { if (!useUnits || !x.pg_add_unit) return; const [a, b] = put(url), [c, d] = put(text); x.pg_add_unit(a, b, c, d); }
     start(html, url, w, h) { const [a, b] = put(html), [c, d] = put(url); x.pg_start(a, b, c, d, w, h); }
     runScripts() { x.pg_run_scripts(); }
     dirty() { return x.pg_dirty() !== 0; }
