@@ -11,8 +11,10 @@ use std::rc::Rc;
 
 use cer::Engine;
 use ranger::cell::RefCell;
-use rangerdom_json::JsonParser;
-use rangerdom_view::DomView;
+use std::collections::HashMap;
+
+use rangerdom_json::{JsonParser, JsonValue};
+use rangerdom_view::{DomSvgDocs, DomView};
 use rangerevg::{EVGDisplayList, EVGElement, EVGLayout, EVGUnit};
 
 const PRELUDE: &str = include_str!("../js/prelude.js");
@@ -59,7 +61,7 @@ impl Playground {
         // (CEr's register machine: its default is still the stack machine)
         let mut engine = Engine::new();
         engine.vm.regs = true;
-        let synced = Rc::new(std::cell::RefCell::new(Synced { w: 800.0, h: 600.0, last: None, json: String::new(), boxes: String::new(), tree: None }));
+        let synced = Rc::new(std::cell::RefCell::new(Synced { w: 800.0, h: 600.0, last: None, json: String::new(), boxes: String::new(), tree: None, kept: Kept::new() }));
         engine.vm.set_host_sync(Box::new(SyncLayout { s: synced.clone() }));
         Playground { engine: engine, scripts: Vec::new(), units: Vec::new(), errors: Vec::new(), w: 800.0, h: 600.0, page_json: String::new(), last_gen: String::new(), root: None, lay: None, synced: synced }
     }
@@ -205,7 +207,7 @@ impl Playground {
 
 /// The render tree laid out by EVG: the boxes (JSON) for the page, and the
 /// tree and layout the display list is built from.
-fn lay_out(page_json: &str, w: f64, h: f64) -> (String, Rc<RefCell<EVGElement>>, Rc<RefCell<EVGLayout>>) {
+fn lay_out(page_json: &str, w: f64, h: f64, kept: &mut Kept) -> (String, Rc<RefCell<EVGElement>>, Rc<RefCell<EVGLayout>>) {
     #[cfg(not(target_arch = "wasm32"))]
     let timing = std::env::var("PG_TIMING").is_ok();
     #[cfg(not(target_arch = "wasm32"))]
@@ -222,7 +224,10 @@ fn lay_out(page_json: &str, w: f64, h: f64) -> (String, Rc<RefCell<EVGElement>>,
     root.borrow_mut().height = Some(EVGUnit::px(h));
     EVGElement::set_attribute(&root, "white-space", "nowrap".to_string());
     EVGElement::set_attribute(&root, "font-family", "Arial".to_string());
-    let b = DomView::build(&page, 0, w, h);
+    kept.share(&page);
+    lap("share");
+    kept.svgs.borrow_mut().frame();
+    let b = DomView::buildKept(&page, 0, w, h, Rc::clone(&kept.svgs));
     lap("build");
     EVGElement::add_child(&root, b.clone());
     let lay = Rc::new(RefCell::new(EVGLayout::new()));
@@ -233,7 +238,236 @@ fn lay_out(page_json: &str, w: f64, h: f64) -> (String, Rc<RefCell<EVGElement>>,
     lap("settle");
     let boxes = DomView::boxes(&b, 0);
     lap("boxes");
+    // PG_RETAINCHECK: the same page built with nothing kept gives the same
+    // boxes and the same display list, or the difference is printed
+    #[cfg(not(target_arch = "wasm32"))]
+    if std::env::var("PG_RETAINCHECK").is_ok() {
+        let list = |root: &Rc<RefCell<EVGElement>>, lay: &Rc<RefCell<EVGLayout>>| {
+            let dl = Rc::new(RefCell::new(EVGDisplayList::new()));
+            EVGDisplayList::set_text_engine(&dl, EVGLayout::get_text_engine(lay));
+            EVGDisplayList::build(&dl, root.clone());
+            EVGDisplayList::to_json(&dl)
+        };
+        let fresh_page = JsonParser::parse(page_json.to_string()).borrow_mut().value();
+        let froot = EVGElement::create_div();
+        froot.borrow_mut().width = Some(EVGUnit::px(w));
+        froot.borrow_mut().height = Some(EVGUnit::px(h));
+        EVGElement::set_attribute(&froot, "white-space", "nowrap".to_string());
+        EVGElement::set_attribute(&froot, "font-family", "Arial".to_string());
+        let fb = DomView::build(&fresh_page, 0, w, h);
+        EVGElement::add_child(&froot, fb.clone());
+        let flay = Rc::new(RefCell::new(EVGLayout::new()));
+        EVGLayout::set_page_size(&flay, w, h);
+        EVGLayout::layout(&flay, froot.clone());
+        DomView::settle(&fb);
+        let fboxes = DomView::boxes(&fb, 0);
+        let (kl, fl) = (list(&root, &lay), list(&froot, &flay));
+        let first = |a: &str, b: &str| {
+            let (x, y) = (a.as_bytes(), b.as_bytes());
+            let mut i = 0;
+            while i < x.len() && i < y.len() && x[i] == y[i] { i += 1; }
+            let from = i.saturating_sub(120);
+            format!("at {}: kept ...{} | fresh ...{}", i, String::from_utf8_lossy(&x[from..(i + 120).min(x.len())]), String::from_utf8_lossy(&y[from..(i + 120).min(y.len())]))
+        };
+        // (PG_TREE=<element id>: that element's subtree in both trees)
+        if boxes != fboxes && std::env::var("PG_TREE").is_ok() {
+            fn find(el: &Rc<RefCell<EVGElement>>, id: &str) -> Option<Rc<RefCell<EVGElement>>> {
+                if el.borrow().id == id { return Some(el.clone()); }
+                let ks = el.borrow().children.clone();
+                for k in ks.iter() { if let Some(f) = find(k, id) { return Some(f); } }
+                None
+            }
+            fn dump(el: &Rc<RefCell<EVGElement>>, d: usize, o: &mut String) {
+                let e = el.borrow();
+                let u = |x: &Option<Rc<RefCell<EVGUnit>>>| match x { Some(v) => format!("{}/{}/{}", v.borrow().value, v.borrow().is_set, v.borrow().unit_type), None => "-".to_string() };
+                let bx = e.r#box.clone().unwrap();
+                o.push_str(&format!("{}{} .{} d={} pos={} x={} y={} w={} h={} ml={} mr={} width={} height={} left={} right={} abs={}\n", " ".repeat(d * 2), e.id, e.class_name, e.display, e.position, e.calculated_x, e.calculated_y, e.calculated_width, e.calculated_height, bx.borrow().margin_left_px, bx.borrow().margin_right_px, u(&e.width), u(&e.height), u(&e.left), u(&e.right), e.is_absolute));
+                let ks = e.children.clone();
+                drop(e);
+                for k in ks.iter() { dump(k, d + 1, o); }
+            }
+            let id = std::env::var("PG_TREE").unwrap();
+            let (mut a, mut b2) = (String::new(), String::new());
+            if let Some(x) = find(&root, &id) { dump(&x, 0, &mut a); }
+            if let Some(x) = find(&froot, &id) { dump(&x, 0, &mut b2); }
+            eprintln!("KEPT TREE\n{}FRESH TREE\n{}", a, b2);
+        }
+        if boxes != fboxes { eprintln!("RETAIN boxes differ {}", first(&boxes, &fboxes)); }
+        else if kl != fl { eprintln!("RETAIN list differs {}", first(&kl, &fl)); }
+        else { eprintln!("RETAIN same"); }
+    }
     (boxes, root, lay)
+}
+
+/// What one layout keeps for the next: the page's nodes by their ids with a
+/// hash of what each holds, and the elements built from them (DomView's
+/// memo). The next render tree gets the last one's node wherever a node
+/// holds the same, and DomView then takes the element it built for that
+/// node instead of building it again: a scroll that brings three rows into
+/// a grid builds those rows, not the page.
+struct Kept {
+    svgs: Rc<RefCell<DomSvgDocs>>,
+    nodes: HashMap<String, (u64, Rc<RefCell<JsonValue>>)>,
+    styles: HashMap<String, (u64, Rc<RefCell<JsonValue>>)>,
+    /// the nodes of this page with an id, and how many of them are the
+    /// last page's
+    seen: usize,
+    same: usize,
+    off: bool,
+}
+
+fn mix(h: u64, v: u64) -> u64 {
+    (h ^ v).wrapping_mul(0x100000001b3).rotate_left(23) ^ 0x9e3779b97f4a7c15
+}
+
+fn hash_str(mut h: u64, s: &str) -> u64 {
+    for b in s.as_bytes() {
+        h = (h ^ (*b as u64)).wrapping_mul(0x100000001b3);
+    }
+    mix(h, s.len() as u64)
+}
+
+/// a value's hash: its kind, text and members in order
+fn hash_value(n: &Rc<RefCell<JsonValue>>) -> u64 {
+    let v = n.borrow();
+    let mut h: u64 = mix(0xcbf29ce484222325, v.kind as u64);
+    match v.kind {
+        1 => h = mix(h, v.b as u64),
+        2 => h = hash_str(h, &v.numText),
+        3 => h = hash_str(h, &v.str),
+        4 | 5 => {
+            for (i, it) in v.items.iter().enumerate() {
+                if v.kind == 5 {
+                    h = hash_str(h, &v.keys[i]);
+                }
+                h = mix(h, hash_value(it));
+            }
+        }
+        _ => {}
+    }
+    h
+}
+
+impl Kept {
+    fn new() -> Kept {
+        let svgs = Rc::new(RefCell::new(DomSvgDocs::new()));
+        svgs.borrow().memo.borrow_mut().on = true;
+        // (the kept elements are laid out again: with their layouts kept too
+        // AG Grid's header row and a stretched pane came out where they
+        // were before a scroll or a resize; PG_KEEPLAYOUT to see it)
+        svgs.borrow().memo.borrow_mut().keepLayout = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::env::var("PG_KEEPLAYOUT").is_ok() { svgs.borrow().memo.borrow_mut().keepLayout = true; }
+        #[cfg(not(target_arch = "wasm32"))]
+        let off = std::env::var("PG_NORETAIN").is_ok();
+        #[cfg(target_arch = "wasm32")]
+        let off = false;
+        Kept { svgs: svgs, nodes: HashMap::new(), styles: HashMap::new(), seen: 0, same: 0, off: off }
+    }
+    /// the page with the last page's nodes where they hold the same
+    fn share(&mut self, page: &Rc<RefCell<JsonValue>>) {
+        let mut nodes = HashMap::new();
+        let mut styles = HashMap::new();
+        self.seen = 0;
+        self.same = 0;
+        let root = page.borrow().get("root");
+        if root.borrow().kind == 5 {
+            let (shared, _) = self.node(&root, &mut nodes, &mut styles);
+            page.borrow_mut().put("root", shared);
+        }
+        self.nodes = nodes;
+        self.styles = styles;
+        // (elements are kept for a page that is mostly the last one: on a
+        // page where every box moves each frame, noting each element for
+        // the next frame cost more than building it)
+        let on = !self.off && self.seen > 0 && (self.seen - self.same) * 4 < self.seen;
+        self.svgs.borrow().memo.borrow_mut().on = on;
+    }
+    /// n or the last page's node for it, and its hash; each node with an
+    /// id ("i") is noted for the next page
+    fn node(&mut self, n: &Rc<RefCell<JsonValue>>, nodes: &mut HashMap<String, (u64, Rc<RefCell<JsonValue>>)>, styles: &mut HashMap<String, (u64, Rc<RefCell<JsonValue>>)>) -> (Rc<RefCell<JsonValue>>, u64) {
+        if n.borrow().kind != 5 {
+            return (n.clone(), hash_value(n));
+        }
+        let id = n.borrow().getText("i");
+        let count = n.borrow().keys.len();
+        let mut h: u64 = mix(0xcbf29ce484222325, 5);
+        let mut hs: u64 = 0;
+        for i in 0..count {
+            let key = n.borrow().keys[i].clone();
+            let it = n.borrow().items[i].clone();
+            h = hash_str(h, &key);
+            if key == "c" && it.borrow().kind == 4 {
+                let kids = it.borrow().items.clone();
+                let mut hc: u64 = mix(0xcbf29ce484222325, 4);
+                let mut out = Vec::with_capacity(kids.len());
+                for k in kids.iter() {
+                    let (sk, hk) = self.node(k, nodes, styles);
+                    hc = mix(hc, hk);
+                    out.push(sk);
+                }
+                it.borrow_mut().items = out;
+                h = mix(h, hc);
+            } else {
+                let hv = hash_value(&it);
+                if key == "s" {
+                    hs = hv;
+                }
+                h = mix(h, hv);
+            }
+        }
+        if id.is_empty() {
+            return (n.clone(), h);
+        }
+        self.seen += 1;
+        if let Some((was, old)) = self.nodes.remove(&id) {
+            if was == h {
+                self.same += 1;
+                self.carry(&old, nodes, styles);
+                nodes.insert(id, (h, old.clone()));
+                return (old, h);
+            }
+        }
+        // (a node whose children changed keeps its style object while that
+        // holds the same: its other children were built under it)
+        if hs != 0 {
+            if let Some((was, old)) = self.styles.remove(&id) {
+                if was == hs {
+                    n.borrow_mut().put("s", old);
+                }
+            }
+            styles.insert(id.clone(), (hs, n.borrow().get("s")));
+        }
+        nodes.insert(id, (h, n.clone()));
+        (n.clone(), h)
+    }
+    /// a node taken from the last page: what is under it goes on to the
+    /// next one's notes
+    fn carry(&mut self, n: &Rc<RefCell<JsonValue>>, nodes: &mut HashMap<String, (u64, Rc<RefCell<JsonValue>>)>, styles: &mut HashMap<String, (u64, Rc<RefCell<JsonValue>>)>) {
+        let id = n.borrow().getText("i");
+        if !id.is_empty() {
+            if let Some(e) = self.styles.remove(&id) {
+                styles.insert(id.clone(), e);
+            }
+        }
+        let c = n.borrow().get("c");
+        if c.borrow().kind != 4 {
+            return;
+        }
+        let kids = c.borrow().items.clone();
+        for k in kids.iter() {
+            if k.borrow().kind != 5 {
+                continue;
+            }
+            let kid = k.borrow().getText("i");
+            if !kid.is_empty() {
+                if let Some(e) = self.nodes.remove(&kid) {
+                    nodes.insert(kid, e);
+                }
+            }
+            self.carry(k, nodes, styles);
+        }
+    }
 }
 
 /// What a synchronous layout left for the next paint.
@@ -247,6 +481,7 @@ struct Synced {
     json: String,
     boxes: String,
     tree: Option<(Rc<RefCell<EVGElement>>, Rc<RefCell<EVGLayout>>)>,
+    kept: Kept,
 }
 
 impl Synced {
@@ -256,7 +491,7 @@ impl Synced {
                 return (self.boxes.clone(), r, l);
             }
         }
-        let (boxes, root, lay) = lay_out(json, self.w, self.h);
+        let (boxes, root, lay) = lay_out(json, self.w, self.h, &mut self.kept);
         self.json = json.to_string();
         self.boxes = boxes.clone();
         self.tree = Some((root.clone(), lay.clone()));

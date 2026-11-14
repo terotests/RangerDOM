@@ -41,7 +41,10 @@
   var viewport = { w: 1024, h: 768 };
   var doc = null;
 
-  function changed() { generation++; styleGen++; ancEpoch++; }
+  function changed() { generation++; styleGen++; ancEpoch++; sigEpoch++; }
+  // moves when any attribute but style, or the tree, changes: an element's
+  // signature (sigOf) is as of one value of it
+  var sigEpoch = 1;
   // moves when an element's class or id or the tree changes: what an
   // element keeps of its ancestors' names (ancOf) is as of one value of it
   var ancEpoch = 1;
@@ -69,6 +72,7 @@
   // (changed)
   function attrChanged(el, name, was, now) {
     if (name === 'class' || name === 'id' || name === undefined) ancEpoch++;
+    if (name !== 'style') sigEpoch++;
     if (shadowCount && el.isConnected && inShadowScope(el)) { changed(); if (name === 'slot' || name === 'name') scheduleSlots(name === 'slot' ? assignedSlotOf(el) : null); return; }
     // an element not in the page (React sets a new element's attributes
     // before it inserts it): nothing shown changes; what it kept goes
@@ -158,7 +162,7 @@
   }
   function unshownOnly(a, b) {
     for (var k in a) if (k.charAt(0) !== '_' && a[k] !== b[k] && !UNSHOWN[k]) return false;
-    for (var k2 in b) if (k2.charAt(0) !== '_' && a[k2] === undefined && !UNSHOWN[k2]) return false;
+    for (var k2 in b) if (k2.charAt(0) !== '_' && a[k2] === undefined && b[k2] !== undefined && !UNSHOWN[k2]) return false;
     return a._fontPx === b._fontPx && varsEqual(a._vars, b._vars);
   }
   // el's style went from a to b (b in the cache): true when what is under it
@@ -192,7 +196,7 @@
   // added or moved restyled every node.
   // (detach: gone, the element taken out, and at, where it was)
   function treeChanged(p, c, gone, at) {
-    ancEpoch++;
+    ancEpoch++; sigEpoch++;
     if (shadowCount && (p.nodeType === 11 && p.host || inShadowScope(p))) { changed(); scheduleSlots(p._sr && (c || gone) ? assignedSlotOf(c || gone) : null); return; }
     // not in the page (a fragment, a parsed document): nothing shown
     if (!doc || (p !== doc && (p.ownerDocument !== doc || !p.isConnected))) { generation++; return; }
@@ -292,7 +296,10 @@
   function sameStyle(a, b, el, own) {
     own = own || {};
     for (var k in a) if (k.charAt(0) !== '_' && a[k] !== b[k] && !own[k]) return false;
-    for (var k2 in b) if (k2.charAt(0) !== '_' && a[k2] === undefined && !own[k2]) return false;
+    // (a name held with no value, `scrollbar-width: var(--unset)`, is in both:
+    // AG Grid has it on every element, and each change of a parent's
+    // children styled all under it again)
+    for (var k2 in b) if (k2.charAt(0) !== '_' && a[k2] === undefined && b[k2] !== undefined && !own[k2]) return false;
     if (a._fontPx !== b._fontPx || !varsEqual(a._vars, b._vars)) return false;
     for (var i = 0; i < el._c.length; i++) {
       var c = el._c[i];
@@ -3255,9 +3262,12 @@
     set defaultValue(v) { this.setAttribute('value', v); }
     get checked() { return this._checked !== undefined ? this._checked : this.hasAttribute('checked'); }
     set checked(v) {
+      // (a state change of this element, as a value's: AG Grid sets every
+      // new row's checkbox, and each one styled the whole page again)
+      var was = this.checked;
       this._checked = !!v;
-      if (v && this.type === 'radio') uncheckGroup(this);
-      changed();
+      if (v && this.type === 'radio') { uncheckGroup(this); changed(); return; }
+      if (was !== !!v) attrChanged(this);
     }
     get defaultChecked() { return this.hasAttribute('checked'); }
     set defaultChecked(v) { this.toggleAttribute('checked', !!v); }
@@ -6225,7 +6235,8 @@
       for (var q = 0; q < list.length && same; q++) same = have.list[q] === list[q] && have.of[q] === list[q]._index;
       if (same) return have;
     }
-    var rs = { list: list.slice(), of: [], idx: Object.create(null), pidx: Object.create(null) };
+    var rs = { list: list.slice(), of: [], idx: Object.create(null), pidx: Object.create(null), _sc: new Map(), _sa: null };
+    sigSets.push(rs); if (sigSets.length > 8) sigSets.shift();
     var build = ++ruleSetBuild;
     function merge(from, into, s, sheet) {
       for (var k in from) {
@@ -6257,6 +6268,88 @@
     }
     return docRuleSet.rs;
   }
+  // A selector is plain when what it answers for an element follows from
+  // the element's and its ancestors' types, ids, classes and attributes
+  // alone: compounds of those with descendant and child combinators, and
+  // :is(), :where(), :not() of such, :root. Not one with a state or a
+  // structural pseudo-class, + or ~, :has(), or one that reads the style
+  // attribute.
+  function plainList(list) { for (var i = 0; i < list.length; i++) if (!plainParts(list[i])) return false; return true; }
+  function plainParts(sel) {
+    var parts = sel.parts;
+    if (!parts) return false;
+    for (var k = 0; k < parts.length; k++) {
+      var cb = parts[k].comb;
+      if (k + 1 < parts.length && cb !== ' ' && cb !== '>') return false;
+      var c = parts[k].c;
+      for (var q = 0; q < c.length; q++) {
+        var x = c[q];
+        if (x.t === 'tag' || x.t === 'id' || x.t === 'class') continue;
+        if (x.t === 'attr') { if (x.n === 'style') return false; continue; }
+        if (x.t === 'pseudo' && x.n === 'root') continue;
+        if (x.t === 'pseudo' && (x.n === 'is' || x.n === 'where' || x.n === 'not') && x.list && plainList(x.list)) continue;
+        return false;
+      }
+    }
+    return true;
+  }
+  function plainSel(sel) {
+    var pl = plainParts(sel);
+    Object.defineProperty(sel, '_plain', { value: pl, enumerable: false, writable: true });
+    return pl;
+  }
+  // the attribute names the selectors of a rule set read
+  function selAttrsOf(rs) {
+    var names = Object.create(null);
+    function ofList(list) { for (var i = 0; i < list.length; i++) ofSel(list[i]); }
+    function ofSel(sel) {
+      var parts = sel && sel.parts;
+      if (!parts) return;
+      for (var k = 0; k < parts.length; k++) {
+        var c = parts[k].c;
+        for (var q = 0; q < c.length; q++) { if (c[q].t === 'attr') names[c[q].n] = 1; else if (c[q].list) ofList(c[q].list); }
+      }
+    }
+    function ofIdx(idx) { for (var key in idx) { var l = idx[key]; for (var i = 0; i < l.length; i++) ofSel(l[i].r.sel); } }
+    ofIdx(rs.idx);
+    for (var pn in rs.pidx) ofIdx(rs.pidx[pn]);
+    return names;
+  }
+  // An element's signature in a rule set: a number that two elements share
+  // when they are alike in type, id, class and the attributes the selectors
+  // read, and their parents share one too. The plain selectors then match
+  // both or neither (cascade1 keeps what the first matched): a grid's cells
+  // and a table's rows are matched once per kind, not once each. A parent's
+  // is kept with it until an attribute or the tree changes (sigEpoch).
+  var sigIds = new Map(), sigUid = 0;
+  function sigOf(el, rs) {
+    var sa = rs._sa;
+    if (!sa) { sa = rs._sa = selAttrsOf(rs); }
+    var p = el.parentNode, ps = 'x';
+    if (p) {
+      if (p.nodeType === 1) {
+        if (p._sgE === sigEpoch && p._sgR === rs) ps = p._sg;
+        else { ps = sigOf(p, rs); p._sg = ps; p._sgE = sigEpoch; p._sgR = rs; }
+      } else ps = p.nodeType === 9 ? 'r' : 'f';
+    }
+    var html = el.namespaceURI === HTML_NS;
+    var key = ps + '\u0001' + el.localName + (html ? '' : '\u0001' + el.namespaceURI);
+    var at = el._attrs;
+    for (var a = 0; a < at.length; a++) {
+      var an = at[a].name;
+      if (an === 'style') continue;
+      if (!html) an = an.toLowerCase();
+      if (an === 'class' || an === 'id' || sa[an] === 1) key += '\u0001' + an + '\u0002' + at[a]._v;
+    }
+    var id = sigIds.get(key);
+    if (id === undefined) {
+      if (sigIds.size >= 100000) { sigIds.clear(); sigEpoch++; resetSigCaches(); }
+      id = ++sigUid; sigIds.set(key, id);
+    }
+    return id;
+  }
+  var sigSets = [];
+  function resetSigCaches() { for (var i = 0; i < sigSets.length; i++) sigSets[i]._sc.clear(); }
   function setCandidates(rs, el, out, pe) {
     var idx = pe ? rs.pidx[pe] : rs.idx;
     if (!idx) return;
@@ -6326,12 +6419,28 @@
     var hits = kept !== undefined ? kept.slice() : [];
     var svCtx = shadowCtx;
     shadowCtx = esr;
-    var cand = [];
-    if (kept === undefined) setCandidates(scopeRuleSet(d, esr), el, cand, pe);
+    var cand = [], rs = null, sg = 0, sc = null, dyn = null, nPlain = 0;
+    if (kept === undefined) {
+      rs = scopeRuleSet(d, esr);
+      // (elements alike in what the plain selectors read, see sigOf: the
+      // rules found for the first one; only the others are tried)
+      if (!shadowCount && d === doc) {
+        sg = sigOf(el, rs);
+        var sck = pe ? sg + ':' + pe : sg;
+        sc = rs._sc.get(sck);
+        if (sc) { for (var sh = 0; sh < sc.plain.length; sh++) hits.push(sc.plain[sh]); cand = sc.dyn; }
+        else { setCandidates(rs, el, cand, pe); dyn = []; }
+      } else setCandidates(rs, el, cand, pe);
+    }
     var anc = shadowCount || !cand.length ? null : ancOf(el);
     for (var i = 0; i < cand.length; i++) {
       var w = cand[i], r = w.r;
       if (pe ? r.sel.pseudo !== pe || !(pe === 'backdrop' ? w.sh._backdrop : w.sh._pseudo) : r.sel.pseudo) continue;
+      if (dyn) {
+        var pl = r.sel._plain;
+        if (pl === undefined) pl = plainSel(r.sel);
+        if (!pl || r.media) { dyn.push(w); continue; }
+      }
       if (anc) {
         var need = r.sel._need;
         if (need === undefined) need = needOf(r.sel);
@@ -6344,6 +6453,26 @@
       }
       if (!matchComplex(el, r.sel, null)) continue;
       hits.push(w);
+    }
+    if (dyn) {
+      // (the plain ones first, then the others: the same order as from the
+      // kept ones, so that elements alike get the same key below)
+      var plain = hits.slice();
+      if (rs._sc.size >= 20000) rs._sc.clear();
+      rs._sc.set(pe ? sg + ':' + pe : sg, { plain: plain, dyn: dyn });
+      for (var di = 0; di < dyn.length; di++) {
+        var w2 = dyn[di], r2 = w2.r;
+        if (anc) {
+          var need2 = r2.sel._need;
+          if (need2 === undefined) need2 = needOf(r2.sel);
+          if (need2) { var lacks2 = false; for (var nj = 0; nj < need2.length; nj++) if (anc[need2[nj]] !== 1) { lacks2 = true; break; } if (lacks2) continue; }
+        }
+        if (r2.media) {
+          if (r2._mqW !== viewport.w || r2._mqH !== viewport.h) { r2._mqW = viewport.w; r2._mqH = viewport.h; r2._mq = mediaMatches(r2.media); }
+          if (!r2._mq) continue;
+        }
+        if (matchComplex(el, r2.sel, null)) hits.push(w2);
+      }
     }
     shadowCtx = svCtx;
     if (kept === undefined) {
