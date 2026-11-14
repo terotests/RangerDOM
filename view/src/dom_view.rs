@@ -259,6 +259,7 @@ impl DomMemo {
         self.curSig = a.clone();
         self.taken = Vec::new();
     }
+    #[doc(hidden)]
     pub fn unitSig(u: Option<Rc<RefCell<EVGUnit>>>) -> String {
         if u.is_none() {
             return "-;".to_string();
@@ -268,6 +269,7 @@ impl DomMemo {
         format!("{}:{}:{};", uu.borrow().value, uu.borrow().unit_type, set)
     }
     /// an element's margins: what its parent decides about them
+    #[doc(hidden)]
     pub fn marginSig(el: &Rc<RefCell<EVGElement>>) -> String {
         let bx: Rc<RefCell<EVGBox>> = el.borrow().r#box.clone().unwrap();
         let mut out: String = DomMemo::unitSig(bx.borrow().margin_top.clone());
@@ -281,6 +283,7 @@ impl DomMemo {
     /// the frame built: each element taken keeps its layout when its
     /// margins are what they were last frame, and every element kept
     /// notes its margins for the next
+    #[doc(hidden)]
     pub fn settle(&mut self) {
         let ks: Vec<String> = self.curEls.keys().cloned().collect::<Vec<String>>();
         for sk in ks.iter().cloned() {
@@ -307,6 +310,7 @@ impl DomMemo {
     }
     /// the element built last frame for this stamp and key, or none (also
     /// when this frame took it already)
+    #[doc(hidden)]
     pub fn take(&mut self, stamp: i64, key: &str) -> Option<Rc<RefCell<EVGElement>>> {
         let none: Option<Rc<RefCell<EVGElement>>> = None;
         let sk: String = stamp.to_string();
@@ -346,6 +350,7 @@ impl DomMemo {
         }
         0
     }
+    #[doc(hidden)]
     pub fn keep(&mut self, stamp: i64, key: &str, el: &Rc<RefCell<EVGElement>>, late: i64) {
         let sk: String = stamp.to_string();
         self.curKeys.insert(sk.clone(), key.to_string());
@@ -399,6 +404,7 @@ impl DomSvgDocs {
     /// the page as it was before the build: a patched page shares its
     /// unchanged nodes with the next frame, which must read what web/dom
     /// wrote, not what a build made of it
+    #[doc(hidden)]
     pub fn undo(&mut self) {
         let mut i: i64 = (self.undoObjs.len() as i64) - 1;
         while i >= 0 {
@@ -422,6 +428,7 @@ impl DomSvgDocs {
         let none: HashMap<String,Rc<RefCell<SvgDocument>>> = HashMap::new();
         self.cur = none.clone();
     }
+    #[doc(hidden)]
     pub fn docOf(&mut self, src: &str) -> Rc<RefCell<SvgDocument>> {
         let d: Option<Rc<RefCell<SvgDocument>>> = self.cur.get(src).cloned();
         if d.is_some() {
@@ -743,6 +750,7 @@ impl DomView {
     pub fn buildKept(page: &Rc<RefCell<JsonValue>>, index: i64, w: f64, h: f64, svgs: Rc<RefCell<DomSvgDocs>>) -> Rc<RefCell<EVGElement>> {
         DomView::buildWith(page, index, w, h, svgs)
     }
+    #[doc(hidden)]
     pub fn buildWith(page: &Rc<RefCell<JsonValue>>, index: i64, w: f64, h: f64, svgs: Rc<RefCell<DomSvgDocs>>) -> Rc<RefCell<EVGElement>> {
         EVGLayoutFull::install();
         let v: Rc<RefCell<DomView>> = Rc::new(RefCell::new(DomView::new()));
@@ -3051,6 +3059,7 @@ impl DomView {
         ty.is_empty() || (ty == "text" || (ty == "search" || (ty == "email" || (ty == "url" || (ty == "tel" || (ty == "password" || ty == "number"))))))
     }
     /// [left, top, right, bottom] of the box's content on the page
+    #[doc(hidden)]
     pub fn inner(e: &Rc<RefCell<EVGElement>>) -> Vec<f64> {
         let bw: f64 = e.borrow().r#box.as_ref().unwrap().borrow().border_width_px;
         let mut out: Vec<f64> = Vec::new();
@@ -3061,6 +3070,7 @@ impl DomView {
         out
     }
     /// the text's size in the field: [width of its widest line, height]
+    #[doc(hidden)]
     pub fn contentSize(eng: &Rc<RefCell<EVGTextEngine>>, e: &Rc<RefCell<EVGElement>>) -> Vec<f64> {
         let t: Rc<RefCell<EVGElement>> = DomView::fieldText(e);
         let lines: Vec<Rc<RefCell<EVGTextLine>>> = DomView::linesOf(eng, &t, &e.borrow().a11y_value.clone());
@@ -3085,6 +3095,7 @@ impl DomView {
         out
     }
     /// the element a field draws its text in (not its caret or a band)
+    #[doc(hidden)]
     pub fn fieldText(e: &Rc<RefCell<EVGElement>>) -> Rc<RefCell<EVGElement>> {
         let __it_c = e.borrow().children.clone();
         for c in __it_c.iter().cloned() {
@@ -3115,6 +3126,7 @@ impl DomView {
     }
     /// the lines `text` breaks into in the field's text element (the same
     /// call and width EVGDisplayList draws with)
+    #[doc(hidden)]
     pub fn linesOf(eng: &Rc<RefCell<EVGTextEngine>>, t: &Rc<RefCell<EVGElement>>, text: &str) -> Vec<Rc<RefCell<EVGTextLine>>> {
         let _tmp_1 = EVGBox::get_inner_width(&t.borrow().r#box.as_ref().unwrap(), t.borrow().calculated_width);
         let wrap: f64 = EVGElement::wrap_width(&t, _tmp_1);
@@ -3129,6 +3141,7 @@ impl DomView {
         ).clone();
     }
     /// [x, y, height] of the caret after `prefix`, on the page
+    #[doc(hidden)]
     pub fn caretAt(eng: &Rc<RefCell<EVGTextEngine>>, e: &Rc<RefCell<EVGElement>>, prefix: &str) -> Vec<f64> {
         let t: Rc<RefCell<EVGElement>> = DomView::fieldText(e);
         let lines: Vec<Rc<RefCell<EVGTextLine>>> = DomView::linesOf(eng, &t, prefix);
@@ -3155,6 +3168,7 @@ impl DomView {
     }
     /// the text of the field before the point (x, y) on the page: where a
     /// click puts the caret
+    #[doc(hidden)]
     pub fn prefixAt(eng: &Rc<RefCell<EVGTextEngine>>, e: &Rc<RefCell<EVGElement>>, x: f64, y: f64) -> String {
         let text: String = e.borrow().a11y_value.clone();
         if text.is_empty() {
@@ -3239,6 +3253,7 @@ impl DomView {
     /// the caret, or the selection's bands, over the laid out field `e`
     /// (field: its node in the page); the caret element, or e when the
     /// selection is not empty (no caret then, as in a browser)
+    #[doc(hidden)]
     pub fn decorate(eng: &Rc<RefCell<EVGTextEngine>>, e: &Rc<RefCell<EVGElement>>, field: &Rc<RefCell<JsonValue>>) -> Rc<RefCell<EVGElement>> {
         let a: Rc<RefCell<JsonValue>> = field.borrow().get("a");
         let t: Rc<RefCell<EVGElement>> = DomView::fieldText(e);
@@ -3531,6 +3546,7 @@ impl DomView {
     /// as the share of the content in view and where scrollTop has it. The
     /// container's children were moved by its scroll, so the bars are put
     /// where they show; they have no id, so a hit on one is the container's.
+    #[doc(hidden)]
     pub fn bars(el: &Rc<RefCell<EVGElement>>) {
         // (a kept element has the bars the last frame drew: those go)
         let mut keep_kids: Vec<Rc<RefCell<EVGElement>>> = Vec::new();
@@ -3610,6 +3626,7 @@ impl DomView {
     /// bounds of such an svg are grown to its drawing (as the display list
     /// places it: viewBox to the box), and its ancestors' to include them;
     /// true when something under el grew
+    #[doc(hidden)]
     pub fn overflowing(el: &Rc<RefCell<EVGElement>>) -> bool {
         let mut grew: bool = false;
         let __n_i = el.borrow().children.len() as i64;
@@ -5828,6 +5845,7 @@ impl DomView {
     /// a node's style in the frame being built
     /// a member of a style object of the page set for this build; the
     /// object's members are put back when the build ends (DomSvgDocs.undo)
+    #[doc(hidden)]
     pub fn putPage(&self, o: &Rc<RefCell<JsonValue>>, k: &str, v: &str) {
         let was: Rc<RefCell<JsonValue>> = JsonValue::mkObj();
         let ks: Vec<String> = o.borrow().keys.clone();
