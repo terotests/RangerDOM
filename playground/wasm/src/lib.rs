@@ -48,6 +48,7 @@ pub struct Playground {
     last_gen: String,
     root: Option<Rc<RefCell<EVGElement>>>,
     lay: Option<Rc<RefCell<EVGLayout>>>,
+    synced: Rc<std::cell::RefCell<Synced>>,
 }
 
 impl Playground {
@@ -55,7 +56,9 @@ impl Playground {
         // (CEr's register machine: its default is still the stack machine)
         let mut engine = Engine::new();
         engine.vm.regs = true;
-        Playground { engine: engine, scripts: Vec::new(), errors: Vec::new(), w: 800.0, h: 600.0, page_json: String::new(), last_gen: String::new(), root: None, lay: None }
+        let synced = Rc::new(std::cell::RefCell::new(Synced { w: 800.0, h: 600.0, last: None, json: String::new(), boxes: String::new(), tree: None }));
+        engine.vm.set_host_sync(Box::new(SyncLayout { s: synced.clone() }));
+        Playground { engine: engine, scripts: Vec::new(), errors: Vec::new(), w: 800.0, h: 600.0, page_json: String::new(), last_gen: String::new(), root: None, lay: None, synced: synced }
     }
 
     fn note(&mut self) -> String {
@@ -82,12 +85,19 @@ impl Playground {
     pub fn start(&mut self, html: &str, url: &str, w: f64, h: f64) {
         self.w = w;
         self.h = h;
+        {
+            let mut sy = self.synced.borrow_mut();
+            sy.w = w;
+            sy.h = h;
+        }
         self.exec(PRELUDE);
         self.exec(WEBAPI);
         self.exec(HOST);
         self.exec(&format!("__page({}, {})", quote(html), quote(url)));
         self.exec(&format!("__layout({{viewport: [{}, {}]}})", w, h));
         self.exec("__installDefaults()");
+        // sizes read after a change are laid out at once (SyncLayout)
+        self.exec("__syncLayout(true)");
     }
     /// the page's scripts in a browser's order, DOMContentLoaded and load
     pub fn run_scripts(&mut self) {
@@ -136,46 +146,103 @@ impl Playground {
     }
     /// EVG lays the last render out; the boxes go back to the page
     pub fn layout(&mut self) -> String {
-        #[cfg(not(target_arch = "wasm32"))]
-        let timing = std::env::var("PG_TIMING").is_ok();
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut t0 = std::time::Instant::now();
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut lap = |what: &str| { if timing { eprintln!("  layout {} {:?}", what, t0.elapsed()); } t0 = std::time::Instant::now(); };
-        #[cfg(target_arch = "wasm32")]
-        let lap = |_: &str| {};
-        let p = JsonParser::parse(self.page_json.clone());
-        let page = p.borrow_mut().value();
-        lap("parse");
-        let root = EVGElement::create_div();
-        root.borrow_mut().width = Some(EVGUnit::px(self.w));
-        root.borrow_mut().height = Some(EVGUnit::px(self.h));
-        EVGElement::set_attribute(&root, "white-space", "nowrap".to_string());
-        EVGElement::set_attribute(&root, "font-family", "Arial".to_string());
-        let b = DomView::build(&page, 0, self.w, self.h);
-        lap("build");
-        EVGElement::add_child(&root, b.clone());
-        let lay = Rc::new(RefCell::new(EVGLayout::new()));
-        EVGLayout::set_page_size(&lay, self.w, self.h);
-        EVGLayout::layout(&lay, root.clone());
-        lap("evg");
-        DomView::settle(&b);
-        lap("settle");
-        let boxes = DomView::boxes(&b, 0);
-        lap("boxes");
+        let (boxes, root, lay) = self.synced.borrow_mut().lay_out(&self.page_json);
         self.exec(&format!("__layout({})", quote(&format!("{{\"boxes\":{}}}", boxes))));
-        lap("realm __layout");
-        self.root = Some(root);
-        self.lay = Some(lay);
+        self.root = Some(root.clone());
+        self.lay = Some(lay.clone());
         boxes
+    }
+    /// the newest layout: a frame's, or one the page's script asked for
+    /// (reading a size after a change: __hostSync)
+    fn newest(&mut self) {
+        if let Some((r, l)) = self.synced.borrow_mut().last.take() {
+            self.root = Some(r);
+            self.lay = Some(l);
+        }
     }
     /// the laid-out page as EVG's display list (JSON)
     pub fn paint(&mut self) -> String {
+        self.newest();
         let (Some(root), Some(lay)) = (self.root.clone(), self.lay.clone()) else { return String::new() };
         let dl = Rc::new(RefCell::new(EVGDisplayList::new()));
         EVGDisplayList::set_text_engine(&dl, EVGLayout::get_text_engine(&lay));
         EVGDisplayList::build(&dl, root);
         EVGDisplayList::to_json(&dl)
+    }
+}
+
+/// The render tree laid out by EVG: the boxes (JSON) for the page, and the
+/// tree and layout the display list is built from.
+fn lay_out(page_json: &str, w: f64, h: f64) -> (String, Rc<RefCell<EVGElement>>, Rc<RefCell<EVGLayout>>) {
+    #[cfg(not(target_arch = "wasm32"))]
+    let timing = std::env::var("PG_TIMING").is_ok();
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut t0 = std::time::Instant::now();
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut lap = |what: &str| { if timing { eprintln!("  layout {} {:?}", what, t0.elapsed()); } t0 = std::time::Instant::now(); };
+    #[cfg(target_arch = "wasm32")]
+    let lap = |_: &str| {};
+    let p = JsonParser::parse(page_json.to_string());
+    let page = p.borrow_mut().value();
+    lap("parse");
+    let root = EVGElement::create_div();
+    root.borrow_mut().width = Some(EVGUnit::px(w));
+    root.borrow_mut().height = Some(EVGUnit::px(h));
+    EVGElement::set_attribute(&root, "white-space", "nowrap".to_string());
+    EVGElement::set_attribute(&root, "font-family", "Arial".to_string());
+    let b = DomView::build(&page, 0, w, h);
+    lap("build");
+    EVGElement::add_child(&root, b.clone());
+    let lay = Rc::new(RefCell::new(EVGLayout::new()));
+    EVGLayout::set_page_size(&lay, w, h);
+    EVGLayout::layout(&lay, root.clone());
+    lap("evg");
+    DomView::settle(&b);
+    lap("settle");
+    let boxes = DomView::boxes(&b, 0);
+    lap("boxes");
+    (boxes, root, lay)
+}
+
+/// What a synchronous layout left for the next paint.
+struct Synced {
+    w: f64,
+    h: f64,
+    last: Option<(Rc<RefCell<EVGElement>>, Rc<RefCell<EVGLayout>>)>,
+    /// the render tree last laid out, its boxes and tree: the same tree
+    /// again (a frame after a script's forced layout, or two reads with
+    /// only a class that changes nothing between) is not laid out again
+    json: String,
+    boxes: String,
+    tree: Option<(Rc<RefCell<EVGElement>>, Rc<RefCell<EVGLayout>>)>,
+}
+
+impl Synced {
+    fn lay_out(&mut self, json: &str) -> (String, Rc<RefCell<EVGElement>>, Rc<RefCell<EVGLayout>>) {
+        if let Some((r, l)) = self.tree.clone() {
+            if self.json == json {
+                return (self.boxes.clone(), r, l);
+            }
+        }
+        let (boxes, root, lay) = lay_out(json, self.w, self.h);
+        self.json = json.to_string();
+        self.boxes = boxes.clone();
+        self.tree = Some((root.clone(), lay.clone()));
+        self.last = Some((root.clone(), lay.clone()));
+        (boxes, root, lay)
+    }
+}
+
+/// __hostSync(renderJson) from webapi.js: a script read a size after it
+/// changed the page, so the page is laid out now, as a browser's forced
+/// layout does, and the boxes are the answer.
+struct SyncLayout {
+    s: Rc<std::cell::RefCell<Synced>>,
+}
+
+impl cer::vm::HostSync for SyncLayout {
+    fn call(&mut self, request: &str) -> String {
+        self.s.borrow_mut().lay_out(request).0
     }
 }
 

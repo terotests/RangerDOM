@@ -2010,9 +2010,11 @@
     get nodeType() { return 1; }
     // a script's scroll: a scroll event at the next frame, as a browser
     // sends it (TanStack Virtual's scrollToIndex waits for it)
-    get scrollTop() { return this._sTop; }
+    // (a scrolled box's offset is clamped by a layout: read after its
+    // content shrank, it is laid out first)
+    get scrollTop() { if (this._scl) reflow(); return this._sTop; }
     set scrollTop(v) { v = Math.max(0, +v || 0); if (v === this._sTop) return; this._sTop = v; keptScroll(this); scriptScrolled(this); }
-    get scrollLeft() { return this._sLeft; }
+    get scrollLeft() { if (this._scl) reflow(); return this._sLeft; }
     set scrollLeft(v) { v = +v || 0; if (v === this._sLeft) return; this._sLeft = v; keptScroll(this); scriptScrolled(this); }
     get nodeName() { return this.tagName; }
     get tagName() { return this.namespaceURI === HTML_NS ? this._qname.toUpperCase() : this._qname; }
@@ -2121,7 +2123,7 @@
       for (var n = this; n && n.nodeType === 1; n = n.parentNode) if (matchList(n, list)) return n;
       return null;
     }
-    getBoundingClientRect() { return boxes[this.__id] ? rectOf(this) : estimatedRect(this) || rectOf(this); }
+    getBoundingClientRect() { reflow(); return boxes[this.__id] ? rectOf(this) : estimatedRect(this) || rectOf(this); }
     getClientRects() { var r = this.getBoundingClientRect(); return r.width || r.height ? [r] : []; }
     get clientWidth() { return sizeOf(this, 'cw'); }
     get clientHeight() { return sizeOf(this, 'ch'); }
@@ -4152,7 +4154,22 @@
     return { x: x, y: y, width: w, height: h, top: Math.min(y, y + h), left: Math.min(x, x + w), right: Math.max(x, x + w), bottom: Math.max(y, y + h), toJSON: function () { return { x: x, y: y, width: w, height: h, top: y, left: x, right: x + w, bottom: y + h }; } };
   }
   DOMRect.fromRect = function (r) { r = r || {}; return DOMRect(r.x, r.y, r.width, r.height); };
+  // A size read after a change lays the page out now, as a browser's forced
+  // layout does, when the host can (__hostSync with the render tree: the
+  // boxes back). Golden Layout sizes its panes from the header it has just
+  // inserted, and laid out a frame late every pane came out 2 px wide.
+  var syncLayout = false, layoutGen = -1, reflowing = false;
+  function reflow() {
+    if (!syncLayout || reflowing || layoutGen === generation || !doc || !doc.documentElement) return;
+    reflowing = true;
+    try {
+      var json = render(), g = generation, out = __hostSync(json);
+      if (out) { boxes = JSON.parse(out); layoutGen = g; if (scrollers.length) clampScrolls(); }
+    } catch (e) { syncLayout = false; reportError(e); }
+    reflowing = false;
+  }
   function rectOf(el) {
+    reflow();
     var b = boxes[el.__id];
     if (!b) return DOMRect(0, 0, 0, 0);
     var sx = 0, sy = 0;
@@ -4164,6 +4181,7 @@
   // offsetWidth and ResizeObserver report it, getBoundingClientRect the
   // drawn box
   function layoutSize(el) {
+    reflow();
     var b = boxes[el.__id];
     if (!b) return textOnlySize(el);
     return b[8] !== undefined ? [b[8], b[9]] : [b[2], b[3]];
@@ -4262,6 +4280,7 @@
     return DOMRect(x, y, size[0], size[1]);
   }
   function sizeOf(el, what) {
+    reflow();
     var b = boxes[el.__id];
     if (el === (doc && doc.documentElement) && (what === 'cw' || what === 'ch')) return what === 'cw' ? viewport.w : viewport.h;
     if (!b) return 0;
@@ -7749,6 +7768,11 @@
         var sd = SIDES4[sdi], bst = s['border-' + sd + '-style'], bco = s['border-' + sd + '-color'];
         if (bst && bst !== 'none' && bst !== 'hidden' && (!bco || bco === 'currentcolor')) s['border-' + sd + '-color'] = cs.color;
       }
+      // an inset shadow with no offset or blur and a spread past any box
+      // (Bootstrap's striped and hovered cells: inset 0 0 0 9999px) fills
+      // the padding box over the background: the host draws no shadows, so
+      // it is the background it makes
+      if (s['box-shadow'] && s['box-shadow'].indexOf('inset') >= 0) insetFill(s);
       var own = {};
       for (var ok in s) own[ok] = s[ok];
       Object.defineProperty(cs, '_own', { value: own, enumerable: false, configurable: true, writable: true });
@@ -8482,6 +8506,22 @@
   // calc() of % and px terms only, with numbers multiplying them, as one
   // value: `calc(50% - 30%*.5)` is 35% (the host reads one % and one px
   // term at most); anything else as it was
+  function insetFill(s) {
+    var v = s['box-shadow'].trim(), m = /^inset\s+(.*)$/.exec(v) || /^(.*?)\s+inset$/.exec(v);
+    if (!m || v.indexOf(',', v.lastIndexOf(')') + 1) >= 0) return;
+    var rest = m[1], col = null;
+    rest = rest.replace(/(rgba?|hsla?)\([^)]*\)|#[0-9a-f]{3,8}\b|\b(transparent|[a-z]+)\b/gi, function (c) { col = c; return ' '; }).trim();
+    var len = rest.split(/\s+/);
+    if (len.length !== 4 || parseFloat(len[0]) || parseFloat(len[1]) || parseFloat(len[2]) || !(parseFloat(len[3]) >= 1000)) return;
+    var c = col ? colorRGBA(col) : null;
+    if (!c || c[3] === 0) { delete s['box-shadow']; return; }
+    var b = s['background-color'] ? colorRGBA(s['background-color']) : null;
+    if (!b) b = [0, 0, 0, 0];
+    var a = c[3] + b[3] * (1 - c[3]);
+    var mix = function (k) { return Math.round((c[k] * c[3] + b[k] * b[3] * (1 - c[3])) / a); };
+    s['background-color'] = a >= 1 ? 'rgb(' + mix(0) + ', ' + mix(1) + ', ' + mix(2) + ')' : 'rgba(' + mix(0) + ', ' + mix(1) + ', ' + mix(2) + ', ' + (Math.round(a * 1000) / 1000) + ')';
+    delete s['box-shadow'];
+  }
   function flatCalc(v) {
     var m = /^calc\((.*)\)$/.exec(v);
     if (!m || /calc|var|\(/.test(m[1])) return v;
@@ -10411,7 +10451,8 @@
     invoke(G, ev, 2);
     return 'ok';
   };
-  G.__render = render;
+  G.__render = function () { var was = reflowing; reflowing = true; try { return render(); } finally { reflowing = was; } };
+  G.__syncLayout = function (on) { syncLayout = !!on && typeof __hostSync === 'function'; return String(syncLayout); };
   G.__generation = function () { return String(generation); };
   G.__layout = function (json) {
     var m = typeof json === 'string' ? JSON.parse(json) : json;
@@ -10421,6 +10462,7 @@
     }
     if (m.boxes) {
       boxes = m.boxes;
+      layoutGen = generation;
       boxSvgs = boxSvgs.filter(function (e) { return e.isConnected; });
       for (var bs = 0; bs < boxSvgs.length; bs++) {
         var sv = boxSvgs[bs], sb = boxes[sv.__id];
