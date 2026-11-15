@@ -15,6 +15,11 @@
 //   __loaded()            DOMContentLoaded and load, after the scripts
 //   __render()            JSON text: the rendered tree (elements with their
 //                         computed style, text), see renderNode
+//   __deltaRender(on)     the host keeps the last page: __renderDelta() and a
+//                         forced layout (__hostSync) send what changed, the
+//                         rest named ({"r": n}); see renderJson
+//   __renderDelta(again)  __render() for such a host; again: it lost what
+//                         it kept, the whole page is sent
 //   __layout(json)        the boxes the host laid out: {"id": [x, y, w, h]}
 //                         and {"viewport": [w, h]}
 //   __input(json)         an event from the user, see hostInput
@@ -4231,7 +4236,9 @@
     if (!syncLayout || reflowing || layoutGen === generation || !doc || !doc.documentElement) return;
     reflowing = true;
     try {
-      var json = render(), g = generation, out = __hostSync(json);
+      var json = render(deltaOn), g = generation, out = __hostSync(json);
+      // (a host that does not have a node the delta names: everything again)
+      if (out === '!' && deltaOn) { deltaEpoch++; json = render(true); out = __hostSync(json); if (out === '!') out = ''; }
       if (out) { boxes = JSON.parse(out); layoutGen = g; if (scrollers.length) clampScrolls(); }
     } catch (e) { syncLayout = false; reportError(e); }
     reflowing = false;
@@ -6290,8 +6297,8 @@
   // :is(), :where(), :not() of such, :root. Not one with a state or a
   // structural pseudo-class, + or ~, :has(), or one that reads the style
   // attribute.
-  function plainList(list) { for (var i = 0; i < list.length; i++) if (!plainParts(list[i])) return false; return true; }
-  function plainParts(sel) {
+  function plainList(list) { for (var i = 0; i < list.length; i++) if (!plainParts(list[i], true)) return false; return true; }
+  function plainParts(sel, inner) {
     var parts = sel.parts;
     if (!parts) return false;
     for (var k = 0; k < parts.length; k++) {
@@ -6304,10 +6311,42 @@
         if (x.t === 'attr') { if (x.n === 'style') return false; continue; }
         if (x.t === 'pseudo' && x.n === 'root') continue;
         if (x.t === 'pseudo' && (x.n === 'is' || x.n === 'where' || x.n === 'not') && x.list && plainList(x.list)) continue;
+        // (the selector's own ::before or ::after: the rules are kept per
+        // pseudo-element, and matching does not read it)
+        if (x.t === 'pseudoel' && !inner && (x.n === 'before' || x.n === 'after') && k === 0) continue;
         return false;
       }
     }
     return true;
+  }
+  // the states a selector needs some element to be in to match at all:
+  // 1 focus (:focus, :focus-visible, :focus-within), 2 :hover, 4 :active;
+  // 0 when it can match with no element in any. :is() and :where() need
+  // what every one of their alternatives needs.
+  function stateNeedOf(sel) {
+    var parts = sel.parts;
+    if (!parts) return 0;
+    for (var k = 0; k < parts.length; k++) {
+      var c = parts[k].c;
+      for (var q = 0; q < c.length; q++) {
+        var x = c[q];
+        if (x.t !== 'pseudo') continue;
+        if (x.n === 'focus' || x.n === 'focus-visible' || x.n === 'focus-within') return 1;
+        if (x.n === 'hover') return 2;
+        if (x.n === 'active') return 4;
+        if ((x.n === 'is' || x.n === 'where') && x.list && x.list.length) {
+          var u = 0;
+          for (var i = 0; i < x.list.length; i++) { var a = stateNeedOf(x.list[i]); if (!a) { u = 0; break; } u |= a; }
+          if (u) return u;
+        }
+      }
+    }
+    return 0;
+  }
+  function stateNeed(sel) {
+    var n = stateNeedOf(sel);
+    Object.defineProperty(sel, '_sn', { value: n, enumerable: false, writable: true });
+    return n;
   }
   function plainSel(sel) {
     var pl = plainParts(sel);
@@ -6444,18 +6483,26 @@
         sg = sigOf(el, rs);
         var sck = pe ? sg + ':' + pe : sg;
         sc = rs._sc.get(sck);
+        // (kept for the viewport its media rules were answered for)
+        if (sc && (sc.vw !== viewport.w || sc.vh !== viewport.h)) sc = undefined;
         if (sc) { for (var sh = 0; sh < sc.plain.length; sh++) hits.push(sc.plain[sh]); cand = sc.dyn; }
         else { setCandidates(rs, el, cand, pe); dyn = []; }
       } else setCandidates(rs, el, cand, pe);
     }
     var anc = shadowCount || !cand.length ? null : ancOf(el);
+    // (the states some element is in: a rule that needs one no element is
+    // in, :focus-visible with nothing focused, is not tried)
+    var stOn = shadowCount || d !== doc ? 7 : (doc._active ? 1 : 0) | (hoverEl ? 2 : 0) | (activeEl ? 4 : 0);
     for (var i = 0; i < cand.length; i++) {
       var w = cand[i], r = w.r;
       if (pe ? r.sel.pseudo !== pe || !(pe === 'backdrop' ? w.sh._backdrop : w.sh._pseudo) : r.sel.pseudo) continue;
+      var sn = r.sel._sn;
+      if (sn === undefined) sn = stateNeed(r.sel);
+      if (sn && !(sn & stOn)) { if (dyn) dyn.push(w); continue; }
       if (dyn) {
         var pl = r.sel._plain;
         if (pl === undefined) pl = plainSel(r.sel);
-        if (!pl || r.media) { dyn.push(w); continue; }
+        if (!pl) { dyn.push(w); continue; }
       }
       if (anc) {
         var need = r.sel._need;
@@ -6475,9 +6522,10 @@
       // kept ones, so that elements alike get the same key below)
       var plain = hits.slice();
       if (rs._sc.size >= 20000) rs._sc.clear();
-      rs._sc.set(pe ? sg + ':' + pe : sg, { plain: plain, dyn: dyn });
+      rs._sc.set(pe ? sg + ':' + pe : sg, { plain: plain, dyn: dyn, vw: viewport.w, vh: viewport.h });
       for (var di = 0; di < dyn.length; di++) {
         var w2 = dyn[di], r2 = w2.r;
+        if (r2.sel._sn && !(r2.sel._sn & stOn)) continue;
         if (anc) {
           var need2 = r2.sel._need;
           if (need2 === undefined) need2 = needOf(r2.sel);
@@ -8221,29 +8269,43 @@
     if (asJson) {
       // the children as JSON text, each from the last render when nothing
       // under it changed since
-      var kd = [], kel = [];
+      // (kdj: the same children as the host is sent them in a delta
+      // render, renderDelta: one it has already is only named. Where the
+      // children are changed on the way, a table's reordered or wrapped
+      // parts, collapsed borders, a split inline, they go whole.)
+      var collapsed = deltaOn && cs['border-collapse'] === 'collapse' && /^(inline-)?table$/.test(cs.display);
+      var kd = [], kel = [], kdj = deltaOn && !deltaOff && !collapsed ? [] : null, dm0 = marks.length, kn0;
+      if (collapsed) deltaOff++;
       if (pm) { kids.push(JSON.stringify(pm)); kd.push(pm.s.display); kel.push(null); }
       if (pb) { kids.push(JSON.stringify(pb)); kd.push(pb.s && pb.s.display); kel.push(null); }
+      if (kdj) for (kn0 = 0; kn0 < kids.length; kn0++) kdj.push(kids[kn0]);
       for (var jj = 0; jj < src.length; jj++) {
-        if (fl && src[jj] === fl.node) { kids.push(JSON.stringify(fl.box)); kd.push(''); kel.push(null); if (fl.rest) { kids.push(JSON.stringify(fl.rest)); kd.push(''); kel.push(null); } if (!fl.zw) continue; }
-        var rj = renderJson(src[jj], cs);
+        if (fl && src[jj] === fl.node) { kids.push(JSON.stringify(fl.box)); kd.push(''); kel.push(null); if (kdj) kdj.push(kids[kids.length - 1]); if (fl.rest) { kids.push(JSON.stringify(fl.rest)); kd.push(''); kel.push(null); if (kdj) kdj.push(kids[kids.length - 1]); } if (!fl.zw) continue; }
+        var dmk = marks.length;
+        var rj = renderJson(src[jj], cs), dj = lastDelta;
         if (rj && (holdsBlock(src[jj]) || rjPseudoBlock(src[jj], rj))) {
           var sp = splitInline(JSON.parse(rj));
-          for (var sq = 0; sq < sp.length; sq++) { kids.push(JSON.stringify(sp[sq])); kd.push(sp[sq].s.display); kel.push(null); }
+          unmark(dmk);
+          for (var sq = 0; sq < sp.length; sq++) { kids.push(JSON.stringify(sp[sq])); kd.push(sp[sq].s.display); kel.push(null); if (kdj) kdj.push(kids[kids.length - 1]); }
           continue;
         }
-        if (rj) { kids.push(rj); kd.push(kidDisplay(src[jj])); kel.push(src[jj]); }
+        if (rj) { kids.push(rj); kd.push(kidDisplay(src[jj])); kel.push(src[jj]); if (kdj) kdj.push(dj); }
       }
+      if (collapsed) deltaOff--;
       pa = leaf ? null : pseudoBox(n, cs, 'after');
       ctrLeave(n);
-      if (pa) { kids.push(JSON.stringify(pa)); kd.push(pa.s && pa.s.display); kel.push(null); }
-      if (/^(inline-)?table$/.test(cs.display)) { var ro = groupOrder(kd); kids = ro.map(function (x) { return kids[x]; }); kd = ro.map(function (x) { return kd[x]; }); kel = ro.map(function (x) { return kel[x]; }); }
+      if (pa) { kids.push(JSON.stringify(pa)); kd.push(pa.s && pa.s.display); kel.push(null); if (kdj) kdj.push(kids[kids.length - 1]); }
+      if (/^(inline-)?table$/.test(cs.display)) { var ro = groupOrder(kd); kids = ro.map(function (x) { return kids[x]; }); kd = ro.map(function (x) { return kd[x]; }); kel = ro.map(function (x) { return kel[x]; }); kdj = null; }
       var kids0 = kids;
       kids = anonTables(cs.display, kids, kd, o.i, true);
-      if (kids !== kids0) kel = null;
-      if (cs['border-collapse'] === 'collapse' && /^(inline-)?table$/.test(cs.display)) kids = collapseTable(o, kids, true, cs.color, kel);
+      if (kids !== kids0) { kel = null; kdj = null; }
+      if (cs['border-collapse'] === 'collapse' && /^(inline-)?table$/.test(cs.display)) { kids = collapseTable(o, kids, true, cs.color, kel); kdj = null; }
       var own = JSON.stringify(o);
       var kj = kids.join(',');
+      if (deltaOn) {
+        if (kdj) renderDj = own.slice(1, -1) + (kids.length ? ',"c":[' + kdj.join(',') + ']}' : '}');
+        else { unmark(dm0); renderDj = null; }
+      }
       // (a table part's own members and children, for its table's border
       // collapse: collapseTable takes them instead of parsing the JSON)
       renderParts = cs.display === 'table-cell' ? { o: o, raw: kj } : kel && /^table-(row|row-group|header-group|footer-group)$/.test(cs.display) ? { o: o, kids: kids, kel: kel } : null;
@@ -9014,22 +9076,70 @@
     if (/full-width/.test(tt)) t = t.replace(/[\u0021-\u007e ]/g, function (c) { return c === ' ' ? '\u3000' : String.fromCharCode(c.charCodeAt(0) + 0xfee0); });
     return t;
   }
+  // ---- a delta render (renderDelta, for a host that keeps the last page) --
+  // Each element's rendered text has a number ("n", in the delta's text of
+  // it only). Once the host has been sent an element's text, a later render
+  // in which nothing under it changed names it ({"r": number}) where the
+  // whole subtree's text would be; the host puts the node it kept there.
+  // So a frame's JSON is as long as what changed, not as the page, and the
+  // host parses and compares that much.
+  //   deltaOn      the host asked for delta renders
+  //   deltaEpoch   what the host holds is counted from here (a host that
+  //                lost a node asks for everything again: the next epoch)
+  //   lastDelta    the delta text of what renderJson returned last
+  //   renderDj     the delta text renderNode left for its element (no "n")
+  //   marks        the renders whose text this render sends, noted as sent
+  //                when the render is given to the host
+  //   deltaCheck   a test's: the whole page goes along ("whole"), for the
+  //                host to compare what it put together with
+  var deltaCheck = false;
+  //   deltaOff     > 0 under an element known to go whole (a table with
+  //                collapsed borders): no delta texts are made under it
+  var deltaOn = false, deltaEpoch = 1, deltaSerial = 0, lastDelta = '', renderDj = null, marks = [], deltaOff = 0;
+  function deltaOf(k) {
+    if (!k.json || deltaOff) { lastDelta = ''; return; }
+    if (k.sent === deltaEpoch) { lastDelta = '{"r":' + k.n + '}'; return; }
+    // (no delta text of its own: its whole text under its number)
+    lastDelta = k.dj || '{"n":' + k.n + ',' + k.json.slice(1);
+    marks.push(k);
+  }
+  // the renders noted since `from` are not sent as they are (their parent
+  // goes whole): their delta texts are let go
+  function unmark(from) {
+    for (var i = from; i < marks.length; i++) marks[i].dj = null;
+    marks.length = from;
+  }
   function renderJson(n, parentStyle) {
-    if (n.nodeType === 3) return n._data ? JSON.stringify(smallCapsText(n, parentStyle)) : '';
-    if (n.nodeType !== 1) return '';
+    if (n.nodeType === 3) { var tj = n._data ? JSON.stringify(smallCapsText(n, parentStyle)) : ''; lastDelta = tj; return tj; }
+    if (n.nodeType !== 1) { lastDelta = ''; return ''; }
     var k = n._rj;
     // a script's scrollTop is no change (generation): the box's own say
     var sc = n._sTop || n._sLeft ? (n._sTop || 0) + ',' + (n._sLeft || 0) : '0,0';
     // (one whose render set or read a counter or a quote renders again:
     // what it shows and leaves to what follows depends on what came before;
     // a <ul> anywhere no longer renders the whole page again each frame)
-    if (k && !k.ct && k.sg === styleGen && k.rv === n._rv && k.ps === parentStyle && k.sc === sc) return k.json;
+    if (k && !k.ct && k.sg === styleGen && k.rv === n._rv && k.ps === parentStyle && k.sc === sc && (!deltaOn || k.de === deltaEpoch)) {
+      if (deltaOn) deltaOf(k);
+      return k.json;
+    }
     var t0 = ctrTouch;
-    renderParts = null;
+    renderParts = null; renderDj = null;
+    var dm = marks.length;
     var r = renderNode(n, parentStyle, true);
     var json = r === null ? '' : typeof r === 'string' ? r : JSON.stringify(r);
-    n._rj = { sg: styleGen, rv: n._rv, ps: parentStyle, sc: sc, json: json, ct: ctrTouch !== t0, parts: typeof r === 'string' ? renderParts : null };
-    renderParts = null;
+    var nk = { sg: styleGen, rv: n._rv, ps: parentStyle, sc: sc, json: json, ct: ctrTouch !== t0, parts: typeof r === 'string' ? renderParts : null };
+    if (deltaOn) {
+      // (rendered again to the same text, a restyle that changed nothing:
+      // what the host has of it holds, under the number it had)
+      var was = n._rjl;
+      if (was && was.de === deltaEpoch && was.json === json) { nk.n = was.n; nk.dj = was.dj; nk.sent = was.sent; marks.length = dm; }
+      else { nk.n = json ? ++deltaSerial : 0; nk.dj = json && renderDj !== null && typeof r === 'string' ? '{"n":' + nk.n + ',' + renderDj : null; nk.sent = 0; }
+      nk.de = deltaEpoch;
+      n._rjl = nk;
+    }
+    n._rj = nk;
+    renderParts = null; renderDj = null;
+    if (deltaOn) deltaOf(nk);
     return json;
   }
   // an inline <svg> as markup for the host's painter, each shape with the
@@ -9278,11 +9388,13 @@
     for (var j = 0; j < n._c.length; j++) s += serializeSvg(n._c[j]);
     return s + '</' + n._qname + '>' + markers;
   }
-  function render() {
+  function render(delta) {
     if (!doc || !doc.documentElement) return JSON.stringify({ v: generation, root: null });
     flushTree();
     ctr = {}; qDepth = 0;
+    marks = []; deltaOff = 0;
     var root = renderJson(doc.documentElement, null);
+    var rk = doc.documentElement._rj, dmr = marks.length, topsJson = '';
     // the top layer's boxes after everything else, children of the root
     if (root && topLayer.length) {
       var rcs = computedOf(doc.documentElement), tops = [];
@@ -9296,7 +9408,23 @@
         topNow = null;
         if (tr) { var to = typeof tr === 'string' ? JSON.parse(tr) : tr; to.tl = 1; tops.push(JSON.stringify(to)); }
       }
-      if (tops.length) root = root.slice(-2) === ']}' ? root.slice(0, -2) + ',' + tops.join(',') + ']}' : root.slice(0, -1) + ',"c":[' + tops.join(',') + ']}';
+      // (a top layer box goes whole each time, with what is under it)
+      unmark(dmr);
+      if (tops.length) {
+        root = root.slice(-2) === ']}' ? root.slice(0, -2) + ',' + tops.join(',') + ']}' : root.slice(0, -1) + ',"c":[' + tops.join(',') + ']}';
+        if (delta) topsJson = tops.join(',');
+      }
+    }
+    if (delta) {
+      var whole = deltaCheck ? root : '';
+      // the page as the host is sent it: its root named when nothing
+      // changed, else with every part the host has only named
+      // (the top layer's boxes apart: the host puts them after the root's
+      // children, as they are in the whole page)
+      if (rk && rk.json) root = (rk.sent === deltaEpoch ? '{"r":' + rk.n + '}' : rk.dj || '{"n":' + rk.n + ',' + rk.json.slice(1)) + (topsJson ? ',"tops":[' + topsJson + ']' : '');
+      for (var mi = 0; mi < marks.length; mi++) { var mk = marks[mi]; mk.sent = deltaEpoch; mk.dj = null; }
+      marks = [];
+      root = (root || 'null') + (whole ? ',"whole":' + whole : '') + ',"d":' + deltaEpoch;
     }
     return '{"v":' + generation + ',"w":' + JSON.stringify(viewport.w) + ',"h":' + JSON.stringify(viewport.h) + ',"root":' + (root || 'null') + ',"title":' + JSON.stringify(doc.title) + (doc.compatMode === 'BackCompat' ? ',"quirks":true' : '') + (browserFonts ? ',"fm":"browser"' : '') + '}';
   }
@@ -10764,6 +10892,11 @@
     return 'ok';
   };
   G.__render = function () { var was = reflowing; reflowing = true; try { return render(); } finally { reflowing = was; } };
+  // the render tree as a delta for a host that keeps the last page (see
+  // renderJson): again = the host lost what it kept, everything is sent
+  G.__renderDelta = function (again) { var was = reflowing; reflowing = true; if (again) deltaEpoch++; try { return render(deltaOn); } finally { reflowing = was; } };
+  G.__deltaCheck = function (on) { deltaCheck = !!on; return String(deltaCheck); };
+  G.__deltaRender = function (on) { on = !!on; if (on !== deltaOn) { deltaOn = on; deltaEpoch++; } return String(deltaOn); };
   // the host draws text with the browser's own faces (the playground's
   // canvas), so a line of Arial has Arial's height, not that of the Open
   // Sans a native host draws for it

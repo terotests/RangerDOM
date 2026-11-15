@@ -129,6 +129,20 @@ impl Playground {
         self.exec("__installDefaults()");
         // sizes read after a change are laid out at once (SyncLayout)
         self.exec("__syncLayout(true)");
+        // a render sends what changed since the last one (Kept::resolve)
+        #[cfg(not(target_arch = "wasm32"))]
+        let delta = std::env::var("PG_NODELTA").is_err();
+        #[cfg(target_arch = "wasm32")]
+        let delta = true;
+        if delta {
+            self.exec("__deltaRender(true)");
+        }
+        // PG_DELTACHECK: each delta comes with the whole page, and what the
+        // host put together is compared with it (Synced::lay_out)
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::env::var("PG_DELTACHECK").is_ok() {
+            self.exec("__deltaCheck(true)");
+        }
         // its text is drawn by the browser (evg-webgl): the browser's faces
         self.exec("__browserFonts(true)");
     }
@@ -177,12 +191,18 @@ impl Playground {
     /// the render tree (webapi.js's cascade and boxes) as JSON
     pub fn render(&mut self) -> String {
         self.last_gen = self.value("__generation()");
-        self.page_json = self.value("__render()");
+        self.page_json = self.value("__renderDelta()");
         self.page_json.clone()
     }
     /// EVG lays the last render out; the boxes go back to the page
     pub fn layout(&mut self) -> String {
-        let (boxes, root, lay) = self.synced.borrow_mut().lay_out(&self.page_json);
+        let mut laid = self.synced.borrow_mut().lay_out(&self.page_json);
+        if laid.is_none() {
+            // (the delta names a node this host does not have: the whole page)
+            self.page_json = self.value("__renderDelta(1)");
+            laid = self.synced.borrow_mut().lay_out(&self.page_json);
+        }
+        let Some((boxes, root, lay)) = laid else { return String::new() };
         self.exec(&format!("__layout({})", quote(&format!("{{\"boxes\":{}}}", boxes))));
         self.root = Some(root.clone());
         self.lay = Some(lay.clone());
@@ -209,7 +229,7 @@ impl Playground {
 
 /// The render tree laid out by EVG: the boxes (JSON) for the page, and the
 /// tree and layout the display list is built from.
-fn lay_out(page_json: &str, w: f64, h: f64, kept: &mut Kept) -> (String, Rc<RefCell<EVGElement>>, Rc<RefCell<EVGLayout>>) {
+fn lay_out(page: &Rc<RefCell<JsonValue>>, delta: bool, w: f64, h: f64, kept: &mut Kept) -> (String, Rc<RefCell<EVGElement>>, Rc<RefCell<EVGLayout>>) {
     #[cfg(not(target_arch = "wasm32"))]
     let timing = std::env::var("PG_TIMING").is_ok();
     #[cfg(not(target_arch = "wasm32"))]
@@ -218,15 +238,15 @@ fn lay_out(page_json: &str, w: f64, h: f64, kept: &mut Kept) -> (String, Rc<RefC
     let mut lap = |what: &str| { if timing { eprintln!("  layout {} {:?}", what, t0.elapsed()); } t0 = std::time::Instant::now(); };
     #[cfg(target_arch = "wasm32")]
     let lap = |_: &str| {};
-    let p = JsonParser::parse(page_json.to_string());
-    let page = p.borrow_mut().value();
-    lap("parse");
+    let page = page.clone();
     let root = EVGElement::create_div();
     root.borrow_mut().width = Some(EVGUnit::px(w));
     root.borrow_mut().height = Some(EVGUnit::px(h));
     EVGElement::set_attribute(&root, "white-space", "nowrap".to_string());
     EVGElement::set_attribute(&root, "font-family", "Arial".to_string());
-    kept.share(&page);
+    if !delta {
+        kept.share(&page);
+    }
     lap("share");
     kept.svgs.borrow_mut().frame();
     let b = DomView::buildKept(&page, 0, w, h, Rc::clone(&kept.svgs));
@@ -250,7 +270,7 @@ fn lay_out(page_json: &str, w: f64, h: f64, kept: &mut Kept) -> (String, Rc<RefC
             EVGDisplayList::build(&dl, root.clone());
             EVGDisplayList::to_json(&dl)
         };
-        let fresh_page = JsonParser::parse(page_json.to_string()).borrow_mut().value();
+        let fresh_page = JsonParser::parse(page.borrow().toJson()).borrow_mut().value();
         let froot = EVGElement::create_div();
         froot.borrow_mut().width = Some(EVGUnit::px(w));
         froot.borrow_mut().height = Some(EVGUnit::px(h));
@@ -316,6 +336,62 @@ struct Kept {
     seen: usize,
     same: usize,
     off: bool,
+    /// delta pages: the nodes kept by their numbers, the epoch they are
+    /// of, the most nodes a page had and how many this one sent, the root
+    by_n: HashMap<i64, Rc<RefCell<JsonValue>>>,
+    epoch: i64,
+    total: usize,
+    fresh: usize,
+    live: usize,
+    root: Option<Rc<RefCell<JsonValue>>>,
+}
+
+/// a delta page put together is the whole page (but for the numbers, "n")
+#[cfg(not(target_arch = "wasm32"))]
+fn same_page(a: &Rc<RefCell<JsonValue>>, b: &Rc<RefCell<JsonValue>>, at: &mut String) -> bool {
+    let (ka, kb) = (a.borrow().kind, b.borrow().kind);
+    if ka != kb {
+        at.push_str(" kind");
+        return false;
+    }
+    match ka {
+        5 => {
+            let keys: Vec<String> = a.borrow().keys.iter().filter(|k| k.as_str() != "n").cloned().collect();
+            let kb: Vec<String> = b.borrow().keys.clone();
+            if keys != kb {
+                at.push_str(&format!(" keys {:?} / {:?} of {}", keys, kb, b.borrow().getText("i")));
+                return false;
+            }
+            for k in keys.iter() {
+                if !same_page(&a.borrow().get(k), &b.borrow().get(k), at) {
+                    at.push_str(&format!(" <{} of {}", k, b.borrow().getText("i")));
+                    return false;
+                }
+            }
+            true
+        }
+        4 => {
+            let (ia, ib) = (a.borrow().items.clone(), b.borrow().items.clone());
+            if ia.len() != ib.len() {
+                at.push_str(&format!(" count {} / {}", ia.len(), ib.len()));
+                return false;
+            }
+            for i in 0..ia.len() {
+                if !same_page(&ia[i], &ib[i], at) {
+                    at.push_str(&format!(" [{}]", i));
+                    return false;
+                }
+            }
+            true
+        }
+        _ => {
+            let same = a.borrow().text() == b.borrow().text() && a.borrow().b == b.borrow().b;
+            if !same {
+                at.push_str(&format!(" {:?} / {:?}", a.borrow().text(), b.borrow().text()));
+            }
+            same
+        }
+    }
 }
 
 fn mix(h: u64, v: u64) -> u64 {
@@ -364,7 +440,142 @@ impl Kept {
         let off = std::env::var("PG_NORETAIN").is_ok();
         #[cfg(target_arch = "wasm32")]
         let off = false;
-        Kept { svgs: svgs, nodes: HashMap::new(), styles: HashMap::new(), seen: 0, same: 0, off: off }
+        Kept { svgs: svgs, nodes: HashMap::new(), styles: HashMap::new(), seen: 0, same: 0, off: off, by_n: HashMap::new(), epoch: 0, total: 0, fresh: 0, live: 0, root: None }
+    }
+    /// a delta page (webapi.js renderJson): each node it names ({"r": n})
+    /// is the node kept under that number, each node with a number is kept.
+    /// Some(true): its root is the last page's. None: it names a node that
+    /// is not kept.
+    fn resolve(&mut self, page: &Rc<RefCell<JsonValue>>) -> Option<bool> {
+        let epoch = page.borrow().getInt("d", 0);
+        if epoch != self.epoch {
+            self.by_n = HashMap::new();
+            self.styles = HashMap::new();
+            self.nodes = HashMap::new();
+            self.root = None;
+            self.total = 0;
+            self.live = 0;
+            self.epoch = epoch;
+        }
+        self.fresh = 0;
+        let root = page.borrow().get("root");
+        if root.borrow().kind != 5 {
+            self.root = None;
+            return Some(false);
+        }
+        let Some(r) = self.node_of(&root) else {
+            self.by_n = HashMap::new();
+            self.root = None;
+            return None;
+        };
+        let mut same = match &self.root { Some(was) => Rc::ptr_eq(was, &r), None => false };
+        self.root = Some(r.clone());
+        // the top layer's boxes come apart ("tops"): the page's root is a
+        // copy of the kept one with them after its children
+        let tops = page.borrow().get("tops");
+        if tops.borrow().kind == 4 && !tops.borrow().items.is_empty() {
+            let mut copy = r.borrow().clone();
+            copy.stamp = 0;
+            let kids = JsonValue::mkArr();
+            let c = r.borrow().get("c");
+            if c.borrow().kind == 4 {
+                kids.borrow_mut().items = c.borrow().items.clone();
+            }
+            for t in tops.borrow().items.iter() {
+                kids.borrow_mut().items.push(t.clone());
+            }
+            let top_root = Rc::new(RefCell::new(copy));
+            top_root.borrow_mut().put("c", kids);
+            page.borrow_mut().put("root", top_root);
+            page.borrow_mut().put("tops", JsonValue::mkNull());
+            same = false;
+        } else {
+            page.borrow_mut().put("root", r.clone());
+        }
+        // (a kept node only this list holds is no longer in the page: let
+        // go, with what was under it. A page that names one later, a
+        // subtree taken out and put back unchanged, is asked for whole.)
+        if self.fresh > 0 && (self.by_n.len() < 4096 || self.by_n.len() > self.live + self.live / 8) {
+            for _ in 0..8 {
+                let before = self.by_n.len();
+                self.by_n.retain(|_, v| Rc::strong_count(v) > 1);
+                if self.by_n.len() == before {
+                    break;
+                }
+            }
+            self.styles.retain(|_, v| Rc::strong_count(&v.1) > 1);
+            self.live = self.by_n.len();
+        }
+        if self.fresh > self.total {
+            self.total = self.fresh;
+        }
+        // (elements are kept for a page that is mostly the last one, see share)
+        let on = !self.off && self.fresh * 4 < self.total;
+        self.svgs.borrow().memo.borrow_mut().on = on;
+        Some(same)
+    }
+    /// the nodes with an id under n, n too
+    fn ids(n: &Rc<RefCell<JsonValue>>) -> usize {
+        if n.borrow().kind != 5 {
+            return 0;
+        }
+        let mut count = if n.borrow().keyAt("i") >= 0 { 1 } else { 0 };
+        let c = n.borrow().get("c");
+        if c.borrow().kind == 4 {
+            for k in c.borrow().items.iter() {
+                count += Kept::ids(k);
+            }
+        }
+        count
+    }
+    fn node_of(&mut self, n: &Rc<RefCell<JsonValue>>) -> Option<Rc<RefCell<JsonValue>>> {
+        if n.borrow().kind != 5 {
+            return Some(n.clone());
+        }
+        if n.borrow().keys.len() == 1 && n.borrow().keys[0] == "r" {
+            let id = n.borrow().getInt("r", -1);
+            return self.by_n.get(&id).cloned();
+        }
+        // (a node without a number was sent whole: nothing under it is
+        // named or kept by itself)
+        if n.borrow().keyAt("n") < 0 {
+            self.fresh += Kept::ids(n);
+            return Some(n.clone());
+        }
+        let c = n.borrow().get("c");
+        if c.borrow().kind == 4 {
+            let kids = c.borrow().items.clone();
+            let mut out = Vec::with_capacity(kids.len());
+            for k in kids.iter() {
+                out.push(self.node_of(k)?);
+            }
+            c.borrow_mut().items = out;
+        }
+        let id = n.borrow().getText("i");
+        if !id.is_empty() {
+            self.fresh += 1;
+            // (a node sent again keeps its style object while that holds
+            // the same: its children were built under it)
+            let s = n.borrow().get("s");
+            if s.borrow().kind == 5 {
+                let hs = hash_value(&s);
+                let mut keep = s.clone();
+                if let Some((was, old)) = self.styles.get(&id) {
+                    if *was == hs {
+                        keep = old.clone();
+                    }
+                }
+                if !Rc::ptr_eq(&keep, &s) {
+                    n.borrow_mut().put("s", keep.clone());
+                }
+                self.styles.insert(id, (hs, keep));
+            }
+        }
+        let num = n.borrow().getInt("n", -1);
+        if num >= 0 {
+            self.by_n.insert(num, n.clone());
+        }
+        Some(n.clone())
     }
     /// the page with the last page's nodes where they hold the same
     fn share(&mut self, page: &Rc<RefCell<JsonValue>>) {
@@ -469,8 +680,7 @@ impl Kept {
             }
             self.carry(k, nodes, styles);
         }
-    }
-}
+    }}
 
 /// What a synchronous layout left for the next paint.
 struct Synced {
@@ -487,18 +697,45 @@ struct Synced {
 }
 
 impl Synced {
-    fn lay_out(&mut self, json: &str) -> (String, Rc<RefCell<EVGElement>>, Rc<RefCell<EVGLayout>>) {
+    /// None: the page is a delta that names a node this host does not
+    /// have (the page is asked for whole: __renderDelta(1), "!")
+    fn lay_out(&mut self, json: &str) -> Option<(String, Rc<RefCell<EVGElement>>, Rc<RefCell<EVGLayout>>)> {
         if let Some((r, l)) = self.tree.clone() {
             if self.json == json {
-                return (self.boxes.clone(), r, l);
+                return Some((self.boxes.clone(), r, l));
             }
         }
-        let (boxes, root, lay) = lay_out(json, self.w, self.h, &mut self.kept);
+        #[cfg(not(target_arch = "wasm32"))]
+        let t0 = std::time::Instant::now();
+        let page = JsonParser::parse(json.to_string()).borrow_mut().value();
+        let delta = page.borrow().has("d");
+        if delta {
+            let same = self.kept.resolve(&page)?;
+            #[cfg(not(target_arch = "wasm32"))]
+            if page.borrow().has("whole") {
+                let mut at = String::new();
+                if same_page(&page.borrow().get("root"), &page.borrow().get("whole"), &mut at) {
+                    eprintln!("DELTACHECK same");
+                } else {
+                    eprintln!("DELTACHECK DIFFERENT at {}", at);
+                }
+                page.borrow_mut().put("whole", JsonValue::mkNull());
+            }
+            // (its root is the one laid out last: nothing changed)
+            if same {
+                if let Some((r, l)) = self.tree.clone() {
+                    return Some((self.boxes.clone(), r, l));
+                }
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::env::var("PG_TIMING").is_ok() { eprintln!("  layout parse {:?} ({} bytes{})", t0.elapsed(), json.len(), if delta { ", delta" } else { "" }); }
+        let (boxes, root, lay) = lay_out(&page, delta, self.w, self.h, &mut self.kept);
         self.json = json.to_string();
         self.boxes = boxes.clone();
         self.tree = Some((root.clone(), lay.clone()));
         self.last = Some((root.clone(), lay.clone()));
-        (boxes, root, lay)
+        Some((boxes, root, lay))
     }
 }
 
@@ -511,7 +748,10 @@ struct SyncLayout {
 
 impl cer::vm::HostSync for SyncLayout {
     fn call(&mut self, request: &str) -> String {
-        self.s.borrow_mut().lay_out(request).0
+        match self.s.borrow_mut().lay_out(request) {
+            Some(l) => l.0,
+            None => "!".to_string(),
+        }
     }
 }
 

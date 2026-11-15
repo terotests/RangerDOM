@@ -11,6 +11,8 @@
 //   &engine=wasm|js  RangerDOM as WebAssembly (default; cargo build of
 //                    playground/wasm) or as JavaScript (rangerdom_pg.js)
 //   &size=W,H        the page's viewport (default 1200,800)
+//   &delta=0         each render sends the whole page to the layout, not
+//                    only what changed since the last one
 //   &sync=0          sizes read after a change come from the last frame's
 //                    layout (default: laid out at once, as a browser does)
 //   &budget=ms       once a step took longer than this in RangerDOM, the
@@ -160,6 +162,8 @@ async function rdLoad(name) {
   pg.start(html, base + "index.html", W, H);
   // ?sync=0: a size read after a change waits for the next frame's layout
   if (params.get("sync") === "0") pg.eval("__syncLayout(false)");
+  // ?delta=0: each render sends the whole page to the layout, not what changed
+  if (params.get("delta") === "0") pg.eval("__deltaRender(false)");
   pg.runScripts();
   clock = performance.now();
   draw();
