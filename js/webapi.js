@@ -2191,6 +2191,9 @@
       return lo;
     }
     if (!parts) {
+      // (a var() in it is substituted first, when the style is computed:
+      // Bootstrap's btn-close, `transparent var(--bs-btn-close-bg) center/1em auto no-repeat`)
+      if (n === 'background' && /var\(/.test(v)) { var ob = {}; ob[n] = v; return ob; }
       if (n === 'background') {
         var bg = [], color = null, image = null, rep = [], pos = [], size = null, att = null;
         splitValue(v).forEach(function (t) {
@@ -4246,6 +4249,55 @@
   function fireChange(n) {
     dispatch(n, new InputEvent('input', { bubbles: true, composed: true }));
     dispatch(n, new Event('change', { bubbles: true }));
+  }
+  // a select's option list, as a browser shows it on a press: a box of the
+  // options under the select, over the page (the last element of body), closed by a choice, a press
+  // elsewhere or Escape
+  var picker = null;
+  function pickerOpenFor(sel) {
+    pickerClose();
+    var r = sel.getBoundingClientRect(), cs = getComputedStyle(sel);
+    var box = doc.createElement('div');
+    box.setAttribute('data-rd-picker', '');
+    box.style.cssText = 'position:fixed;z-index:2147483647;box-sizing:border-box;background:#fff;border:1px solid #767676;border-radius:4px;' +
+      'box-shadow:0 2px 6px rgba(0,0,0,.25);padding:2px 0;color:#000;white-space:nowrap;overflow:hidden;' +
+      'font-family:' + (cs.fontFamily || 'sans-serif').replace(/;/g, '') + ';font-size:' + (cs.fontSize || '16px') + ';line-height:1.25;' +
+      'left:' + Math.round(r.left) + 'px;top:' + Math.round(r.bottom + 1) + 'px;width:' + Math.round(r.width) + 'px';
+    var opts = sel.options, items = [];
+    for (var i = 0; i < opts.length; i++) {
+      var it = doc.createElement('div');
+      it.textContent = opts[i].text || ' ';
+      it.style.cssText = 'padding:2px 8px;' + (opts[i].disabled ? 'color:#888;' : '');
+      it._pickIndex = i;
+      box.appendChild(it);
+      items.push(it);
+    }
+    (doc.body || doc.documentElement).appendChild(box);
+    picker = { sel: sel, box: box, items: items, at: sel.selectedIndex };
+    pickerMark(picker.at);
+  }
+  function pickerMark(i) {
+    if (!picker) return;
+    picker.at = i;
+    for (var k = 0; k < picker.items.length; k++) {
+      picker.items[k].style.backgroundColor = k === i ? 'rgb(30, 144, 255)' : '';
+      picker.items[k].style.color = k === i ? '#fff' : (picker.sel.options[k] && picker.sel.options[k].disabled ? '#888' : '');
+    }
+  }
+  function pickerClose() {
+    if (!picker) return;
+    if (picker.box.parentNode) picker.box.parentNode.removeChild(picker.box);
+    picker = null;
+  }
+  function pickerChoose(i) {
+    if (!picker) return;
+    var sel = picker.sel, o = sel.options[i];
+    pickerClose();
+    if (o && !o.disabled && sel.selectedIndex !== i) { sel.selectedIndex = i; fireChange(sel); }
+  }
+  function pickerItemOf(t) {
+    for (var n = t; n && n.nodeType === 1; n = n.parentNode) if (n._pickIndex !== undefined && picker && n.parentNode === picker.box) return n;
+    return null;
   }
   function submitForm(btn) {
     var f = btn.form;
@@ -10405,6 +10457,7 @@
     // a press, release or key is a user gesture (window.open may follow)
     if ((t === 'down' || t === 'up' || t === 'key') && typeof G.__activate === 'function') G.__activate();
     if (t === 'move') {
+      if (picker && target) { var pmi = pickerItemOf(target); if (pmi && pmi._pickIndex !== picker.at) pickerMark(pmi._pickIndex); }
       var over = target || (doc && doc.documentElement);
       if (over !== hoverEl) {
         var old = hoverEl;
@@ -10416,6 +10469,14 @@
       }
       if (over) { dispatch(over, new PointerEvent('pointermove', mouseInit(m, {}))); dispatch(over, new MouseEvent('mousemove', mouseInit(m, {}))); }
       return 'ok';
+    }
+    if (t === 'down' && picker) {
+      var pit = target && pickerItemOf(target);
+      if (pit) { pickerChoose(pit._pickIndex); return 'ok'; }
+      var onPicker = target && picker.box.contains(target), again = target && (target === picker.sel || picker.sel.contains(target));
+      pickerClose();
+      if (onPicker) return 'ok';
+      if (again) return 'ok';
     }
     if (t === 'down') {
       if (!target) return 'no target';
@@ -10434,6 +10495,10 @@
         while (f && f.nodeType === 1 && !focusable(f)) f = f.parentNode;
         doc._focusVisible = false;
         if (f && f.nodeType === 1) focusElement(f); else if (doc._active) focusElement(null);
+        // (a select opens its option list)
+        var ps = target;
+        while (ps && ps.nodeType === 1 && ps.localName !== 'select') ps = ps.parentNode;
+        if (ps && ps.nodeType === 1 && !ps.disabled && !ps.multiple && !(ps.size > 1)) pickerOpenFor(ps);
       }
       return 'ok';
     }
@@ -10703,6 +10768,16 @@
       el.click();
       return;
     }
+    if (picker && picker.sel === el) {
+      if (k === 'Escape') { pickerClose(); return; }
+      if (k === 'Enter' || k === ' ') { pickerChoose(picker.at); return; }
+      if (k === 'ArrowDown' || k === 'ArrowUp') {
+        var pi = picker.at + (k === 'ArrowDown' ? 1 : -1);
+        if (pi >= 0 && pi < picker.items.length) pickerMark(pi);
+        return;
+      }
+    }
+    if (el.localName === 'select' && (k === 'Enter' || k === ' ' || (m.alt && (k === 'ArrowDown' || k === 'ArrowUp')))) { pickerOpenFor(el); return; }
     if (el.localName === 'select' && (k === 'ArrowDown' || k === 'ArrowUp')) {
       var opts = el.options, idx = el.selectedIndex + (k === 'ArrowDown' ? 1 : -1);
       if (idx >= 0 && idx < opts.length) { el.selectedIndex = idx; fireChange(el); }

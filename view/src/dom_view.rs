@@ -6007,6 +6007,27 @@ impl DomView {
                 if block_p && (!s.borrow().has("left") && !s.borrow().has("right")) && self.dirNow == "rtl" {
                     EVGElement::set_attribute(&e, "right", "0px".to_string());
                 }
+                // (in a flex container, an axis with no inset is where the
+                // container would put it as its only item: EVG's static
+                // place for flex takes both axes, so it is given only when
+                // the axis with an inset is the main one and justify-content
+                // leaves the item at the start, the search icon of an
+                // ag-grid filter field)
+                if gd == "flex" || gd == "inline-flex" {
+                    let fdir: String = self.outerS.borrow().getText("flex-direction");
+                    let fjc: String = self.outerS.borrow().getText("justify-content");
+                    let start_jc: bool = (fjc.is_empty() || fjc == "normal") || (fjc == "flex-start" || fjc == "start");
+                    let no_y: bool = !s.borrow().has("top") && !s.borrow().has("bottom");
+                    let no_x: bool = !s.borrow().has("left") && !s.borrow().has("right");
+                    if start_jc && (fdir.is_empty() || fdir == "row") && (no_y && self.dirNow != "rtl") {
+                        EVGElement::set_attribute(&e, "top", "0px".to_string());
+                        EVGElement::set_attribute(&e, "static-flex", "true".to_string());
+                    }
+                    if start_jc && fdir == "column" && (no_x && self.dirNow != "rtl") {
+                        EVGElement::set_attribute(&e, "left", "0px".to_string());
+                        EVGElement::set_attribute(&e, "static-flex", "true".to_string());
+                    }
+                }
                 if gd == "grid" || gd == "inline-grid" {
                     if !s.borrow().has("top") && !s.borrow().has("bottom") {
                         EVGElement::set_attribute(&e, "top", "0px".to_string());
@@ -7839,6 +7860,18 @@ impl DomView {
                 tinh = self.inherit(&inh, &JsonValue::mkObj());
                 tinh.borrow_mut().put("color", JsonValue::mkStr("rgb(117, 117, 117)".to_string()));
             }
+            // (appearance: none: drawn from its own CSS, its box, border,
+            // radius and background picture, as Bootstrap's form-switch)
+            let app: String = s.borrow().getText("appearance");
+            let wapp: String = s.borrow().getText("-webkit-appearance");
+            if (a.borrow().getText("type") == "checkbox" || a.borrow().getText("type") == "radio") && (app == "none" || wapp == "none") {
+                e.borrow_mut().role = a.borrow().getText("type");
+                e.borrow_mut().a11y_checked = 1;
+                if a.borrow().getBool("checked", false) {
+                    e.borrow_mut().a11y_checked = 2;
+                }
+                return e;
+            }
             if a.borrow().getText("type") == "checkbox" || a.borrow().getText("type") == "radio" {
                 // drawn as Chromium draws it (its native look): a 13px box
                 EVGElement::set_attribute(&e, "width", "13px".to_string());
@@ -7887,6 +7920,25 @@ impl DomView {
                 let mut ws: String = "pre-wrap".to_string();
                 if t == "input" {
                     ws = "pre".to_string();
+                    // (an input's line is in the middle of a taller box, as
+                    // a browser centres it: ag-grid's 32px filter field)
+                    if display == "block" || display == "inline-block" {
+                        EVGElement::set_attribute(&e, "justify-content", "center".to_string());
+                        // (a min-height taller than its line is its height:
+                        // EVG centres in a set height)
+                        let imh: String = s.borrow().getText("min-height");
+                        if s.borrow().getText("height").is_empty() && DomText::index_of(&imh, "px") > 0 {
+                            let mut need: f64 = DomView::lineHeight(&inh);
+                            let mut set_h: f64 = DomView::pxOf(&imh);
+                            if s.borrow().getText("box-sizing") == "border-box" {
+                                need = need + (DomView::pxOf(&s.borrow().getText("padding-top")) + (DomView::pxOf(&s.borrow().getText("padding-bottom")) + (DomView::side(&s, "top") + DomView::side(&s, "bottom"))));
+                            }
+                            if need > set_h {
+                                set_h = need;
+                            }
+                            EVGElement::set_attribute(&e, "height", format!("{}px", DomView::fmt(set_h)));
+                        }
+                    }
                 }
                 tinh = self.inherit(&tinh, &JsonValue::mkObj());
                 tinh.borrow_mut().put("white-space", JsonValue::mkStr(ws.to_string()));
@@ -8864,6 +8916,29 @@ impl DomView {
         let neg_z: bool = (ppos == "absolute" || (ppos == "fixed" || (ppos == "relative" || ppos == "sticky"))) && pz.starts_with("-");
         if self.lateCount > late_from && !late_self && !neg_z {
             EVGElement::set_attribute(&e, "paint-late", "true".to_string());
+        }
+        // a box that makes no stacking context of its own paints the
+        // z-indexed boxes inside it among its siblings by their z-index
+        // (EVG orders late boxes parent by parent): Bootstrap's dropdown,
+        // z-index 1000 in the navbar, over the cards that come after it
+        if self.lateCount > late_from && !neg_z && !pz.parse::<i64>().ok().is_some() {
+            let sop: String = s.borrow().getText("opacity");
+            let str_: String = s.borrow().getText("transform");
+            let sfl: String = s.borrow().getText("filter");
+            let own_ctx: bool = (!sop.is_empty() && sop != "1") || ((!str_.is_empty() && str_ != "none") || (!sfl.is_empty() && sfl != "none"));
+            if !own_ctx {
+                let mut mz: f64 = 0.0;
+                let __it_zk = e.borrow().children.clone();
+                for zk in __it_zk.iter().cloned() {
+                    let zx: Rc<RefCell<EVGCssExtra>> = EVGLayoutFull::cx(Rc::clone(&zk));
+                    if zx.borrow().paint_late && zx.borrow().paint_z > mz {
+                        mz = zx.borrow().paint_z;
+                    }
+                }
+                if mz > 0.0 {
+                    EVGElement::set_attribute(&e, "paint-z", DomView::fmt(mz));
+                }
+            }
         }
         self.defH = was_def_h;
         self.defHMaybe = was_maybe;
@@ -10290,6 +10365,21 @@ impl DomView {
                                 &inh,
                                 runId.clone()
                             );
+                            // (in a column its text-align places the
+                            // stretched item's line: EVG keeps a text item
+                            // as wide as its text, so the item goes where
+                            // the line would, Bootstrap's progress bar)
+                            let cs_n: Rc<RefCell<JsonValue>> = n.borrow().get("s");
+                            let cfd: String = cs_n.borrow().getText("flex-direction");
+                            let cai: String = cs_n.borrow().getText("align-items");
+                            let cta: String = DomView::alignOf(&inh);
+                            if (display == "flex" || display == "inline-flex") && (cfd == "column" || cfd == "column-reverse") && (cai.is_empty() || cai == "normal" || cai == "stretch") && (cta == "center" || cta == "right") {
+                                if cta == "center" {
+                                    EVGElement::set_attribute(&_tmp_1, "align-self", "center".to_string());
+                                } else {
+                                    EVGElement::set_attribute(&_tmp_1, "align-self", "flex-end".to_string());
+                                }
+                            }
                             EVGElement::add_child(&e, _tmp_1);
                         } else {
                             // (a line that does not wrap: the spaces at
