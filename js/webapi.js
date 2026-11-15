@@ -11356,12 +11356,13 @@
     var was = reflowing; reflowing = true;
     try {
       // (a patched style has its properties in another order, patchedStyle:
-      // members by name)
+      // members by name; a script's scrollTop renders nothing again, the
+      // host moves the box: "sc" left out)
       var norm = function (v) {
         if (Array.isArray(v)) return v.map(norm);
         if (!v || typeof v !== 'object') return v;
         var o = {}, ks = Object.keys(v).sort();
-        for (var i = 0; i < ks.length; i++) if (ks[i] !== 'v') o[ks[i]] = norm(v[ks[i]]);
+        for (var i = 0; i < ks.length; i++) if (ks[i] !== 'v' && ks[i] !== 'sc') o[ks[i]] = norm(v[ks[i]]);
         return o;
       };
       var a = render(false);
