@@ -867,12 +867,30 @@ impl DomView {
     }
     #[doc(hidden)]
     pub fn build(page: &Rc<RefCell<JsonValue>>, index: i64, w: f64, h: f64) -> Rc<RefCell<EVGElement>> {
-        DomView::buildWith(page, index, w, h, Rc::new(RefCell::new(DomSvgDocs::new())))
+        let r: Rc<RefCell<EVGElement>> = DomView::buildWith(page, index, w, h, Rc::new(RefCell::new(DomSvgDocs::new())));
+        DomView::outOfFlow(&r);
+        r
+    }
+    /// The layout notes that a box is out of flow (is_absolute) when it
+    /// lays the box out, and a box around it that fits its content asks
+    /// before that: a new tree then gave such a box the room's width, a
+    /// kept one its content's. Noted here, both give the content's.
+    fn outOfFlow(el: &Rc<RefCell<EVGElement>>) {
+        if !el.borrow().is_absolute && EVGElement::has_absolute_position(el) {
+            el.borrow_mut().is_absolute = true;
+        }
+        let n: i64 = el.borrow().children.len() as i64;
+        for i in 0..n {
+            let c = Rc::clone(&el.borrow().children[i as usize]);
+            DomView::outOfFlow(&c);
+        }
     }
     /// build with what earlier frames parsed and built (svgs, its memo)
     #[doc(hidden)]
     pub fn buildKept(page: &Rc<RefCell<JsonValue>>, index: i64, w: f64, h: f64, svgs: Rc<RefCell<DomSvgDocs>>) -> Rc<RefCell<EVGElement>> {
-        DomView::buildWith(page, index, w, h, svgs)
+        let r: Rc<RefCell<EVGElement>> = DomView::buildWith(page, index, w, h, svgs);
+        DomView::outOfFlow(&r);
+        r
     }
     #[doc(hidden)]
     pub fn buildWith(page: &Rc<RefCell<JsonValue>>, index: i64, w: f64, h: f64, svgs: Rc<RefCell<DomSvgDocs>>) -> Rc<RefCell<EVGElement>> {
