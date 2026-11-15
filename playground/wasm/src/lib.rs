@@ -14,7 +14,7 @@ use ranger::cell::RefCell;
 use std::collections::HashMap;
 
 use rangerdom_json::{JsonParser, JsonValue};
-use rangerdom_view::{DomSvgDocs, DomView};
+use rangerdom_view::{DomBoxes, DomSvgDocs, DomView};
 use rangerevg::{EVGDisplayList, EVGElement, EVGLayout, EVGUnit};
 
 const PRELUDE: &str = include_str!("../js/prelude.js");
@@ -263,7 +263,11 @@ fn lay_out(page: &Rc<RefCell<JsonValue>>, delta: bool, w: f64, h: f64, kept: &mu
     lap("evg");
     DomView::settle(&b);
     lap("settle");
-    let boxes = DomView::boxes(&b, 0);
+    #[cfg(not(target_arch = "wasm32"))]
+    let all = std::env::var("PG_FULLBOXES").is_ok();
+    #[cfg(target_arch = "wasm32")]
+    let all = false;
+    let boxes = if all { DomView::boxes(&b, 0) } else { DomView::boxesSince(&b, 0, &kept.boxes) };
     lap("boxes");
     // PG_RETAINCHECK: the same page built with nothing kept gives the same
     // boxes and the same display list, or the difference is printed
@@ -289,6 +293,20 @@ fn lay_out(page: &Rc<RefCell<JsonValue>>, delta: bool, w: f64, h: f64, kept: &mu
         EVGLayout::layout(&flay, froot.clone());
         DomView::settle(&fb);
         let fboxes = DomView::boxes(&fb, 0);
+        // (the changes sent, taken as webapi.js takes them, are all the boxes)
+        if !all {
+            let m = JsonParser::parse(boxes.clone()).borrow_mut().value();
+            let (set, gone) = (m.borrow().get("set"), m.borrow().get("gone"));
+            for (i, k) in set.borrow().keys.iter().enumerate() { kept.mirror.insert(k.clone(), set.borrow().items[i].borrow().toJson()); }
+            for g in gone.borrow().items.iter() { kept.mirror.remove(&g.borrow().str); }
+            let full = JsonParser::parse(DomView::boxes(&b, 0)).borrow_mut().value();
+            let mut bad = full.borrow().keys.len() != kept.mirror.len();
+            for (i, k) in full.borrow().keys.iter().enumerate() {
+                if kept.mirror.get(k) != Some(&full.borrow().items[i].borrow().toJson()) { bad = true; }
+            }
+            if bad { eprintln!("RETAIN box changes differ: {} boxes, {} after the changes", full.borrow().keys.len(), kept.mirror.len()); }
+        }
+        let boxes = DomView::boxes(&b, 0);
         let (kl, fl) = (list(&root, &lay), list(&froot, &flay));
         let first = |a: &str, b: &str| {
             let (x, y) = (a.as_bytes(), b.as_bytes());
@@ -335,6 +353,12 @@ fn lay_out(page: &Rc<RefCell<JsonValue>>, delta: bool, w: f64, h: f64, kept: &mu
 /// a grid builds those rows, not the page.
 struct Kept {
     svgs: Rc<RefCell<DomSvgDocs>>,
+    /// the boxes the page has: what DomView::boxesSince sends is what
+    /// changed since (PG_FULLBOXES: all of them every time)
+    boxes: Rc<RefCell<DomBoxes>>,
+    /// PG_RETAINCHECK: the boxes a page that took every change has
+    #[cfg(not(target_arch = "wasm32"))]
+    mirror: HashMap<String, String>,
     nodes: HashMap<String, (u64, Rc<RefCell<JsonValue>>)>,
     styles: HashMap<String, (u64, Rc<RefCell<JsonValue>>)>,
     /// the nodes of this page with an id, and how many of them are the
@@ -342,6 +366,13 @@ struct Kept {
     seen: usize,
     same: usize,
     off: bool,
+    /// noting the elements of mostly new pages: how many such pages in a
+    /// row the page after them made no use of (unused), whether the last
+    /// page was noted, and the memo's counts when it began
+    unused: usize,
+    noted: bool,
+    hits0: i64,
+    misses0: i64,
     /// delta pages: the nodes kept by their numbers, the epoch they are
     /// of, the most nodes a page had and how many this one sent, the root
     by_n: HashMap<i64, Rc<RefCell<JsonValue>>>,
@@ -446,7 +477,7 @@ impl Kept {
         let off = std::env::var("PG_NORETAIN").is_ok();
         #[cfg(target_arch = "wasm32")]
         let off = false;
-        Kept { svgs: svgs, nodes: HashMap::new(), styles: HashMap::new(), seen: 0, same: 0, off: off, by_n: HashMap::new(), epoch: 0, total: 0, fresh: 0, live: 0, root: None }
+        Kept { svgs: svgs, boxes: Rc::new(RefCell::new(DomBoxes::new())), #[cfg(not(target_arch = "wasm32"))] mirror: HashMap::new(), nodes: HashMap::new(), styles: HashMap::new(), seen: 0, same: 0, off: off, unused: 0, noted: false, hits0: 0, misses0: 0, by_n: HashMap::new(), epoch: 0, total: 0, fresh: 0, live: 0, root: None }
     }
     /// a delta page (webapi.js renderJson): each node it names ({"r": n})
     /// is the node kept under that number, each node with a number is kept.
@@ -516,7 +547,7 @@ impl Kept {
             self.total = self.fresh;
         }
         // (elements are kept for a page that is mostly the last one, see share)
-        let on = !self.off && self.fresh * 4 < self.total;
+        let on = self.keeps(self.fresh * 4 < self.total);
         self.svgs.borrow().memo.borrow_mut().on = on;
         Some(same)
     }
@@ -599,8 +630,38 @@ impl Kept {
         // (elements are kept for a page that is mostly the last one: on a
         // page where every box moves each frame, noting each element for
         // the next frame cost more than building it)
-        let on = !self.off && self.seen > 0 && (self.seen - self.same) * 4 < self.seen;
+        // (a mostly new page is noted all the same while the page after
+        // one finds its elements: the page after a list is filled or
+        // replaced is most often that page with one change)
+        let on = self.seen > 0 && self.keeps((self.seen - self.same) * 4 < self.seen);
         self.svgs.borrow().memo.borrow_mut().on = on;
+    }
+    /// whether this page's elements are noted: mostly is "the page is
+    /// mostly the last one". Three noted pages in a row that the next
+    /// page took (almost) nothing from, an animation that moves every box:
+    /// only mostly kept pages are noted from there on.
+    fn keeps(&mut self, mostly: bool) -> bool {
+        let (h, m) = {
+            let sv = self.svgs.borrow();
+            let mm = sv.memo.borrow();
+            (mm.hits, mm.misses)
+        };
+        if self.noted {
+            let (dh, dm) = (h - self.hits0, m - self.misses0);
+            // (a page of a few elements, a list emptied, tells nothing)
+            if dh + dm >= 16 {
+                if dh * 4 < dh + dm {
+                    self.unused += 1;
+                } else {
+                    self.unused = 0;
+                }
+            }
+        }
+        self.hits0 = h;
+        self.misses0 = m;
+        let on = !self.off && (mostly || self.unused < 3);
+        self.noted = on;
+        on
     }
     /// n or the last page's node for it, and its hash; each node with an
     /// id ("i") is noted for the next page
