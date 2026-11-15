@@ -177,6 +177,27 @@ class RealmTest {
         def got (r.eval("var sh = new CSSStyleSheet(); sh.replaceSync(':host{color:rgb(1,1,1)}:host(.k){color:rgb(2,2,2)}p{margin-left:7px}'); var o = [('adoptedStyleSheets' in Document.prototype)]; ['a', 'b'].forEach(function (id) { var h = document.getElementById(id), sr = h.attachShadow({ mode: 'open' }); sr.innerHTML = '<p>x</p>'; sr.adoptedStyleSheets = [sh]; }); __render(); ['a', 'b'].forEach(function (id) { var p = document.getElementById(id).shadowRoot.querySelector('p'); o.push(getComputedStyle(p).color, getComputedStyle(p).marginLeft); }); document.adoptedStyleSheets = [sh]; o.push(document.adoptedStyleSheets.length); o.join(';')"))
         this.check("adopted sheets: one sheet in two shadow roots, each styled by its own host" (got == "true;rgb(1, 1, 1);7px;rgb(2, 2, 2);7px;1"))
     }
+    ; :has() above a selector's subject: a class set under the box, an
+    ; element put in and taken out, each styles what is under the box
+    ; again (hasAbove), and the page is as when every style is found again
+    fn hasAboveSubject:void () {
+        def r:DomRealm (this.realm("<html><head><style>.box:has(.on) .z{color:rgb(1,2,3)}.box:has(> b) .z{margin-left:5px}.z{color:rgb(9,9,9)}</style></head><body><div class=box id=x><i id=t>t</i><p><span class=z id=z>z</span></p></div><div id=other><span class=z id=o>o</span></div></body></html>"))
+        r.runScripts()
+        def got (r.eval("var z = document.getElementById('z'), t = document.getElementById('t'), x = document.getElementById('x'), o = []; var c = function () { __render(); o.push(getComputedStyle(z).color + '/' + getComputedStyle(z).marginLeft + '/' + (__styleCheck() === '')); }; c(); t.className = 'on'; c(); t.className = ''; c(); var b = document.createElement('b'); x.appendChild(b); c(); x.removeChild(b); c(); o.push(getComputedStyle(document.getElementById('o')).color); o.join(';')"))
+        this.check(":has() above the subject: a change under the box styles what is under it again" (got == "rgb(9, 9, 9)/0px/true;rgb(1, 2, 3)/0px/true;rgb(9, 9, 9)/0px/true;rgb(9, 9, 9)/5px/true;rgb(9, 9, 9)/0px/true;rgb(9, 9, 9)"))
+    }
+    fn hasSibling:void () {
+        def r:DomRealm (this.realm("<html><head><style>.st:has(~ .on) .ln{color:rgb(1,2,3)}.st:has(+ .nx){margin-left:5px}.ln{color:rgb(9,9,9)}</style></head><body><div id=w><div class=st id=a><span class=ln id=l>l</span></div><div class=st id=b><span id=in>x</span></div><div class=st id=c>c</div></div></body></html>"))
+        r.runScripts()
+        def got (r.eval("var l = document.getElementById('l'), a = document.getElementById('a'), b = document.getElementById('b'), c = document.getElementById('c'), w = document.getElementById('w'), o = []; var k = function () { __render(); o.push(getComputedStyle(l).color + '/' + getComputedStyle(a).marginLeft + '/' + (__styleCheck() === '')); }; k(); c.className = 'st on'; k(); c.className = 'st'; k(); b.className = 'st nx'; k(); w.removeChild(b); k(); var d = document.createElement('div'); d.className = 'on'; w.appendChild(d); k(); o.join(';')"))
+        this.check(":has(~ x) and :has(+ x): a sibling's change styles the parent's subtree again" (got == "rgb(9, 9, 9)/0px/true;rgb(1, 2, 3)/0px/true;rgb(9, 9, 9)/0px/true;rgb(9, 9, 9)/5px/true;rgb(9, 9, 9)/0px/true;rgb(1, 2, 3)/0px/true"))
+    }
+    fn styleElement:void () {
+        def r:DomRealm (this.realm("<html><head></head><body><p id=p>p</p></body></html>"))
+        r.runScripts()
+        def got (r.eval("var p = document.getElementById('p'), o = [], k = function () { __render(); o.push(getComputedStyle(p).color + '/' + (__styleCheck() === '')); }; k(); var s = document.createElement('style'); document.head.appendChild(s); k(); s.textContent = 'p{color:rgb(1,2,3)}'; k(); s.textContent = 'p{color:rgb(1,2,3)}'; k(); s.textContent = ''; k(); s.appendChild(document.createTextNode('p{color:rgb(4,5,6)}')); k(); document.head.removeChild(s); k(); document.head.appendChild(s); k(); o.join(';')"))
+        this.check("a <style> put in empty, given its text, emptied, taken out and put back" (got == "rgb(0, 0, 0)/true;rgb(0, 0, 0)/true;rgb(1, 2, 3)/true;rgb(1, 2, 3)/true;rgb(0, 0, 0)/true;rgb(4, 5, 6)/true;rgb(0, 0, 0)/true;rgb(4, 5, 6)/true"))
+    }
     fn run:void () {
         this.plainDom()
         this.react()
@@ -187,6 +208,9 @@ class RealmTest {
         this.shadow()
         this.keptStyles()
         this.adopted()
+        this.hasAboveSubject()
+        this.hasSibling()
+        this.styleElement()
         print ("passed " + (to_string passes) + ", failed " + (to_string fails))
     }
 
