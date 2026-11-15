@@ -239,6 +239,12 @@ pub struct DomRowInfo {
     /// a table-cell (tableCols counts these), and its text's length
     pub tc: Vec<bool>,
     pub lens: Vec<f64>,
+    /// what the row's cells inherit, made from an inherited style of the
+    /// number rinhFrom (DomMemo.inhId), and its own number: the same object
+    /// for the frames that leave the row alone
+    pub rinh: Rc<RefCell<JsonValue>>,
+    pub rinhFrom: i64,
+    pub rinhId: i64,
 }
 
 impl DomRowInfo {
@@ -249,6 +255,9 @@ impl DomRowInfo {
             rs: Vec::new(),
             tc: Vec::new(),
             lens: Vec::new(),
+            rinh: Rc::new(RefCell::new(JsonValue::new())),
+            rinhFrom: 0,
+            rinhId: 0,
         }
     }
 }
@@ -272,21 +281,21 @@ pub struct DomMemo {
     /// off: nothing is kept (a page built once, as the layout tests do)
     pub on: bool,
     pub next: i64,
-    els: HashMap<String,Rc<RefCell<EVGElement>>>,
-    ents: HashMap<String,Rc<RefCell<DomMemoEnt>>>,
+    els: HashMap<i64,Rc<RefCell<EVGElement>>>,
+    ents: HashMap<i64,Rc<RefCell<DomMemoEnt>>>,
     /// the frames counted
     count: i64,
     /// the elements taken and the ones built and kept this frame: a taken
     /// element keeps its layout (EVGElement.keepLayout) only when its
     /// margins are what they were when it was laid out last
-    taken: Vec<String>,
-    built: Vec<String>,
+    taken: Vec<i64>,
+    built: Vec<i64>,
     /// the node (stamp) each node was built or taken under, and the nodes
     /// being built now, innermost last: what is kept under an element
     /// taken whole stays kept with it, so when that element is built
-    /// again its unchanged children are still taken
-    ups: HashMap<String,String>,
-    open: Vec<String>,
+    /// again its unchanged children are still taken (0: under none)
+    ups: HashMap<i64,i64>,
+    open: Vec<i64>,
     /// the entries held after the last sweep
     live: i64,
     /// off: kept elements are laid out again (the layout is not kept)
@@ -296,13 +305,16 @@ pub struct DomMemo {
     /// where the flow put them, after a pass that laid one out; a kept
     /// one stayed where the last scroll position put it (AG Grid's header
     /// row after a wheel). What is beside the path keeps its layout.
-    stickyOn: HashMap<String,bool>,
+    stickyOn: HashMap<i64,bool>,
     /// the inherited styles' texts by number: an element's key names
     /// what it inherits by this number, not by a copy of the text
     inhIds: HashMap<String,i64>,
     inhNext: i64,
     /// rows' children as a table reads them, by the row's stamp
-    rows: HashMap<String,Rc<RefCell<DomRowInfo>>>,
+    rows: HashMap<i64,Rc<RefCell<DomRowInfo>>>,
+    /// the numbers (inhId) of the inherited styles kept with the rows
+    /// (DomRowInfo.rinh), by the object's stamp
+    rowInh: HashMap<i64,i64>,
     pub hits: i64,
     pub misses: i64,
 }
@@ -325,6 +337,7 @@ impl DomMemo {
             inhIds: HashMap::new(),
             inhNext: 0,
             rows: HashMap::new(),
+            rowInh: HashMap::new(),
             hits: 0,
             misses: 0,
         }
@@ -338,18 +351,17 @@ impl DomMemo {
     /// a node's element is being built (begin) / is built (end)
     #[doc(hidden)]
     pub fn begin(&mut self, stamp: i64) {
-        let sk: String = stamp.to_string();
-        self.under(&sk);
-        self.open.push(sk);
+        self.under(stamp);
+        self.open.push(stamp);
     }
     /// the node being built is a sticky box, or holds one: it and the
     /// nodes around it (stickyOn)
     #[doc(hidden)]
     pub fn stickyHere(&mut self) {
-        let os: Vec<String> = self.open.clone();
-        for sk in os.iter().cloned() {
+        let os: Vec<i64> = self.open.clone();
+        for sk in os.iter().copied() {
             if !self.stickyOn.contains_key(&sk) {
-                self.stickyOn.insert(sk.clone(), true);
+                self.stickyOn.insert(sk, true);
             }
         }
     }
@@ -374,34 +386,36 @@ impl DomMemo {
         self.inhIds.insert(text.to_string(), self.inhNext);
         self.inhNext
     }
-    fn under(&mut self, sk: &str) {
-        let mut up: String = String::new();
+    fn under(&mut self, sk: i64) {
+        let mut up: i64 = 0;
         if !self.open.is_empty() {
-            up = self.open[self.open.len() - 1].clone();
+            up = self.open[self.open.len() - 1];
         }
-        self.ups.insert(sk.to_string(), up);
+        self.ups.insert(sk, up);
     }
     /// the node was in frame f's page as it is kept: that frame built or
     /// took it, or took a node around it whole. (A node around it that
     /// frame built was built from its children, each of them built or
     /// taken then: one that was not is no longer under it.)
-    fn alive(&self, sk: &str, f: i64) -> bool {
-        if !self.ents.contains_key(sk) {
+    fn alive(&self, sk: i64, f: i64) -> bool {
+        let eo: Option<Rc<RefCell<DomMemoEnt>>> = self.ents.get(&sk).cloned();
+        if eo.is_none() {
             return false;
         }
-        let ent: Rc<RefCell<DomMemoEnt>> = self.ents.get(sk).cloned().unwrap();
+        let ent: Rc<RefCell<DomMemoEnt>> = eo.unwrap();
         if ent.borrow().seenAt == f {
             return true;
         }
-        let mut at: String = sk.to_string();
+        let mut at: i64 = sk;
         let mut steps: i64 = 0;
         while steps < 500 && self.ups.contains_key(&at) {
-            let up: String = self.ups.get(&at).cloned().unwrap();
-            if up.is_empty() {
+            let up: i64 = self.ups.get(&at).copied().unwrap();
+            if up == 0 {
                 return false;
             }
-            if self.ents.contains_key(&up) {
-                let ue: Rc<RefCell<DomMemoEnt>> = self.ents.get(&up).cloned().unwrap();
+            let uo: Option<Rc<RefCell<DomMemoEnt>>> = self.ents.get(&up).cloned();
+            if uo.is_some() {
+                let ue: Rc<RefCell<DomMemoEnt>> = uo.unwrap();
                 if ue.borrow().wholeAt == f {
                     return true;
                 }
@@ -409,7 +423,7 @@ impl DomMemo {
                     return false;
                 }
             }
-            at = up.clone();
+            at = up;
             steps += 1;
         }
         false
@@ -420,23 +434,23 @@ impl DomMemo {
         if (self.ents.len() as i64) <= self.live * 2 + 512 {
             return;
         }
-        let mut ents: HashMap<String,Rc<RefCell<DomMemoEnt>>> = HashMap::new();
-        let mut els: HashMap<String,Rc<RefCell<EVGElement>>> = HashMap::new();
-        let mut ups: HashMap<String,String> = HashMap::new();
-        let ks: Vec<String> = self.ents.keys().cloned().collect::<Vec<String>>();
-        for sk in ks.iter().cloned() {
-            if !self.alive(&sk, self.count) {
+        let mut ents: HashMap<i64,Rc<RefCell<DomMemoEnt>>> = HashMap::new();
+        let mut els: HashMap<i64,Rc<RefCell<EVGElement>>> = HashMap::new();
+        let mut ups: HashMap<i64,i64> = HashMap::new();
+        let ks: Vec<i64> = self.ents.keys().cloned().collect::<Vec<i64>>();
+        for sk in ks.iter().copied() {
+            if !self.alive(sk, self.count) {
                 continue;
             }
-            ents.insert(sk.clone(), self.ents.get(&sk).cloned().unwrap());
-            els.insert(sk.clone(), self.els.get(&sk).cloned().unwrap());
+            ents.insert(sk, self.ents.get(&sk).cloned().unwrap());
+            els.insert(sk, self.els.get(&sk).cloned().unwrap());
             // (and the nodes it is under, also the ones not kept themselves)
-            let mut at: String = sk.clone();
+            let mut at: i64 = sk;
             let mut steps: i64 = 0;
             while steps < 500 && self.ups.contains_key(&at) && !ups.contains_key(&at) {
-                let up: String = self.ups.get(&at).cloned().unwrap();
-                ups.insert(at.clone(), up.clone());
-                at = up.clone();
+                let up: i64 = self.ups.get(&at).copied().unwrap();
+                ups.insert(at, up);
+                at = up;
                 steps += 1;
             }
         }
@@ -497,16 +511,16 @@ impl DomMemo {
         // (the margins are noted only for kept layouts: with keepLayout off
         // nothing reads them, and writing them was a tenth of a layout)
         if self.keepLayout {
-            let bk: Vec<String> = self.built.clone();
-            for sk in bk.iter().cloned() {
+            let bk: Vec<i64> = self.built.clone();
+            for sk in bk.iter().copied() {
                 let el: Rc<RefCell<EVGElement>> = self.els.get(&sk).cloned().unwrap();
                 let ent: Rc<RefCell<DomMemoEnt>> = self.ents.get(&sk).cloned().unwrap();
                 ent.borrow_mut().sig = DomMemo::marginNums(&el);
                 ent.borrow_mut().sigSet = true;
             }
         }
-        let tk: Vec<String> = self.taken.clone();
-        for sk in tk.iter().cloned() {
+        let tk: Vec<i64> = self.taken.clone();
+        for sk in tk.iter().copied() {
             let el: Rc<RefCell<EVGElement>> = self.els.get(&sk).cloned().unwrap();
             let ent: Rc<RefCell<DomMemoEnt>> = self.ents.get(&sk).cloned().unwrap();
             let mut same: bool = false;
@@ -543,15 +557,19 @@ impl DomMemo {
     #[doc(hidden)]
     pub fn take(&mut self, stamp: i64, key: &str) -> Option<Rc<RefCell<EVGElement>>> {
         let none: Option<Rc<RefCell<EVGElement>>> = None;
-        let sk: String = stamp.to_string();
-        if stamp <= 0 || !self.ents.contains_key(&sk) {
+        let sk: i64 = stamp;
+        if stamp <= 0 {
             return none;
         }
-        let ent: Rc<RefCell<DomMemoEnt>> = self.ents.get(&sk).cloned().unwrap();
+        let eo: Option<Rc<RefCell<DomMemoEnt>>> = self.ents.get(&sk).cloned();
+        if eo.is_none() {
+            return none;
+        }
+        let ent: Rc<RefCell<DomMemoEnt>> = eo.unwrap();
         if ent.borrow().seenAt == self.count || ent.borrow().key != key {
             return none;
         }
-        if !self.alive(&sk, self.count - 1) {
+        if !self.alive(sk, self.count - 1) {
             return none;
         }
         // (taken with a sticky box in it: the nodes around it now)
@@ -575,22 +593,22 @@ impl DomMemo {
         }
         ent.borrow_mut().seenAt = self.count;
         ent.borrow_mut().wholeAt = self.count;
-        self.taken.push(sk.clone());
-        self.under(&sk);
+        self.taken.push(sk);
+        self.under(sk);
         Some(el)
     }
     /// the paint-late boxes the element's build counted
     pub fn lateOf(&self, stamp: i64) -> i64 {
-        let sk: String = stamp.to_string();
-        if self.ents.contains_key(&sk) {
-            let ent: Rc<RefCell<DomMemoEnt>> = self.ents.get(&sk).cloned().unwrap();
+        let eo: Option<Rc<RefCell<DomMemoEnt>>> = self.ents.get(&stamp).cloned();
+        if eo.is_some() {
+            let ent: Rc<RefCell<DomMemoEnt>> = eo.unwrap();
             return ent.borrow().late;
         }
         0
     }
     #[doc(hidden)]
     pub fn keep(&mut self, stamp: i64, key: &str, el: &Rc<RefCell<EVGElement>>, late: i64) {
-        let sk: String = stamp.to_string();
+        let sk: i64 = stamp;
         let ent: Rc<RefCell<DomMemoEnt>> = Rc::new(RefCell::new(DomMemoEnt::new()));
         ent.borrow_mut().key = key.to_string();
         ent.borrow_mut().late = late;
@@ -616,10 +634,10 @@ impl DomMemo {
             let ar: String = if el.borrow().margin_auto_right { "1".to_string() } else { "0".to_string() };
             ent.borrow_mut().autoX = format!("{}{}", al, ar);
         }
-        self.ents.insert(sk.clone(), ent);
-        self.els.insert(sk.clone(), Rc::clone(el));
-        self.built.push(sk.clone());
-        self.under(&sk);
+        self.ents.insert(sk, ent);
+        self.els.insert(sk, Rc::clone(el));
+        self.built.push(sk);
+        self.under(sk);
     }
 }
 
@@ -800,6 +818,12 @@ pub struct DomView {
     mkWm: String,
     mkDir: String,
     mkOut: String,
+    mkOutB: String,
+    /// the inherited style whose number was asked last (inhNum), by its
+    /// stamp, and the grid lines of one-column cells as texts
+    inhAt: i64,
+    inhAtId: i64,
+    colTxt: Vec<String>,
 }
 
 impl DomView {
@@ -850,6 +874,10 @@ impl DomView {
             mkWm: String::new(),
             mkDir: String::new(),
             mkOut: String::new(),
+            mkOutB: String::new(),
+            inhAt: 0,
+            inhAtId: 0,
+            colTxt: Vec::new(),
         }
     }
     pub fn has(s: &str, prefix: &str) -> bool {
@@ -6782,6 +6810,26 @@ impl DomView {
         }
         o.borrow().stamp.to_string()
     }
+    fn stampNum(&self, o: &Rc<RefCell<JsonValue>>) -> i64 {
+        if o.borrow().stamp <= 0 {
+            let memo: Rc<RefCell<DomMemo>> = Rc::clone(&self.svgs.borrow().memo);
+            memo.borrow_mut().next += 1;
+            o.borrow_mut().stamp = memo.borrow().next;
+        }
+        o.borrow().stamp
+    }
+    /// the number of an inherited style's text (DomMemo.inhId): the text
+    /// is made once for the rows that share the object
+    fn inhNum(&mut self, o: &Rc<RefCell<JsonValue>>) -> i64 {
+        let st: i64 = self.stampNum(o);
+        if st != self.inhAt {
+            let memo: Rc<RefCell<DomMemo>> = Rc::clone(&self.svgs.borrow().memo);
+            let text: String = DomView::inhText(o);
+            self.inhAtId = memo.borrow_mut().inhId(&text);
+            self.inhAt = st;
+        }
+        self.inhAtId
+    }
     /// the state an element's build reads besides its node, its parent's
     /// style and what it inherits (DomMemo): the same key, the same element
     /// an inherited style as one text, for telling two of them apart: its
@@ -6804,8 +6852,10 @@ impl DomView {
     fn memoKey(&mut self) -> String {
         // (the same for most children of an element: its text is made
         // again only when one of its parts changed, some 35 strings)
+        // (bandOnly apart: a table's rows and cells take turns, so both
+        // texts are held)
         let mut nums: Vec<f64> = Vec::new();
-        for f in vec![self.inFlex, self.unturned, self.defHMaybe, self.quirks, self.bandOnly].iter().copied() {
+        for f in vec![self.inFlex, self.unturned, self.defHMaybe, self.quirks].iter().copied() {
             if f {
                 nums.push(1.0);
             } else {
@@ -6836,6 +6886,9 @@ impl DomView {
                 }
             }
             if same {
+                if self.bandOnly {
+                    return self.mkOutB.clone();
+                }
                 return self.mkOut.clone();
             }
         }
@@ -6844,19 +6897,23 @@ impl DomView {
             cw = format!("{},{}", cw, DomView::fmt(w));
         }
         let mut flags: String = String::new();
-        for f in vec![self.inFlex, self.unturned, self.defHMaybe, self.quirks, self.bandOnly].iter().copied() {
+        for f in vec![self.inFlex, self.unturned, self.defHMaybe, self.quirks].iter().copied() {
             if f {
                 flags = format!("{}1", flags);
             } else {
                 flags = format!("{}0", flags);
             }
         }
-        let out: String = format!("{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}", self.wm, flags, self.positioned.to_string(), self.clipSinceCb.to_string(), self.clipSinceFx.to_string(), self.inTransform.to_string(), DomView::fmt(self.defH), DomView::fmt(self.spW), DomView::fmt(self.spH), self.dirNow, DomView::fmt(self.vw), DomView::fmt(self.vh), DomView::fmt(self.emPx), self.cellAt.to_string(), cw, self.listNo.to_string());
+        let rest: String = format!("{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}", self.wm, flags, self.positioned.to_string(), self.clipSinceCb.to_string(), self.clipSinceFx.to_string(), self.inTransform.to_string(), DomView::fmt(self.defH), DomView::fmt(self.spW), DomView::fmt(self.spH), self.dirNow, DomView::fmt(self.vw), DomView::fmt(self.vh), DomView::fmt(self.emPx), self.cellAt.to_string(), cw, self.listNo.to_string());
         self.mkNums = nums.clone();
         self.mkWm = self.wm.clone();
         self.mkDir = self.dirNow.clone();
-        self.mkOut = out.clone();
-        out
+        self.mkOut = format!("0{}", rest);
+        self.mkOutB = format!("1{}", rest);
+        if self.bandOnly {
+            return self.mkOutB.clone();
+        }
+        self.mkOut.clone()
     }
     fn parallelBaseline(&mut self, ke: Rc<RefCell<EVGElement>>, kid: &Rc<RefCell<JsonValue>>, kinh: &Rc<RefCell<JsonValue>>) {
         let od: String = self.outerS.borrow().getText("display");
@@ -9566,10 +9623,33 @@ impl DomView {
         }
         let mut col: i64 = 1;
         let mut last: i64 = 1;
-        // (its cells inherit from it)
-        let rinh: Rc<RefCell<JsonValue>> = self.inherit(inh, &row.borrow().get("s"));
         let kids: Rc<RefCell<JsonValue>> = row.borrow().get("c");
         let info: Rc<RefCell<DomRowInfo>> = self.rowInfo(row);
+        // (its cells inherit from it: the object of the last frame while
+        // the row and what it inherits itself are the same, so the cells'
+        // keys need its text made once only)
+        let memo: Rc<RefCell<DomMemo>> = Rc::clone(&self.svgs.borrow().memo);
+        let mon: bool = memo.borrow().on;
+        let mut rinh: Rc<RefCell<JsonValue>> = Rc::clone(inh);
+        let mut from: i64 = 0;
+        if mon {
+            from = self.inhNum(inh);
+        }
+        if mon && info.borrow().rinhFrom == from {
+            rinh = info.borrow().rinh.clone();
+        } else {
+            rinh = self.inherit(inh, &row.borrow().get("s"));
+            if mon {
+                let rtext: String = DomView::inhText(&rinh);
+                let rid: i64 = memo.borrow_mut().inhId(&rtext);
+                let rst: i64 = self.stampNum(&rinh);
+                info.borrow_mut().rinh = Rc::clone(&rinh);
+                info.borrow_mut().rinhFrom = from;
+                info.borrow_mut().rinhId = rid;
+                memo.borrow_mut().rowInh.insert(rst, rid);
+            }
+        }
+        let row1: String = format!("{} / span 1", r);
         let __it_c = kids.borrow().items.clone();
         let __n_ci = __it_c.len() as i64;
         for ci in 0..__n_ci {
@@ -9600,7 +9680,21 @@ impl DomView {
                 }
                 rr += 1;
             }
-            self.tableItem(&c, &rinh, format!("{} / span {}", r, rs), format!("{} / span {}", col, cs));
+            let mut rt: String = row1.clone();
+            if rs != 1 {
+                rt = format!("{} / span {}", r, rs);
+            }
+            let mut ct: String = String::new();
+            if cs == 1 {
+                while (self.colTxt.len() as i64) <= col {
+                    let cn: i64 = self.colTxt.len() as i64;
+                    self.colTxt.push(format!("{} / span 1", cn));
+                }
+                ct = self.colTxt[col as usize].clone();
+            } else {
+                ct = format!("{} / span {}", col, cs);
+            }
+            self.tableItem(&c, &rinh, rt, ct);
             col += cs;
             if col - 1 > last {
                 last = col - 1;
@@ -9619,9 +9713,9 @@ impl DomView {
     fn rowInfo(&self, row: &Rc<RefCell<JsonValue>>) -> Rc<RefCell<DomRowInfo>> {
         let memo: Rc<RefCell<DomMemo>> = Rc::clone(&self.svgs.borrow().memo);
         let on: bool = memo.borrow().on;
-        let mut sk: String = String::new();
+        let mut sk: i64 = 0;
         if on {
-            sk = self.stampOf(row);
+            sk = self.stampNum(row);
             if memo.borrow().rows.contains_key(&sk) {
                 return memo.borrow().rows.get(&sk).cloned().unwrap();
             }
@@ -9656,6 +9750,7 @@ impl DomView {
             // (rows that are gone stay until the map is let go whole)
             if memo.borrow().rows.len() > 60000 {
                 memo.borrow_mut().rows = HashMap::new();
+                memo.borrow_mut().rowInh = HashMap::new();
             }
             memo.borrow_mut().rows.insert(sk, Rc::clone(&info));
         }
@@ -9949,6 +10044,8 @@ impl DomView {
         // (the page's style objects by their stamps: a patch shares a node's
         // style with the last page while it is the same)
         let mut inh_sigs: HashMap<String,String> = HashMap::new();
+        let mut inh_last: i64 = 0;
+        let mut inh_last_sig: String = String::new();
         if mon {
             msig = format!("{}|{}|{}", self.pfx, self.stampOf(&n.borrow().get("s")), (self.cbStyles.len() as i64).to_string());
             if !self.cbStyles.is_empty() {
@@ -10209,12 +10306,24 @@ impl DomView {
                 if mon {
                     // (what it inherits, made this frame: by its text, once
                     // for the children that share it)
-                    let ist: String = self.stampOf(&iinh);
-                    if !inh_sigs.contains_key(&ist) {
-                        let itext: String = DomView::inhText(&iinh);
-                        inh_sigs.insert(ist.clone(), memo.borrow_mut().inhId(&itext).to_string());
+                    // (the children that follow each other mostly share
+                    // it: a row's cells)
+                    let ist_n: i64 = self.stampNum(&iinh);
+                    if ist_n != inh_last {
+                        let ist: String = ist_n.to_string();
+                        if !inh_sigs.contains_key(&ist) {
+                            let known: Option<i64> = memo.borrow().rowInh.get(&ist_n).copied();
+                            if known.is_some() {
+                                inh_sigs.insert(ist.clone(), known.unwrap().to_string());
+                            } else {
+                                let itext: String = DomView::inhText(&iinh);
+                                inh_sigs.insert(ist.clone(), memo.borrow_mut().inhId(&itext).to_string());
+                            }
+                        }
+                        inh_last = ist_n;
+                        inh_last_sig = inh_sigs.get(&ist).cloned().unwrap();
                     }
-                    mkey = format!("{}|{}|{}", msig, self.memoKey(), inh_sigs.get(&ist).cloned().unwrap());
+                    mkey = format!("{}|{}|{}", msig, self.memoKey(), inh_last_sig);
                     kept = memo.borrow_mut().take(kid.borrow().stamp, &mkey);
                 }
                 // (no element made here to be let go at once: a kept
@@ -10249,8 +10358,13 @@ impl DomView {
                 if tbl && k < (flat_row.len() as i64) {
                     // (the members themselves: set_attribute finds a name
                     // by comparing it with every one before it)
-                    ke.borrow_mut().grid_row = flat_row[k as usize].clone();
-                    ke.borrow_mut().grid_column = flat_col[k as usize].clone();
+                    // (a kept cell mostly has them already)
+                    if ke.borrow().grid_row != flat_row[k as usize] {
+                        ke.borrow_mut().grid_row = flat_row[k as usize].clone();
+                    }
+                    if ke.borrow().grid_column != flat_col[k as usize] {
+                        ke.borrow_mut().grid_column = flat_col[k as usize].clone();
+                    }
                 }
                 self.inTransform = was_tr;
                 let pod: String = self.outerS.borrow().getText("display");
