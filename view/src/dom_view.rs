@@ -296,8 +296,11 @@ pub struct DomMemo {
     /// again its unchanged children are still taken (0: under none)
     ups: HashMap<i64,i64>,
     open: Vec<i64>,
-    /// the entries held after the last sweep
+    /// the entries held after the last sweep, and the frames since it
     live: i64,
+    sinceSweep: i64,
+    /// the host was told many nodes left the page: the next frame sweeps
+    pub sweepNow: bool,
     /// off: kept elements are laid out again (the layout is not kept)
     pub keepLayout: bool,
     /// the nodes (stamps) of sticky boxes and of every box around one:
@@ -332,6 +335,8 @@ impl DomMemo {
             ups: HashMap::new(),
             open: Vec::new(),
             live: 0,
+            sinceSweep: 0,
+            sweepNow: false,
             keepLayout: true,
             stickyOn: HashMap::new(),
             inhIds: HashMap::new(),
@@ -429,11 +434,16 @@ impl DomMemo {
         false
     }
     /// what this frame's page no longer holds is let go, once it is half
-    /// of what is held
+    /// of what is held, and every 32 frames: a page that took out most of
+    /// its nodes (10 000 table rows cleared) held their elements, 0.7 GB,
+    /// as long as it lived, since nothing new was kept after
     fn sweep(&mut self) {
-        if (self.ents.len() as i64) <= self.live * 2 + 512 {
+        self.sinceSweep += 1;
+        if (self.ents.len() as i64) <= self.live * 2 + 512 && (self.sinceSweep < 32 || self.ents.len() <= 512) && !self.sweepNow {
             return;
         }
+        self.sinceSweep = 0;
+        self.sweepNow = false;
         let mut ents: HashMap<i64,Rc<RefCell<DomMemoEnt>>> = HashMap::new();
         let mut els: HashMap<i64,Rc<RefCell<EVGElement>>> = HashMap::new();
         let mut ups: HashMap<i64,i64> = HashMap::new();
@@ -454,6 +464,23 @@ impl DomMemo {
                 steps += 1;
             }
         }
+        // (the rows' cells and the sticky marks of nodes let go, too)
+        let mut rows: HashMap<i64,Rc<RefCell<DomRowInfo>>> = HashMap::new();
+        let rk: Vec<i64> = self.rows.keys().cloned().collect::<Vec<i64>>();
+        for sk in rk.iter().copied() {
+            if ents.contains_key(&sk) {
+                rows.insert(sk, self.rows.get(&sk).cloned().unwrap());
+            }
+        }
+        let mut sticky: HashMap<i64,bool> = HashMap::new();
+        let stk: Vec<i64> = self.stickyOn.keys().cloned().collect::<Vec<i64>>();
+        for sk in stk.iter().copied() {
+            if ents.contains_key(&sk) {
+                sticky.insert(sk, true);
+            }
+        }
+        self.rows = rows;
+        self.stickyOn = sticky;
         self.ents = ents.clone();
         self.els = els.clone();
         self.ups = ups.clone();

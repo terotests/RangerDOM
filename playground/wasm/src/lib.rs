@@ -493,6 +493,7 @@ struct Kept {
     total: usize,
     fresh: usize,
     live: usize,
+    since_prune: usize,
     root: Option<Rc<RefCell<JsonValue>>>,
 }
 
@@ -590,7 +591,7 @@ impl Kept {
         let off = std::env::var("PG_NORETAIN").is_ok();
         #[cfg(target_arch = "wasm32")]
         let off = false;
-        Kept { svgs: svgs, boxes: Rc::new(RefCell::new(DomBoxes::new())), #[cfg(not(target_arch = "wasm32"))] mirror: HashMap::new(), nodes: HashMap::new(), styles: HashMap::new(), seen: 0, same: 0, off: off, unused: 0, noted: false, hits0: 0, misses0: 0, by_n: HashMap::new(), epoch: 0, total: 0, fresh: 0, live: 0, root: None }
+        Kept { svgs: svgs, boxes: Rc::new(RefCell::new(DomBoxes::new())), #[cfg(not(target_arch = "wasm32"))] mirror: HashMap::new(), nodes: HashMap::new(), styles: HashMap::new(), seen: 0, same: 0, off: off, unused: 0, noted: false, hits0: 0, misses0: 0, by_n: HashMap::new(), epoch: 0, total: 0, fresh: 0, live: 0, since_prune: 0, root: None }
     }
     /// a delta page (webapi.js renderJson): each node it names ({"r": n})
     /// is the node kept under that number, each node with a number is kept.
@@ -645,7 +646,17 @@ impl Kept {
         // (a kept node only this list holds is no longer in the page: let
         // go, with what was under it. A page that names one later, a
         // subtree taken out and put back unchanged, is asked for whole.)
-        if self.fresh > 0 && (self.by_n.len() < 4096 || self.by_n.len() > self.live + self.live / 8) {
+        // (and every 32 pages: one that took out most of its nodes, 10 000
+        // rows cleared, held them as long as it lived)
+        self.since_prune += 1;
+        // (many elements left the page: what was kept for them goes now)
+        let gone = page.borrow().getInt("gone", 0) as usize;
+        if gone > 256 && gone * 8 > self.live {
+            self.since_prune = 32;
+            self.svgs.borrow().memo.borrow_mut().sweepNow = true;
+        }
+        if (self.fresh > 0 && (self.by_n.len() < 4096 || self.by_n.len() > self.live + self.live / 8)) || self.since_prune >= 32 {
+            self.since_prune = 0;
             for _ in 0..8 {
                 let before = self.by_n.len();
                 self.by_n.retain(|_, v| Rc::strong_count(v) > 1);

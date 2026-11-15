@@ -94,6 +94,11 @@
     if (!reach) { changed(); return; }
     generation++;
     textStamp++;
+    // (el._tfv: el's own transform was the last change at or under it,
+    // el._tf0: what el._rv was before the first of such changes in a row;
+    // a render of el from then on has only el's transform to change,
+    // movedJson)
+    if (name === 'style' && el._styleSync && el._styleChg && el._styleChg.length === 1 && (el._styleChg[0] === 'transform' || el._styleChg[0] === 'opacity')) { if (el._rv !== el._tfv || el._tfn !== el._styleChg[0]) { el._tf0 = el._rv || 0; el._tfn = el._styleChg[0]; } el._tfv = textStamp; }
     for (var p = el; p; p = p.parentNode) p._rv = textStamp;
     if (computedCache.gen !== styleGen) return;
     var old = computedCache.map[el.__id];
@@ -1470,8 +1475,13 @@
       for (var i = 0; i < n._c.length; i++) connected(n._c[i]);
     }
   }
+  // the elements taken out of the page since the last render: the render
+  // tells the host ("gone"), which lets go of what it kept for them then
+  // (10 000 rows cleared: 0.7 GB held as long as the page lived)
+  var goneEls = 0;
   function disconnected(n) {
     if (n.nodeType === 1) {
+      goneEls++;
       if (n._disconnected) n._disconnected();
       for (var i = 0; i < n._c.length; i++) disconnected(n._c[i]);
     }
@@ -1958,6 +1968,9 @@
   // A custom property keeps its tokens.
   function specifiedText(n, v) {
     if (n.slice(0, 2) === '--' || !/[,(]|\s\s|\s\)/.test(v)) return v;
+    // (no string and no url(): the same by four replaces. A transform set
+    // on 500 elements each frame spent half its time in the loop below)
+    if (!/["'\\]|url\(|,\s*,/i.test(v)) return v.replace(/\s+/g, ' ').replace(/\( /g, '(').replace(/ \)/g, ')').replace(/ ?, ?/g, ', ').trim();
     var out = '', depth = 0, i = 0, len = v.length;
     while (i < len) {
       var c = v.charAt(i);
@@ -8932,7 +8945,7 @@
       var own = JSON.stringify(o);
       var kj = kids.join(',');
       if (deltaOn) {
-        if (kdj) renderDj = own.slice(1, -1) + (kids.length ? ',"c":[' + kdj.join(',') + ']}' : '}');
+        if (kdj) { renderDj = own.slice(1, -1) + (kids.length ? ',"c":[' + kdj.join(',') + ']}' : '}'); if (kel && !pm && !pb && !pa && !fl) renderOwn = { el: n, own: own, kids: kids, kel: kel, cs: cs, st: null }; }
         else { unmark(dm0); renderDj = null; }
       }
       // (a table part's own members and children, for its table's border
@@ -9954,6 +9967,66 @@
     for (var i = from; i < marks.length; i++) marks[i].dj = null;
     marks.length = from;
   }
+  // n's kept render (k) with a new transform: el.style.transform was the
+  // only change at or under n since (attrChanged), and its style is the one
+  // k was rendered with but for the transform (patchedStyle). The text k
+  // has of n itself with the two values replaced, the children as they
+  // are. 500 boxes moved each frame were each rendered whole (30 ms of a
+  // frame natively). null: not so, renderNode then.
+  var renderOwn = null, fastCheck = null;
+  // (a style patched from another lists its properties in another order:
+  // the same render)
+  function sortedJson(t) {
+    var srt = function (v) { if (Array.isArray(v)) return v.map(srt); if (v && typeof v === 'object') { var o = {}; Object.keys(v).sort().forEach(function (k) { o[k] = srt(v[k]); }); return o; } return v; };
+    try { return JSON.stringify(srt(JSON.parse(t))); } catch (e) { return t; }
+  }
+  function movedJson(n, k, parentStyle, sc) {
+    var fp = k.fp, cs = computedOf(n), df = cs._dfrom;
+    if (!df || df.base !== fp.cs) return null;
+    var pn = n._tfn;
+    for (var dn in df.keys) if (dn !== pn) return null;
+    var a = fp.cs[pn], b = cs[pn], st = n.getAttribute('style');
+    if (typeof a !== 'string' || typeof b !== 'string' || !a || !b || PLAIN_TEXT.test(b) || PLAIN_TEXT.test(st || '"') || fp.st === null) return null;
+    // (with a transform, and less than opaque, before and after)
+    if (pn === 'transform' ? a === 'none' || b === 'none' : !(parseFloat(a) < 1 && parseFloat(b) < 1 && parseFloat(a) > 0 && parseFloat(b) > 0)) return null;
+    // (cut: fp.own around its two values, found once and the same for each
+    // render after it)
+    var cut = fp.cut && fp.cut.pn === pn ? fp.cut : null;
+    if (!cut) {
+      var own0 = fp.own, ta = '"' + pn + '":' + JSON.stringify(a), sa = '"style":' + JSON.stringify(fp.st);
+      var i = own0.indexOf(ta), j = own0.indexOf(sa);
+      if (i < 0 || j < i || own0.indexOf(ta, i + 1) >= 0 || own0.indexOf(sa, j + 1) >= 0) return null;
+      cut = { pn: pn, pre: own0.slice(0, i) + '"' + pn + '":"', mid: '"' + own0.slice(i + ta.length, j) + '"style":"', post: '"' + own0.slice(j + sa.length, -1), kj: null, kd: null };
+      var kids0 = fp.kids, kel0 = fp.kel, plain = true;
+      for (var q0 = 0; q0 < kids0.length && plain; q0++) plain = !kel0[q0] || kel0[q0].nodeType !== 1;
+      cut.kj = kids0.length ? ',"c":[' + kids0.join(',') + ']}' : '}';
+      // (no element among the children: their delta text is their text)
+      if (plain) cut.kd = cut.kj;
+    }
+    var open = cut.pre + b + cut.mid + st + cut.post, dm = marks.length, kd = cut.kd;
+    if (kd === null) {
+      var kids = fp.kids, kel = fp.kel, kdj = [];
+      for (var q = 0; q < kids.length; q++) {
+        var ke = kel[q];
+        if (!ke || ke.nodeType !== 1) { kdj.push(kids[q]); continue; }
+        var kk = ke._rj;
+        if (!kk || kk.json !== kids[q] || kk.de !== deltaEpoch) { marks.length = dm; return null; }
+        deltaOf(kk);
+        kdj.push(lastDelta);
+      }
+      kd = ',"c":[' + kdj.join(',') + ']}';
+    }
+    var json = open + cut.kj;
+    var nk = { sg: styleGen, rv: n._rv, ps: parentStyle, sc: sc, json: json, ct: false, parts: null, fp: { el: n, own: open + '}', kids: fp.kids, kel: fp.kel, cs: cs, st: st, cut: cut }, _dm: dm };
+    nk.n = ++deltaSerial;
+    nk.dj = '{"n":' + nk.n + ',' + open.slice(1) + kd;
+    nk.sent = 0; nk.de = deltaEpoch;
+    n._rjl = nk; n._rj = nk;
+    deltaOf(nk);
+    return json;
+  }
+  // (a text JSON.stringify would write otherwise than between two quotes)
+  var PLAIN_TEXT = /["\\\x00-\x1f\u2028\u2029%]/;
   function renderJson(n, parentStyle) {
     if (n.nodeType === 3) { var tj = n._data ? JSON.stringify(smallCapsText(n, parentStyle)) : ''; lastDelta = tj; return tj; }
     if (n.nodeType !== 1) { lastDelta = ''; return ''; }
@@ -9967,12 +10040,23 @@
       if (deltaOn) deltaOf(k);
       return k.json;
     }
+    // (kf: the last render of n, which a style change lets go of as _rj)
+    var kf = deltaOn && n._tfv === n._rv ? n._rjl : null;
+    if (kf && kf.fp && !deltaOff && !kf.ct && !kf.parts && kf.sg === styleGen && kf.ps === parentStyle && kf.sc === sc && kf.de === deltaEpoch && kf.rv >= n._tf0) {
+      var moved = movedJson(n, kf, parentStyle, sc);
+      if (moved !== null) {
+        if (fastCheck) { var mdj = lastDelta, mk = n._rj; n._rj = null; n._rjl = null; n._tfv = 0; marks.length = mk._dm; var slow = renderJson(n, parentStyle); n._tfv = n._rv; fastCheck.n++; if (sortedJson(slow) !== sortedJson(moved) || sortedJson(lastDelta.replace(/^\{"n":\d+,/, '{')) !== sortedJson(mdj.replace(/^\{"n":\d+,/, '{'))) { fastCheck.bad++; if (!fastCheck.first) fastCheck.first = moved.slice(0, 400) + ' /// ' + slow.slice(0, 400) + ' /// ' + mdj.slice(0, 300) + ' /// ' + lastDelta.slice(0, 300); } return slow; }
+        return moved;
+      }
+    }
     var t0 = ctrTouch;
-    renderParts = null; renderDj = null;
+    renderParts = null; renderDj = null; renderOwn = null;
     var dm = marks.length;
     var r = renderNode(n, parentStyle, true);
     var json = r === null ? '' : typeof r === 'string' ? r : JSON.stringify(r);
-    var nk = { sg: styleGen, rv: n._rv, ps: parentStyle, sc: sc, json: json, ct: ctrTouch !== t0, parts: typeof r === 'string' ? renderParts : null };
+    var nk = { sg: styleGen, rv: n._rv, ps: parentStyle, sc: sc, json: json, ct: ctrTouch !== t0, parts: typeof r === 'string' ? renderParts : null, fp: typeof r === 'string' && renderOwn && renderOwn.el === n ? renderOwn : null };
+    if (nk.fp) nk.fp.st = n.getAttribute('style');
+    renderOwn = null;
     if (deltaOn) {
       // (rendered again to the same text, a restyle that changed nothing:
       // what the host has of it holds, under the number it had)
@@ -10271,7 +10355,9 @@
       marks = [];
       root = (root || 'null') + (whole ? ',"whole":' + whole : '') + ',"d":' + deltaEpoch;
     }
-    return '{"v":' + generation + ',"w":' + JSON.stringify(viewport.w) + ',"h":' + JSON.stringify(viewport.h) + ',"root":' + (root || 'null') + ',"title":' + JSON.stringify(doc.title) + (doc.compatMode === 'BackCompat' ? ',"quirks":true' : '') + (browserFonts ? ',"fm":"' + (browserFonts === 'measure' ? 'measure' : 'browser') + '"' : '') + '}';
+    var gone = goneEls ? ',"gone":' + goneEls : '';
+    goneEls = 0;
+    return '{"v":' + generation + gone + ',"w":' + JSON.stringify(viewport.w) + ',"h":' + JSON.stringify(viewport.h) + ',"root":' + (root || 'null') + ',"title":' + JSON.stringify(doc.title) + (doc.compatMode === 'BackCompat' ? ',"quirks":true' : '') + (browserFonts ? ',"fm":"' + (browserFonts === 'measure' ? 'measure' : 'browser') + '"' : '') + '}';
   }
 
   // ---- input from the host -------------------------------------------------
@@ -11768,6 +11854,8 @@
       return 'kept ' + a.slice(Math.max(0, i - 200), i + 120) + ' fresh ' + b.slice(Math.max(0, i - 200), i + 120);
     } finally { reflowing = was; }
   };
+  // a test's: each text movedJson gives is compared with renderNode's
+  G.__fastRenderCheck = function (on) { if (on === undefined) return fastCheck ? JSON.stringify(fastCheck) : ''; fastCheck = on ? { n: 0, bad: 0, first: '' } : null; return ''; };
   G.__deltaRender = function (on) { on = !!on; if (on !== deltaOn) { deltaOn = on; deltaEpoch++; } return String(deltaOn); };
   // the host draws text with the browser's own faces (the playground's
   // canvas), so a line of Arial has Arial's height, not that of the Open
