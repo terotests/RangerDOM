@@ -495,6 +495,10 @@ struct Kept {
     live: usize,
     since_prune: usize,
     root: Option<Rc<RefCell<JsonValue>>>,
+    /// delta pages: each style object once, by what it holds. A page's
+    /// elements mostly share a few styles (10 000 table rows: 90 000 style
+    /// objects, 23 different), each kept apart was ~1.8 KB.
+    pool: HashMap<u64, Rc<RefCell<JsonValue>>>,
 }
 
 /// a delta page put together is the whole page (but for the numbers, "n")
@@ -557,6 +561,23 @@ fn hash_str(mut h: u64, s: &str) -> u64 {
 }
 
 /// a value's hash: its kind, text and members in order
+/// a and b hold the same
+fn same_value(a: &Rc<RefCell<JsonValue>>, b: &Rc<RefCell<JsonValue>>) -> bool {
+    if Rc::ptr_eq(a, b) {
+        return true;
+    }
+    let (x, y) = (a.borrow(), b.borrow());
+    if x.kind != y.kind {
+        return false;
+    }
+    match x.kind {
+        1 => x.b == y.b,
+        2 => x.numText == y.numText,
+        3 => x.str == y.str,
+        4 | 5 => x.items.len() == y.items.len() && (x.kind == 4 || x.keys == y.keys) && x.items.iter().zip(y.items.iter()).all(|(p, q)| same_value(p, q)),
+        _ => true,
+    }
+}
 fn hash_value(n: &Rc<RefCell<JsonValue>>) -> u64 {
     let v = n.borrow();
     let mut h: u64 = mix(0xcbf29ce484222325, v.kind as u64);
@@ -591,7 +612,7 @@ impl Kept {
         let off = std::env::var("PG_NORETAIN").is_ok();
         #[cfg(target_arch = "wasm32")]
         let off = false;
-        Kept { svgs: svgs, boxes: Rc::new(RefCell::new(DomBoxes::new())), #[cfg(not(target_arch = "wasm32"))] mirror: HashMap::new(), nodes: HashMap::new(), styles: HashMap::new(), seen: 0, same: 0, off: off, unused: 0, noted: false, hits0: 0, misses0: 0, by_n: HashMap::new(), epoch: 0, total: 0, fresh: 0, live: 0, since_prune: 0, root: None }
+        Kept { svgs: svgs, boxes: Rc::new(RefCell::new(DomBoxes::new())), #[cfg(not(target_arch = "wasm32"))] mirror: HashMap::new(), nodes: HashMap::new(), styles: HashMap::new(), seen: 0, same: 0, off: off, unused: 0, noted: false, hits0: 0, misses0: 0, by_n: HashMap::new(), epoch: 0, total: 0, fresh: 0, live: 0, since_prune: 0, root: None, pool: HashMap::new() }
     }
     /// a delta page (webapi.js renderJson): each node it names ({"r": n})
     /// is the node kept under that number, each node with a number is kept.
@@ -604,6 +625,7 @@ impl Kept {
             self.styles = HashMap::new();
             self.nodes = HashMap::new();
             self.root = None;
+            self.pool = HashMap::new();
             self.total = 0;
             self.live = 0;
             self.epoch = epoch;
@@ -665,6 +687,7 @@ impl Kept {
                 }
             }
             self.styles.retain(|_, v| Rc::strong_count(&v.1) > 1);
+            self.pool.retain(|_, v| Rc::strong_count(v) > 1);
             self.live = self.by_n.len();
         }
         if self.fresh > self.total {
@@ -674,6 +697,38 @@ impl Kept {
         let on = self.keeps(self.fresh * 4 < self.total);
         self.svgs.borrow().memo.borrow_mut().on = on;
         Some(same)
+    }
+    /// n's style object the pooled one that holds the same (the one n had
+    /// last page too, when it holds the same: its children were built
+    /// under it)
+    fn pool_style(&mut self, n: &Rc<RefCell<JsonValue>>) {
+        let s = n.borrow().get("s");
+        if s.borrow().kind != 5 {
+            return;
+        }
+        let hs = hash_value(&s);
+        if let Some(p) = self.pool.get(&hs) {
+            if !Rc::ptr_eq(p, &s) && same_value(p, &s) {
+                let keep = p.clone();
+                n.borrow_mut().put("s", keep);
+            }
+            return;
+        }
+        self.pool.insert(hs, s);
+    }
+    /// pool_style for n and every node under it (sent whole)
+    fn pool_under(&mut self, n: &Rc<RefCell<JsonValue>>) {
+        if n.borrow().kind != 5 {
+            return;
+        }
+        self.pool_style(n);
+        let c = n.borrow().get("c");
+        if c.borrow().kind == 4 {
+            let kids = c.borrow().items.clone();
+            for k in kids.iter() {
+                self.pool_under(k);
+            }
+        }
     }
     /// the nodes with an id under n, n too
     fn ids(n: &Rc<RefCell<JsonValue>>) -> usize {
@@ -701,6 +756,7 @@ impl Kept {
         // named or kept by itself)
         if n.borrow().keyAt("n") < 0 {
             self.fresh += Kept::ids(n);
+            self.pool_under(n);
             return Some(n.clone());
         }
         let c = n.borrow().get("c");
@@ -712,26 +768,10 @@ impl Kept {
             }
             c.borrow_mut().items = out;
         }
-        let id = n.borrow().getText("i");
-        if !id.is_empty() {
+        if n.borrow().keyAt("i") >= 0 {
             self.fresh += 1;
-            // (a node sent again keeps its style object while that holds
-            // the same: its children were built under it)
-            let s = n.borrow().get("s");
-            if s.borrow().kind == 5 {
-                let hs = hash_value(&s);
-                let mut keep = s.clone();
-                if let Some((was, old)) = self.styles.get(&id) {
-                    if *was == hs {
-                        keep = old.clone();
-                    }
-                }
-                if !Rc::ptr_eq(&keep, &s) {
-                    n.borrow_mut().put("s", keep.clone());
-                }
-                self.styles.insert(id, (hs, keep));
-            }
         }
+        self.pool_style(n);
         let num = n.borrow().getInt("n", -1);
         if num >= 0 {
             self.by_n.insert(num, n.clone());
