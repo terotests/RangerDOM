@@ -221,6 +221,9 @@ impl Playground {
         self.newest();
         let (Some(root), Some(lay)) = (self.root.clone(), self.lay.clone()) else { return String::new() };
         let dl = Rc::new(RefCell::new(EVGDisplayList::new()));
+        // (opacity fades a subtree as one picture: evg-webgl composites a
+        // group offscreen)
+        dl.borrow_mut().group_opacity = true;
         // (a list made for this one paint has no commands of an earlier
         // walk to give again, and with fragments on a kept subtree is
         // drawn whole, also what is outside its clip: AG Grid 1 743
@@ -271,6 +274,9 @@ fn lay_out(page: &Rc<RefCell<JsonValue>>, delta: bool, w: f64, h: f64, kept: &mu
     if std::env::var("PG_RETAINCHECK").is_ok() {
         let list = |root: &Rc<RefCell<EVGElement>>, lay: &Rc<RefCell<EVGLayout>>| {
             let dl = Rc::new(RefCell::new(EVGDisplayList::new()));
+        // (opacity fades a subtree as one picture: evg-webgl composites a
+        // group offscreen)
+        dl.borrow_mut().group_opacity = true;
             EVGDisplayList::set_fragments(&dl, false);
             EVGDisplayList::set_text_engine(&dl, EVGLayout::get_text_engine(lay));
             EVGDisplayList::build(&dl, root.clone());

@@ -7017,6 +7017,12 @@
       return al === 1 ? 'rgb(' + ch.join(', ') + ')' : 'rgba(' + ch.join(', ') + ', ' + al + ')';
     });
   }
+  // CSS animations' clock: the host's timer clock (prelude.js __clock)
+  // where there is one, so a page's timers and its CSS animations see the
+  // same time however fast the host moves its clock. Web Animations keep
+  // the wall clock: pages set their start times from performance.now and
+  // frame timestamps
+  function animNow() { return typeof __clock === 'number' ? __clock : now(); }
   var animating = [], animTick = false;
   function scheduleAnimationFrame(el) {
     if (animating.indexOf(el) < 0) animating.push(el);
@@ -7046,7 +7052,7 @@
   // c: el's computed style without animations; gives it its animations'
   // values now
   function applyAnimations(el, c, parent) {
-    var list = animationList(c), st = el._anims || (el._anims = {}), keep = {}, t = now(), again = false;
+    var list = animationList(c), st = el._anims || (el._anims = {}), keep = {}, t = animNow(), again = false;
     for (var i = 0; i < list.length; i++) {
       var a = list[i], frames = keyframesNamed(a.name);
       if (!frames) continue;
@@ -7647,6 +7653,7 @@
     var tmp = Object.create(cs); tmp.transform = list;
     return transformPercents(el, tmp);
   }
+  var pctTransforms = [];
   function transformPercents(el, out) {
     var px = function (k) { var m = /^(-?[\d.]+)px$/.exec(out[k] || ''); return m ? parseFloat(m[1]) : null; };
     var side = function (dim, a, b) {
@@ -7656,6 +7663,12 @@
       return v;
     };
     var w = side('width', 'left', 'right'), h = side('height', 'top', 'bottom');
+    // (the size came from the last layout: __layout styles el again when
+    // its box comes back another size)
+    if (el && el.__id !== undefined && (px('width') === null || px('height') === null)) {
+      el._pctBox = w + ',' + h;
+      if (pctTransforms.indexOf(el) < 0) pctTransforms.push(el);
+    }
     return out.transform.replace(/(translate[XY3d]*)\(([^)]*)\)/g, function (m, fn, args) {
       var k = 0;
       return fn + '(' + args.split(',').map(function (a) {
@@ -11113,6 +11126,13 @@
         if (!sb) continue;
         var scs = computedOf(sv), uw = svgUsedSize(sv, scs, 'width', 300), uh = svgUsedSize(sv, scs, 'height', 150);
         if (sv._usedBox !== (uw !== null ? uw : sb[2]) + ',' + (uh !== null ? uh : sb[3])) textChanged(sv);
+      }
+    }
+    if (m.boxes && pctTransforms.length) {
+      pctTransforms = pctTransforms.filter(function (e) { return e.isConnected; });
+      for (var pt = 0; pt < pctTransforms.length; pt++) {
+        var pe = pctTransforms[pt], pb = boxes[pe.__id];
+        if (pb && pe._pctBox !== pb[2] + ',' + pb[3]) { dropComputed(pe); textChanged(pe); }
       }
     }
     if (m.boxes && scrollers.length) clampScrolls();

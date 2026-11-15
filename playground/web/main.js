@@ -266,7 +266,7 @@ function flatColor(w, x, y, opacityOf) {
   return col;
 }
 // the runs of text the browser shows, as rectangles in the viewport
-function textRuns(w, max) {
+function textRuns(w, max, opacityOf) {
   const d = w.document, out = [];
   const walk = d.createTreeWalker(d.body || d.documentElement, 4);
   for (let t = walk.nextNode(); t && out.length < max; t = walk.nextNode()) {
@@ -280,7 +280,7 @@ function textRuns(w, max) {
     for (const q of range.getClientRects()) {
       if (q.width < 4 || q.height < 6 || q.left < 0 || q.top < 0 || q.right > W || q.bottom > H) continue;
       if (d.elementFromPoint(q.left + q.width / 2, q.top + q.height / 2) !== p && !p.contains(d.elementFromPoint(q.left + q.width / 2, q.top + q.height / 2))) continue;
-      out.push([q.left, q.top, q.width, q.height]);
+      out.push([q.left, q.top, q.width, q.height, opacityOf ? opacityOf(p) : 1]);
       if (out.length >= max) break;
     }
   }
@@ -329,16 +329,17 @@ function pictureCheck() {
     }
   }
   let runs = [];
-  try { runs = textRuns(w, 400); } catch (_) {}
+  try { runs = textRuns(w, 400, opacityOf); } catch (_) {}
   let blank = 0, firstBlank = null;
-  for (const [x, y, rw, rh] of runs) {
-    // ink: a pixel that differs from the run's corner (its background)
-    const bg = at(x + 0.5, y + 0.5);
+  for (const [x, y, rw, rh, op] of runs) {
+    // ink: a pixel that differs from the run's corner (its background);
+    // faded text (opacity on it or an ancestor) differs by that much less
+    const bg = at(x + 0.5, y + 0.5), inkMin = 90 * Math.min(1, op);
     let ink = false;
     for (let yy = y + 1; yy < y + rh - 1 && !ink; yy += 1 / DPR) {
       for (let xx = x + 1; xx < x + rw - 1; xx += 1 / DPR) {
         const c = at(xx, yy);
-        if (Math.abs(c[0] - bg[0]) + Math.abs(c[1] - bg[1]) + Math.abs(c[2] - bg[2]) > 90) { ink = true; break; }
+        if (Math.abs(c[0] - bg[0]) + Math.abs(c[1] - bg[1]) + Math.abs(c[2] - bg[2]) > inkMin) { ink = true; break; }
       }
     }
     if (!ink) { blank++; if (!firstBlank) firstBlank = [x, y, rw, rh].map(Math.round); }
