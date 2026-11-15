@@ -198,6 +198,12 @@ class RealmTest {
         def got (r.eval("var p = document.getElementById('p'), o = [], k = function () { __render(); o.push(getComputedStyle(p).color + '/' + (__styleCheck() === '')); }; k(); var s = document.createElement('style'); document.head.appendChild(s); k(); s.textContent = 'p{color:rgb(1,2,3)}'; k(); s.textContent = 'p{color:rgb(1,2,3)}'; k(); s.textContent = ''; k(); s.appendChild(document.createTextNode('p{color:rgb(4,5,6)}')); k(); document.head.removeChild(s); k(); document.head.appendChild(s); k(); o.join(';')"))
         this.check("a <style> put in empty, given its text, emptied, taken out and put back" (got == "rgb(0, 0, 0)/true;rgb(0, 0, 0)/true;rgb(1, 2, 3)/true;rgb(1, 2, 3)/true;rgb(0, 0, 0)/true;rgb(4, 5, 6)/true;rgb(0, 0, 0)/true;rgb(4, 5, 6)/true"))
     }
+    fn movedRender:void () {
+        def r:DomRealm (this.realm("<html><head><style>.b{position:absolute;width:40px;height:30px}.red{color:rgb(9,0,0)}</style></head><body><div id=w><div class=b id=a style='transform:translate(1px,2px)'>a</div><div class=b id=b style='transform:rotate(3deg);opacity:0.5'><span id=in>in</span>t</div></div></body></html>"))
+        r.runScripts()
+        def got (r.eval("__deltaRender(true); __renderDelta(); __fastRenderCheck(true); var a = document.getElementById('a'), b = document.getElementById('b'), sp = document.getElementById('in'), o = []; for (var i = 0; i < 4; i++) { a.style.transform = 'translate(' + i + 'px, 2px) rotate(' + i + 'deg)'; b.style.transform = 'rotate(' + (i + 4) + 'deg)'; __renderDelta(); } o.push(JSON.parse(__fastRenderCheck()).n); for (i = 0; i < 3; i++) { b.style.opacity = String(0.4 + i / 10); __renderDelta(); } o.push(JSON.parse(__fastRenderCheck()).n); sp.className = 'red'; b.style.transform = 'rotate(20deg)'; var t = __renderDelta(); o.push(JSON.parse(__fastRenderCheck()).n, /rotate\\(20deg\\)/.test(t), /rgb\\(9, 0, 0\\)/.test(t)); a.style.transform = 'none'; __renderDelta(); a.style.transform = 'translate(50%, 0)'; __renderDelta(); a.textContent = 'z'; a.style.transform = 'rotate(1deg)'; t = __renderDelta(); o.push(JSON.parse(__fastRenderCheck()).n, /\"x\":\"z\"/.test(t), JSON.parse(__fastRenderCheck()).bad); o.join(',')"))
+        this.check("only a transform or an opacity set: the kept render with the new value, the same as a whole render" (got == "8,11,11,true,true,11,true,0"))
+    }
     fn run:void () {
         this.plainDom()
         this.react()
@@ -211,6 +217,7 @@ class RealmTest {
         this.hasAboveSubject()
         this.hasSibling()
         this.styleElement()
+        this.movedRender()
         print ("passed " + (to_string passes) + ", failed " + (to_string fails))
     }
 
