@@ -8131,9 +8131,10 @@ impl DomView {
             // a one-line control's text is centred in its content box, as
             // Chromium centres its inner editor (a field taller than its
             // line, Bootstrap's, AG Grid's filter): a flex row, centred
-            if t != "textarea" && (display == "inline-block" || display == "block" || display.is_empty()) {
+            if t != "textarea" && (display == "inline-block" || display == "block" || display.is_empty() || display == "flex" || display == "inline-flex" || display == "grid" || display == "inline-grid") {
+                // (a flex or grid input, Tailwind's "flex h-9", centres it too)
                 let mut fd: String = "flex".to_string();
-                if display == "inline-block" || display.is_empty() {
+                if display == "inline-block" || display.is_empty() || display == "inline-flex" || display == "inline-grid" {
                     fd = "inline-flex".to_string();
                 }
                 EVGElement::set_attribute(&e, "display", fd.clone());
@@ -8162,6 +8163,9 @@ impl DomView {
                 } else {
                     EVGElement::set_attribute(&fte, "flex-shrink", "1".to_string());
                     EVGElement::set_attribute(&fte, "min-width", "0px".to_string());
+                    // (an empty field's line, " ", is a line tall all the
+                    // same: a flex item's lone space measures nothing)
+                    EVGElement::set_attribute(&fte, "min-height", format!("{}px", DomView::fmt(DomView::lineHeight(&tinh))));
                 }
             }
             EVGElement::add_child(&e, fte.clone());
