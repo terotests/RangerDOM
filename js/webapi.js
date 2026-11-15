@@ -4372,8 +4372,9 @@
   // last ({"~":1,"set":{id:box},"gone":[ids]}; a host that keeps them,
   // DomView.boxesSince). A page of 4 000 boxes was 100 KB of JSON for every
   // forced layout and every frame, whatever changed.
-  var boxesGone = 0;
+  var boxesGone = 0, boxSeq = 0;
   function takeBoxes(m) {
+    boxSeq++;
     if (m['~'] !== 1) { boxes = m; boxesGone = 0; return; }
     var set = m.set, gone = m.gone, k, i;
     for (k in set) boxes[k] = set[k];
@@ -4634,6 +4635,29 @@
     // element, which rectOf adds up per element (a wheel event over AG
     // Grid's 1 000 elements read 30 000 offsets).
     reflow();
+    var f = hitList(), els = f.els, ls = f.ls, ts = f.ts, ws = f.ws, hs = f.hs;
+    orderOf = f.orderOf;
+    for (var i = 0; i < els.length; i++) {
+      var l = ls[i], t = ts[i];
+      if (x >= l && x < l + ws[i] && y >= t && y < t + hs[i]) {
+        var n = els[i];
+        if (hittable(n) && insideTransformed(n, x, y) && !clippedAway(n, x, y)) {
+          var key = paintKey(n, orderOf);
+          if (!best || keyAfter(key, bestKey)) { best = n; bestKey = key; }
+        }
+      }
+    }
+    return best;
+  }
+  // The elements with a box in tree order, each box where the scroll
+  // offsets above it put it, and every element's place in that order: kept
+  // while the tree, the boxes and the scroll offsets are the same, so a
+  // run of hit tests on a still page (elementFromPoint over a grid of
+  // points, the moves of a pointer) walks the tree once.
+  var hitFlat = null;
+  function hitList() {
+    if (hitFlat && hitFlat.g === generation && hitFlat.b === boxSeq && hitFlat.s === scrollBumps && hitFlat.d === doc) return hitFlat;
+    var els = [], ls = [], ts = [], ws = [], hs = [], orderOf = {}, order = 0;
     var stack = [], sxs = [], sys = [], top = doc._c;
     for (var i = top.length - 1; i >= 0; i--) { stack.push(top[i]); sxs.push(0); sys.push(0); }
     while (stack.length) {
@@ -4641,17 +4665,12 @@
       if (n._attrs === undefined) continue;
       orderOf[n.__id] = order++;
       var b = boxes[n.__id];
-      if (b) {
-        var l = b[0] - sx, t = b[1] - sy;
-        if (x >= l && x < l + b[2] && y >= t && y < t + b[3] && hittable(n) && insideTransformed(n, x, y) && !clippedAway(n, x, y)) {
-          var key = paintKey(n, orderOf);
-          if (!best || keyAfter(key, bestKey)) { best = n; bestKey = key; }
-        }
-      }
+      if (b) { els.push(n); ls.push(b[0] - sx); ts.push(b[1] - sy); ws.push(b[2]); hs.push(b[3]); }
       var kx = sx + (n._sLeft || 0), ky = sy + (n._sTop || 0), kids = n._c;
       for (var j = kids.length - 1; j >= 0; j--) { stack.push(kids[j]); sxs.push(kx); sys.push(ky); }
     }
-    return best;
+    hitFlat = { g: generation, b: boxSeq, s: scrollBumps, d: doc, els: els, ls: ls, ts: ts, ws: ws, hs: hs, orderOf: orderOf };
+    return hitFlat;
   }
   function positionedOf(cs) { return cs.position && cs.position !== 'static'; }
   function zOf(cs) { var z = cs['z-index']; return z === undefined || z === 'auto' ? null : parseInt(z, 10) || 0; }
