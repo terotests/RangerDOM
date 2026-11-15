@@ -6507,10 +6507,35 @@
         if (x.t === 'class') (need || (need = [])).push('c:' + x.v);
         else if (x.t === 'id') (need || (need = [])).push('i:' + x.v);
         else if (x.t === 'tag' && x.v !== '*') (need || (need = [])).push('t:' + x.v);
+        // (:is() or :where() on an ancestor: one name of each alternative's
+        // own compound, any one of which the chain must have. Without it
+        // `:is(.a, .b) li span` went up every span's chain for every such
+        // rule of the sheet.)
+        else if (x.t === 'pseudo' && (x.n === 'is' || x.n === 'where') && x.list && x.list.length) {
+          var any = [];
+          for (var ai = 0; ai < x.list.length && any; ai++) {
+            var ap = x.list[ai].parts, ac = ap && ap.length ? ap[0].c : null, nm = null;
+            if (ac) for (var aq = 0; aq < ac.length && !nm; aq++) {
+              if (ac[aq].t === 'class') nm = 'c:' + ac[aq].v; else if (ac[aq].t === 'id') nm = 'i:' + ac[aq].v; else if (ac[aq].t === 'tag' && ac[aq].v !== '*') nm = 't:' + ac[aq].v;
+            }
+            if (nm) any.push(nm); else any = null;
+          }
+          if (any) (need || (need = [])).push(any.length === 1 ? any[0] : any);
+        }
       }
     }
     Object.defineProperty(sel, '_need', { value: need, enumerable: false, writable: true });
     return need;
+  }
+  function lacksNeed(anc, need) {
+    for (var i = 0; i < need.length; i++) {
+      var n = need[i];
+      if (typeof n === 'string') { if (anc[n] !== 1) return true; continue; }
+      var one = false;
+      for (var j = 0; j < n.length && !one; j++) if (anc[n[j]] === 1) one = true;
+      if (!one) return true;
+    }
+    return false;
   }
   // the names of el's ancestors (their classes, ids, types in lower case),
   // one object for all the children of a parent, kept until the tree or a
@@ -6576,7 +6601,7 @@
       if (anc) {
         var need = r.sel._need;
         if (need === undefined) need = needOf(r.sel);
-        if (need) { var lacks = false; for (var ni = 0; ni < need.length; ni++) if (anc[need[ni]] !== 1) { lacks = true; break; } if (lacks) continue; }
+        if (need && lacksNeed(anc, need)) continue;
       }
       if (r.media) {
         // (kept with the rule for the viewport it was answered for)
@@ -6598,7 +6623,7 @@
         if (anc) {
           var need2 = r2.sel._need;
           if (need2 === undefined) need2 = needOf(r2.sel);
-          if (need2) { var lacks2 = false; for (var nj = 0; nj < need2.length; nj++) if (anc[need2[nj]] !== 1) { lacks2 = true; break; } if (lacks2) continue; }
+          if (need2 && lacksNeed(anc, need2)) continue;
         }
         if (r2.media) {
           if (r2._mqW !== viewport.w || r2._mqH !== viewport.h) { r2._mqW = viewport.w; r2._mqH = viewport.h; r2._mq = mediaMatches(r2.media); }

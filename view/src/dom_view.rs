@@ -259,6 +259,12 @@ pub struct DomMemo {
     open: Vec<String>,
     /// off: kept elements are laid out again (the layout is not kept)
     pub keepLayout: bool,
+    /// the nodes (stamps) of sticky boxes and of every box around one:
+    /// their layouts are not kept. The layout places sticky boxes from
+    /// where the flow put them, after a pass that laid one out; a kept
+    /// one stayed where the last scroll position put it (AG Grid's header
+    /// row after a wheel). What is beside the path keeps its layout.
+    stickyOn: HashMap<String,bool>,
     pub hits: i64,
     pub misses: i64,
 }
@@ -278,6 +284,7 @@ impl DomMemo {
             prevUp: HashMap::new(),
             open: Vec::new(),
             keepLayout: true,
+            stickyOn: HashMap::new(),
             hits: 0,
             misses: 0,
         }
@@ -302,6 +309,17 @@ impl DomMemo {
         let sk: String = stamp.to_string();
         self.under(&sk);
         self.open.push(sk);
+    }
+    /// the node being built is a sticky box, or holds one: it and the
+    /// nodes around it (stickyOn)
+    #[doc(hidden)]
+    pub fn stickyHere(&mut self) {
+        let os: Vec<String> = self.open.clone();
+        for sk in os.iter().cloned() {
+            if !self.stickyOn.contains_key(&sk) {
+                self.stickyOn.insert(sk.clone(), true);
+            }
+        }
     }
     #[doc(hidden)]
     pub fn end(&mut self) {
@@ -407,6 +425,9 @@ impl DomMemo {
             if self.keepLayout && !ent.borrow().sigWas.is_empty() {
                 same = ent.borrow().sigWas == ent.borrow().sig;
             }
+            if self.stickyOn.contains_key(&sk) {
+                same = false;
+            }
             // (an absolute or fixed box is placed by its own layout, which a
             // kept layout skips)
             if el.borrow().is_absolute || el.borrow().position == "fixed" {
@@ -429,6 +450,10 @@ impl DomMemo {
         let ent: Rc<RefCell<DomMemoEnt>> = self.prevEnt.get(&sk).cloned().unwrap();
         if ent.borrow().key != key {
             return none;
+        }
+        // (taken with a sticky box in it: the nodes around it now)
+        if self.stickyOn.contains_key(&sk) {
+            self.stickyHere();
         }
         let el: Rc<RefCell<EVGElement>> = self.prevEls.get(&sk).cloned().unwrap();
         if ent.borrow().hasY {
@@ -867,12 +892,30 @@ impl DomView {
     }
     #[doc(hidden)]
     pub fn build(page: &Rc<RefCell<JsonValue>>, index: i64, w: f64, h: f64) -> Rc<RefCell<EVGElement>> {
-        DomView::buildWith(page, index, w, h, Rc::new(RefCell::new(DomSvgDocs::new())))
+        let r: Rc<RefCell<EVGElement>> = DomView::buildWith(page, index, w, h, Rc::new(RefCell::new(DomSvgDocs::new())));
+        DomView::outOfFlow(&r);
+        r
+    }
+    /// The layout notes that a box is out of flow (is_absolute) when it
+    /// lays the box out, and a box around it that fits its content asks
+    /// before that: a new tree then gave such a box the room's width, a
+    /// kept one its content's. Noted here, both give the content's.
+    fn outOfFlow(el: &Rc<RefCell<EVGElement>>) {
+        if !el.borrow().is_absolute && EVGElement::has_absolute_position(el) {
+            el.borrow_mut().is_absolute = true;
+        }
+        let n: i64 = el.borrow().children.len() as i64;
+        for i in 0..n {
+            let c = Rc::clone(&el.borrow().children[i as usize]);
+            DomView::outOfFlow(&c);
+        }
     }
     /// build with what earlier frames parsed and built (svgs, its memo)
     #[doc(hidden)]
     pub fn buildKept(page: &Rc<RefCell<JsonValue>>, index: i64, w: f64, h: f64, svgs: Rc<RefCell<DomSvgDocs>>) -> Rc<RefCell<EVGElement>> {
-        DomView::buildWith(page, index, w, h, svgs)
+        let r: Rc<RefCell<EVGElement>> = DomView::buildWith(page, index, w, h, svgs);
+        DomView::outOfFlow(&r);
+        r
     }
     #[doc(hidden)]
     pub fn buildWith(page: &Rc<RefCell<JsonValue>>, index: i64, w: f64, h: f64, svgs: Rc<RefCell<DomSvgDocs>>) -> Rc<RefCell<EVGElement>> {
@@ -8143,6 +8186,8 @@ impl DomView {
         }
         // (a sticky box keeps its px insets from its scrollport's edges)
         if ps == "sticky" {
+            let smemo: Rc<RefCell<DomMemo>> = Rc::clone(&self.svgs.borrow().memo);
+            smemo.borrow_mut().stickyHere();
             let __v_sti: Vec<String> = vec!["top".to_string(), "left".to_string(), "bottom".to_string(), "right".to_string()];
             let __n_sti = __v_sti.len() as i64;
             for sti in 0..__n_sti {
