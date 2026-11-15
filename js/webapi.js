@@ -20,6 +20,8 @@
 //                         rest named ({"r": n}); see renderJson
 //   __renderDelta(again)  __render() for such a host; again: it lost what
 //                         it kept, the whole page is sent
+//   __styleCheck()        a test's: '' when the page with every style found
+//                         again is the page the kept styles give
 //   __layout(json)        the boxes the host laid out: {"id": [x, y, w, h]}
 //                         and {"viewport": [w, h]}
 //   __input(json)         an event from the user, see hostInput
@@ -122,8 +124,8 @@
       // (and the same rules match them as before, unless a selector reads
       // the style attribute: AG Grid sets a custom property on its
       // viewport after the first layout, which matched 210 elements again)
-      if (!(old && ownStyleOnly(old, computedOf(el), el))) eachElement(el, fxCache.styleRead ? dropStyle : dropComputed);
-    } else if (!old || !sameBelow(el, old, computedOf(el))) eachElement(el, dropStyle);
+      if (!(old && (ownStyleOnly(old, computedOf(el), el) || kidsKept(el, old, computedOf(el), fxCache.styleRead ? dropStyle : dropComputed)))) eachElement(el, fxCache.styleRead ? dropStyle : dropComputed);
+    } else if (!old || !(sameBelow(el, old, computedOf(el)) || kidsKept(el, old, computedOf(el), dropStyle))) eachElement(el, dropStyle);
     // :lang() and :dir() follow the attribute down the tree, a disabled
     // fieldset's :disabled its controls
     else if (name === 'lang' || name === 'dir' || name === 'xml:lang' || (name === 'disabled' && /^(fieldset|optgroup)$/.test(el.localName))) eachElement(el, dropStyle);
@@ -154,7 +156,7 @@
   function restyle(e) {
     var old = computedCache.map[e.__id];
     dropStyle(e);
-    if (old && sameBelow(e, old, computedOf(e))) return true;
+    if (old && (sameBelow(e, old, computedOf(e)) || kidsKept(e, old, computedOf(e), dropStyle))) return true;
     eachElement(e, dropStyle);
     return false;
   }
@@ -226,6 +228,53 @@
       // under it as sameBelow says
       dropStyle(c);
       if (!sameBelow(c, cc, computedOf(c))) eachElement(c, dropStyle);
+    }
+    return true;
+  }
+  // what of a box's style nothing under it takes, in its style or in how
+  // it is rendered: its own size, spacing, paint and how it places its
+  // children (the host lays them out again)
+  var BOX_ONLY = { width: 1, height: 1, 'min-width': 1, 'min-height': 1, 'max-width': 1, 'max-height': 1, 'box-sizing': 1, 'aspect-ratio': 1,
+    'margin-top': 1, 'margin-right': 1, 'margin-bottom': 1, 'margin-left': 1, 'padding-top': 1, 'padding-right': 1, 'padding-bottom': 1, 'padding-left': 1,
+    'border-top-width': 1, 'border-right-width': 1, 'border-bottom-width': 1, 'border-left-width': 1, 'border-top-style': 1, 'border-right-style': 1, 'border-bottom-style': 1, 'border-left-style': 1,
+    'border-top-color': 1, 'border-right-color': 1, 'border-bottom-color': 1, 'border-left-color': 1,
+    'border-top-left-radius': 1, 'border-top-right-radius': 1, 'border-bottom-left-radius': 1, 'border-bottom-right-radius': 1,
+    'background-color': 1, 'background-image': 1, 'background-position': 1, 'background-size': 1, 'background-repeat': 1, 'background-origin': 1, 'background-clip': 1, 'box-shadow': 1,
+    'outline-color': 1, 'outline-style': 1, 'outline-width': 1, 'outline-offset': 1,
+    gap: 1, 'row-gap': 1, 'column-gap': 1, 'flex-basis': 1, 'flex-grow': 1, 'flex-shrink': 1, order: 1, 'align-self': 1, 'justify-self': 1,
+    'flex-wrap': 1, 'flex-direction': 1, 'align-items': 1, 'justify-content': 1, 'align-content': 1, 'justify-items': 1,
+    'grid-template-columns': 1, 'grid-template-rows': 1, 'grid-template-areas': 1, 'grid-auto-rows': 1, 'grid-auto-columns': 1, 'grid-auto-flow': 1,
+    'grid-row-start': 1, 'grid-row-end': 1, 'grid-column-start': 1, 'grid-column-end': 1 };
+  var KEPT_NOT = /^(inline-)?table|^table-|^contents$|^none$/;
+  // el's style went from a to b (b in the cache), alike in what its
+  // children inherit and different only in BOX_ONLY, OWN_ONLY and the
+  // display: each child is styled again (its display follows el's, its
+  // declarations may say `inherit`), and one whose style comes out alike
+  // keeps all under it, and its own rendering when el's display stayed.
+  // The others are dropped with what is under them (drop). False when el's
+  // change is of another kind: nothing done. (A grid whose width or
+  // template changed styled and rendered its 2 850 descendants again, to
+  // the same styles and the same text.)
+  function kidsKept(el, a, b, drop) {
+    if (shadowCount || a._fontPx !== b._fontPx || a._fsKw !== b._fsKw || !varsEqual(a._vars, b._vars)) return false;
+    if (KEPT_NOT.test(a.display || '') || KEPT_NOT.test(b.display || '')) return false;
+    for (var k in a) if (k.charCodeAt(0) !== 95 && a[k] !== b[k] && !BOX_ONLY[k] && !OWN_ONLY[k] && k !== 'display') return false;
+    for (var k2 in b) if (k2.charCodeAt(0) !== 95 && a[k2] === undefined && b[k2] !== undefined && !BOX_ONLY[k2] && !OWN_ONLY[k2] && k2 !== 'display') return false;
+    var disp = a.display !== b.display, map = computedCache.map;
+    for (var i = 0; i < el._c.length; i++) {
+      var c = el._c[i];
+      if (c.nodeType !== 1) continue;
+      var cc = map[c.__id], rj = c._rj;
+      drop(c);
+      if (!cc) { eachElement(c, drop); continue; }
+      var nc = computedOf(c);
+      if (nc === cc || sameStyle(cc, nc, c)) {
+        // (a text field's width in a flex row follows the row's, renderNode)
+        if (!disp && rj && rj.ps === a && c.localName !== 'input') { rj.ps = b; c._rj = rj; }
+        continue;
+      }
+      // (its own box only: the same question for its children)
+      if (!kidsKept(c, cc, nc, drop)) eachElement(c, drop);
     }
     return true;
   }
@@ -6614,7 +6663,7 @@
     var hits = kept !== undefined ? kept.slice() : [];
     var svCtx = shadowCtx;
     shadowCtx = esr;
-    var cand = [], rs = null, sg = 0, sc = null, dyn = null, nPlain = 0;
+    var cand = [], rs = null, sg = 0, sc = null, dyn = null, nPlain = 0, scw = null;
     if (kept === undefined) {
       rs = scopeRuleSet(d, esr);
       // (elements alike in what the plain selectors read, see sigOf: the
@@ -6628,6 +6677,14 @@
         sc = rs._sc.get(sck);
         // (kept for the viewport its media rules were answered for)
         if (sc && (sc.vw !== viewport.w || sc.vh !== viewport.h)) sc = undefined;
+        // (a pseudo-element of elements alike with plain rules only: the
+        // declarations found for the first one. Bootstrap's `*, ::before,
+        // ::after` gives every element two, asked again whenever its
+        // style is dropped.)
+        if (sc && pe && !sc.dyn.length) {
+          if (sc.og === styleGen) { shadowCtx = svCtx; return sc.out; }
+          scw = sc;
+        }
         if (sc) { for (var sh = 0; sh < sc.plain.length; sh++) hits.push(sc.plain[sh]); cand = sc.dyn; }
         else { setCandidates(rs, el, cand, pe); dyn = []; }
       } else setCandidates(rs, el, cand, pe);
@@ -6665,7 +6722,9 @@
       // kept ones, so that elements alike get the same key below)
       var plain = hits.slice();
       if (rs._sc.size >= 20000) rs._sc.clear();
-      rs._sc.set(pe ? sg + ':' + pe : sg, { plain: plain, dyn: dyn, vw: viewport.w, vh: viewport.h });
+      var scn = { plain: plain, dyn: dyn, vw: viewport.w, vh: viewport.h, og: -1, out: null };
+      rs._sc.set(pe ? sg + ':' + pe : sg, scn);
+      if (pe && !dyn.length) scw = scn;
       for (var di = 0; di < dyn.length; di++) {
         var w2 = dyn[di], r2 = w2.r;
         if (r2.sel._sn && !(r2.sel._sn & stOn)) continue;
@@ -6688,7 +6747,7 @@
       hm.m[hmk] = hits.slice();
     }
     // (a pseudo-element no rule names: none, nothing built)
-    if (pe && !hits.length) return null;
+    if (pe && !hits.length) { if (scw) { scw.out = null; scw.og = styleGen; } return null; }
     // the same rules, inline style and presentational attributes give the
     // same declarations: elements alike (a table's rows and cells) share
     // one object, which computeStyle then knows them by (_sid)
@@ -6730,7 +6789,7 @@
       for (var pk = 0; pk < hits.length; pk++) pek += ',' + (hits[pk].r._uid || (hits[pk].r._uid = ++ruleUid)) + ':' + hits[pk].sheet;
       if (peSpec.gen !== styleGen) peSpec = { gen: styleGen, map: {}, n: 0 };
       var peHit = peSpec.map[pek];
-      if (peHit) return peHit;
+      if (peHit) { if (scw) { scw.out = peHit; scw.og = styleGen; } return peHit; }
     }
     hits.sort(function (a, b) { return (a.ua === b.ua ? 0 : a.ua ? -1 : 1) || (!a.inner === !b.inner ? 0 : a.inner ? -1 : 1) || cmpSpec(a.r.sel.spec, b.r.sel.spec) || a.sheet - b.sheet || a.r.order - b.r.order; });
     // (seq: when each key was last set, for computeStyle to tell a logical
@@ -6759,7 +6818,7 @@
         var dp = hits[hp].r.decls;
         for (var jp = 0; jp < dp.length; jp++) if (dp[jp].important) put(dp[jp].name, dp[jp].value, true, hits[hp].ua);
       }
-      if (peSpec.n < 20000) { Object.defineProperty(out, '_sid', { value: ++specUid, enumerable: false }); peSpec.map[pek] = out; peSpec.n++; }
+      if (peSpec.n < 20000) { Object.defineProperty(out, '_sid', { value: ++specUid, enumerable: false }); peSpec.map[pek] = out; peSpec.n++; if (scw) { scw.out = out; scw.og = styleGen; } }
       return out;
     }
     // inline style
@@ -11219,6 +11278,22 @@
   // renderJson): again = the host lost what it kept, everything is sent
   G.__renderDelta = function (again) { var was = reflowing; reflowing = true; if (again) deltaEpoch++; try { return render(deltaOn); } finally { reflowing = was; } };
   G.__deltaCheck = function (on) { deltaCheck = !!on; return String(deltaCheck); };
+  // a test's: the page as the kept styles and renders give it against the
+  // page with every style found and every node rendered again: '' when
+  // the two are alike, else the texts around where they part
+  G.__styleCheck = function () {
+    var was = reflowing; reflowing = true;
+    try {
+      var cut = function (t) { return t.slice(t.indexOf(',"w":')); };
+      var a = cut(render(false));
+      changed();
+      var b = cut(render(false));
+      if (a === b) return '';
+      var i = 0;
+      while (i < a.length && a.charCodeAt(i) === b.charCodeAt(i)) i++;
+      return 'kept ' + a.slice(Math.max(0, i - 200), i + 120) + ' fresh ' + b.slice(Math.max(0, i - 200), i + 120);
+    } finally { reflowing = was; }
+  };
   G.__deltaRender = function (on) { on = !!on; if (on !== deltaOn) { deltaOn = on; deltaEpoch++; } return String(deltaOn); };
   // the host draws text with the browser's own faces (the playground's
   // canvas), so a line of Arial has Arial's height, not that of the Open

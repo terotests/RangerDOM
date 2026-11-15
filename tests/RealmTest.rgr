@@ -158,6 +158,15 @@ class RealmTest {
         this.check("shadow: the host renders its shadow tree, a slot what it takes" (((indexOf snap "\"x\":\"named\"") >= 0) && ((indexOf snap "\"x\":\"x\"") >= 0)))
     }
 
+    ; a box whose own size, paint or display changed: its children are
+    ; styled again and those that come out alike keep what is under them
+    ; (kidsKept). After each change the page the kept styles give is the
+    ; page with every style found again (__styleCheck).
+    fn keptStyles:void () {
+        def r:DomRealm (this.realm("<html><head><style>#app{width:400px;display:grid;grid-template-columns:1fr 1fr;background-color:rgb(1,2,3)}#app.flex{display:flex}#app.flex .card{width:90px}.card{display:flex;padding:2px}.w{width:inherit}.bg{background-color:inherit}.card b{color:red}#app.flex i{font-style:normal}</style></head><body><div id=app><div class=card><b>a</b><span class=w><i class=w>x</i></span></div><div class=\"card bg\"><p class=bg>y</p><i>z</i></div><div class=w><u class=w>q</u></div></div></body></html>"))
+        def got (r.eval("var a = document.getElementById('app'), o = []; __render(); a.style.width = '300px'; __render(); o.push(__styleCheck() === ''); __render(); a.className = 'flex'; __render(); o.push(__styleCheck() === ''); __render(); a.style.backgroundColor = 'rgb(9,9,9)'; __render(); o.push(__styleCheck() === ''); __render(); a.className = ''; a.style.padding = '3px'; __render(); o.push(__styleCheck() === ''); o.push(getComputedStyle(document.querySelector('u')).width, getComputedStyle(document.querySelector('p')).backgroundColor); o.join()"))
+        this.check("kept styles: a box's own change leaves the page as styled anew" (got == "true,true,true,true,300px,rgb(9, 9, 9)"))
+    }
     fn run:void () {
         this.plainDom()
         this.react()
@@ -166,6 +175,7 @@ class RealmTest {
         this.errors()
         this.parser()
         this.shadow()
+        this.keptStyles()
         print ("passed " + (to_string passes) + ", failed " + (to_string fails))
     }
 
