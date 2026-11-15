@@ -3672,8 +3672,14 @@
       };
       this._cookie = '';
       this.currentScript = null;
-      this.adoptedStyleSheets = [];
+      this._adopted = [];
     }
+    // (on the prototype: Lit shares one constructed sheet between all the
+    // shadow roots of a component only when 'adoptedStyleSheets' is in
+    // Document.prototype, and gives every root its own <style> otherwise,
+    // parsed again for each element)
+    get adoptedStyleSheets() { return this._adopted; }
+    set adoptedStyleSheets(v) { this._adopted = Array.from(v || []); changed(); }
     get nodeType() { return 9; }
     get nodeName() { return '#document'; }
     get documentElement() { return this.firstElementChild; }
@@ -6435,6 +6441,19 @@
       for (var q = 0; q < list.length && same; q++) same = have.list[q] === list[q] && have.of[q] === list[q]._index;
       if (same) return have;
     }
+    // (another scope's set of the same sheets: its index is this one's
+    // too. The shadow roots of one component share their constructed
+    // sheets, and 50 new buttons made the same index 50 times.)
+    for (var g = sigSets.length - 1; g >= 0; g--) {
+      var o = sigSets[g];
+      if (o.list.length !== list.length) continue;
+      var eq = true;
+      for (var q2 = 0; q2 < list.length && eq; q2++) eq = o.list[q2] === list[q2] && o.of[q2] === list[q2]._index;
+      if (!eq) continue;
+      var sh = { list: o.list, of: o.of, idx: o.idx, pidx: o.pidx, _sc: new Map(), _sa: o._sa, _base: o };
+      sigSets.push(sh); if (sigSets.length > 8) sigSets.shift();
+      return sh;
+    }
     var rs = { list: list.slice(), of: [], idx: Object.create(null), pidx: Object.create(null), _sc: new Map(), _sa: null };
     sigSets.push(rs); if (sigSets.length > 8) sigSets.shift();
     var build = ++ruleSetBuild;
@@ -6557,7 +6576,7 @@
   var sigIds = new Map(), sigUid = 0;
   function sigOf(el, rs) {
     var sa = rs._sa;
-    if (!sa) { sa = rs._sa = selAttrsOf(rs); }
+    if (!sa) { sa = rs._sa = (rs._base && rs._base._sa) || selAttrsOf(rs); if (rs._base && !rs._base._sa) rs._base._sa = sa; }
     var p = el.parentNode, ps = 'x';
     if (p) {
       if (p.nodeType === 1) {
