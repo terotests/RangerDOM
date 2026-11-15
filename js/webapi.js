@@ -20,6 +20,8 @@
 //                         rest named ({"r": n}); see renderJson
 //   __renderDelta(again)  __render() for such a host; again: it lost what
 //                         it kept, the whole page is sent
+//   __styleCheck()        a test's: '' when the page with every style found
+//                         again is the page the kept styles give
 //   __layout(json)        the boxes the host laid out: {"id": [x, y, w, h]}
 //                         and {"viewport": [w, h]}
 //   __input(json)         an event from the user, see hostInput
@@ -92,6 +94,11 @@
     if (!reach) { changed(); return; }
     generation++;
     textStamp++;
+    // (el._tfv: el's own transform was the last change at or under it,
+    // el._tf0: what el._rv was before the first of such changes in a row;
+    // a render of el from then on has only el's transform to change,
+    // movedJson)
+    if (name === 'style' && el._styleSync && el._styleChg && el._styleChg.length === 1 && (el._styleChg[0] === 'transform' || el._styleChg[0] === 'opacity')) { if (el._rv !== el._tfv || el._tfn !== el._styleChg[0]) { el._tf0 = el._rv || 0; el._tfn = el._styleChg[0]; } el._tfv = textStamp; }
     for (var p = el; p; p = p.parentNode) p._rv = textStamp;
     if (computedCache.gen !== styleGen) return;
     var old = computedCache.map[el.__id];
@@ -122,8 +129,8 @@
       // (and the same rules match them as before, unless a selector reads
       // the style attribute: AG Grid sets a custom property on its
       // viewport after the first layout, which matched 210 elements again)
-      if (!(old && ownStyleOnly(old, computedOf(el), el))) eachElement(el, fxCache.styleRead ? dropStyle : dropComputed);
-    } else if (!old || !sameBelow(el, old, computedOf(el))) eachElement(el, dropStyle);
+      if (!(old && (ownStyleOnly(old, computedOf(el), el) || kidsKept(el, old, computedOf(el), fxCache.styleRead ? dropStyle : dropComputed)))) eachElement(el, fxCache.styleRead ? dropStyle : dropComputed);
+    } else if (!old || !(sameBelow(el, old, computedOf(el)) || kidsKept(el, old, computedOf(el), dropStyle))) eachElement(el, dropStyle);
     // :lang() and :dir() follow the attribute down the tree, a disabled
     // fieldset's :disabled its controls
     else if (name === 'lang' || name === 'dir' || name === 'xml:lang' || (name === 'disabled' && /^(fieldset|optgroup)$/.test(el.localName))) eachElement(el, dropStyle);
@@ -155,7 +162,7 @@
   function restyle(e) {
     var old = computedCache.map[e.__id];
     dropStyle(e);
-    if (old && sameBelow(e, old, computedOf(e))) return true;
+    if (old && (sameBelow(e, old, computedOf(e)) || kidsKept(e, old, computedOf(e), dropStyle))) return true;
     eachElement(e, dropStyle);
     return false;
   }
@@ -246,6 +253,53 @@
     }
     return true;
   }
+  // what of a box's style nothing under it takes, in its style or in how
+  // it is rendered: its own size, spacing, paint and how it places its
+  // children (the host lays them out again)
+  var BOX_ONLY = { width: 1, height: 1, 'min-width': 1, 'min-height': 1, 'max-width': 1, 'max-height': 1, 'box-sizing': 1, 'aspect-ratio': 1,
+    'margin-top': 1, 'margin-right': 1, 'margin-bottom': 1, 'margin-left': 1, 'padding-top': 1, 'padding-right': 1, 'padding-bottom': 1, 'padding-left': 1,
+    'border-top-width': 1, 'border-right-width': 1, 'border-bottom-width': 1, 'border-left-width': 1, 'border-top-style': 1, 'border-right-style': 1, 'border-bottom-style': 1, 'border-left-style': 1,
+    'border-top-color': 1, 'border-right-color': 1, 'border-bottom-color': 1, 'border-left-color': 1,
+    'border-top-left-radius': 1, 'border-top-right-radius': 1, 'border-bottom-left-radius': 1, 'border-bottom-right-radius': 1,
+    'background-color': 1, 'background-image': 1, 'background-position': 1, 'background-size': 1, 'background-repeat': 1, 'background-origin': 1, 'background-clip': 1, 'box-shadow': 1,
+    'outline-color': 1, 'outline-style': 1, 'outline-width': 1, 'outline-offset': 1,
+    gap: 1, 'row-gap': 1, 'column-gap': 1, 'flex-basis': 1, 'flex-grow': 1, 'flex-shrink': 1, order: 1, 'align-self': 1, 'justify-self': 1,
+    'flex-wrap': 1, 'flex-direction': 1, 'align-items': 1, 'justify-content': 1, 'align-content': 1, 'justify-items': 1,
+    'grid-template-columns': 1, 'grid-template-rows': 1, 'grid-template-areas': 1, 'grid-auto-rows': 1, 'grid-auto-columns': 1, 'grid-auto-flow': 1,
+    'grid-row-start': 1, 'grid-row-end': 1, 'grid-column-start': 1, 'grid-column-end': 1 };
+  var KEPT_NOT = /^(inline-)?table|^table-|^contents$|^none$/;
+  // el's style went from a to b (b in the cache), alike in what its
+  // children inherit and different only in BOX_ONLY, OWN_ONLY and the
+  // display: each child is styled again (its display follows el's, its
+  // declarations may say `inherit`), and one whose style comes out alike
+  // keeps all under it, and its own rendering when el's display stayed.
+  // The others are dropped with what is under them (drop). False when el's
+  // change is of another kind: nothing done. (A grid whose width or
+  // template changed styled and rendered its 2 850 descendants again, to
+  // the same styles and the same text.)
+  function kidsKept(el, a, b, drop) {
+    if (shadowCount || a._fontPx !== b._fontPx || a._fsKw !== b._fsKw || !varsEqual(a._vars, b._vars)) return false;
+    if (KEPT_NOT.test(a.display || '') || KEPT_NOT.test(b.display || '')) return false;
+    for (var k in a) if (k.charCodeAt(0) !== 95 && a[k] !== b[k] && !BOX_ONLY[k] && !OWN_ONLY[k] && k !== 'display') return false;
+    for (var k2 in b) if (k2.charCodeAt(0) !== 95 && a[k2] === undefined && b[k2] !== undefined && !BOX_ONLY[k2] && !OWN_ONLY[k2] && k2 !== 'display') return false;
+    var disp = a.display !== b.display, map = computedCache.map;
+    for (var i = 0; i < el._c.length; i++) {
+      var c = el._c[i];
+      if (c.nodeType !== 1) continue;
+      var cc = map[c.__id], rj = c._rj;
+      drop(c);
+      if (!cc) { eachElement(c, drop); continue; }
+      var nc = computedOf(c);
+      if (nc === cc || sameStyle(cc, nc, c)) {
+        // (a text field's width in a flex row follows the row's, renderNode)
+        if (!disp && rj && rj.ps === a && c.localName !== 'input') { rj.ps = b; c._rj = rj; }
+        continue;
+      }
+      // (its own box only: the same question for its children)
+      if (!kidsKept(c, cc, nc, drop)) eachElement(c, drop);
+    }
+    return true;
+  }
   // An element went into p or out of it (c: the one put in): when no
   // selector looks up the tree, only p and its children are styled again
   // (their :empty, :last-child; their children only when one's style
@@ -261,6 +315,8 @@
     if (shadowCount && (p.nodeType === 11 && p.host || inShadowScope(p))) { changed(); scheduleSlots(p._sr && (c || gone) ? assignedSlotOf(c || gone) : null); return; }
     // not in the page (a fragment, a parsed document): nothing shown
     if (!doc || (p !== doc && (p.ownerDocument !== doc || !p.isConnected))) { generation++; return; }
+    // (a style sheet's text is its rules)
+    if (p.localName === 'style') { changed(); return; }
     var reach = p !== doc && p !== doc.documentElement ? selectorReach() : 0;
     if (!reach) { changed(); return; }
     generation++;
@@ -342,6 +398,8 @@
         else if (st && edge) restyle(k);
       }
       hasReached(p.nodeType === 1 ? p.parentNode : null);
+      // (p itself can be the compound with the :has())
+      if (p.nodeType === 1) hasAbove(p);
     }
     treeFlushing = false;
   }
@@ -431,6 +489,72 @@
   function hasReached(el) {
     if (!reachCache.has || computedCache.gen !== styleGen) return;
     for (var a = el; a && a.nodeType === 1; a = a.parentNode) restyle(a);
+    hasAbove(el);
+  }
+  // :has() above a selector's subject (PrimeReact's
+  // `.p-checkbox:has(.p-checkbox-input:hover) .p-checkbox-box`): what
+  // changed at or under el can change the style of anything under an
+  // element that such a compound can match (hasAnchors: by its tag, id or
+  // classes), so the topmost one of those above is styled again with all
+  // under it. Before, one such selector made every change of an attribute
+  // or of the tree style the whole page again.
+  function hasAbove(el) {
+    if (reachCache.has !== 2 || computedCache.gen !== styleGen) return;
+    var hk = reachCache.hasKeys, sk = hk.sibOn ? hk.sib : null, top = null;
+    for (var a = el; a && a.nodeType === 1; a = a.parentNode) {
+      if (hasKeyHit(a, hk)) top = a;
+      // (`.step:has(~ .on) .line`: the compound is a sibling of what
+      // changed, or of something above it, so the parent's subtree)
+      else if (sk) for (var k = 0; k < a._c.length; k++) if (a._c[k].nodeType === 1 && hasKeyHit(a._c[k], sk)) { top = a; break; }
+    }
+    if (top) { dropStyle(top); eachElement(top, dropStyle); }
+  }
+  function hasKeyHit(a, hk) {
+    if (hk.tag[a.localName] === 1 || (a.id && hk.id[String(a.id).toLowerCase()] === 1)) return true;
+    var cl = a.getAttribute('class');
+    if (cl) { var cs = cl.split(/\s+/); for (var j = 0; j < cs.length; j++) if (hk.cls[cs[j].toLowerCase()] === 1) return true; }
+    return false;
+  }
+  // The compounds that have :has() above their selector's subject, as
+  // keys (looseCompound). null when one has no tag, id or class, or a + or
+  // ~ follows it (what it reaches is not under it): the page then.
+  function hasAnchors(t, sib) {
+    var out = [], src = String(t).split('{')[0], sels = [], d = 0, from = 0, i;
+    for (i = 0; i < src.length; i++) {
+      var c = src.charAt(i);
+      if (c === '(' || c === '[') d++;
+      else if (c === ')' || c === ']') d--;
+      else if (c === ',' && d === 0) { sels.push(src.slice(from, i)); from = i + 1; }
+    }
+    sels.push(src.slice(from));
+    for (var si = 0; si < sels.length; si++) {
+      var sl = sels[si].trim(), comps = [], combs = [], cur = '';
+      d = 0;
+      for (i = 0; i < sl.length; i++) {
+        var ch = sl.charAt(i);
+        if (ch === '(' || ch === '[') d++;
+        else if (ch === ')' || ch === ']') d--;
+        if (d === 0 && /[\s>+~]/.test(ch)) {
+          var comb = ' ';
+          while (i < sl.length && /[\s>+~]/.test(sl.charAt(i))) { if (!/\s/.test(sl.charAt(i))) comb = sl.charAt(i); i++; }
+          i--;
+          comps.push(cur); combs.push(comb); cur = '';
+          continue;
+        }
+        cur += ch;
+      }
+      comps.push(cur);
+      for (var k = 0; k < comps.length - (sib ? 0 : 1); k++) {
+        if (!/:has\(/i.test(comps[k])) continue;
+        // (sib, `:has(~ x)`: the compound's parent's subtree is styled
+        // again, and what follows a + or ~ is in it)
+        for (var q = k; q < combs.length && !sib; q++) if (combs[q] === '+' || combs[q] === '~') return null;
+        var key = looseCompound(comps[k]);
+        if (!key.tag && !key.id && !key.cls.length) return null;
+        out.push(key);
+      }
+    }
+    return out;
   }
   var HOVER = /:(hover|active)\b/;
   // focus: :focus and :focus-visible, focusWithin: :focus-within
@@ -514,6 +638,8 @@
         if (style && e.isConnected) restyle(e);
       }
     });
+    // (:hover or :focus in a :has() above a subject)
+    if (reachCache.has === 2) [a, b].forEach(function (e) { if (e && e.nodeType === 1) hasAbove(e.parentNode); });
     if (!apart.length) return;
     // (a focused element's :focus-visible goes with its :focus)
     var fs = focus ? ['p:focus', 'p:focus-visible', 'p:focus-within'] : ['p:hover', 'p:active'];
@@ -527,6 +653,7 @@
   function selectorReach() {
     if (reachCache.gen === styleGen) return reachCache.reach;
     var reach = 1, struct = 0, hover = 0, focus = 0, within = 0, has = 0, counted = 0, sib = [];
+    var hasKeys = { cls: {}, id: {}, tag: {}, sibOn: false, sib: { cls: {}, id: {}, tag: {} } };
     var sheets = [ua()].concat(cascadeSheets(doc));
     for (var i = 0; i < sheets.length && reach; i++) {
       var sr = sheetReach(sheets[i]);
@@ -536,10 +663,15 @@
       if (sr.hover > hover) hover = sr.hover;
       if (sr.focus > focus) focus = sr.focus;
       if (sr.focusWithin > within) within = sr.focusWithin;
-      if (sr.has) has = 1;
+      if (sr.has > has) has = sr.has;
+      if (sr.has === 2) {
+        var hks = sr.hasKeys;
+        ['cls', 'id', 'tag'].forEach(function (hn) { for (var hv in hks[hn]) hasKeys[hn][hv] = 1; for (var hw in hks.sib[hn]) hasKeys.sib[hn][hw] = 1; });
+        if (hks.sibOn) hasKeys.sibOn = true;
+      }
       if (sr.counted) counted = 1;
     }
-    reachCache = { gen: styleGen, reach: reach, struct: struct, hover: hover, focus: focus, focusWithin: within, has: has, counted: counted, sib: sib };
+    reachCache = { gen: styleGen, reach: reach, struct: struct, hover: hover, focus: focus, focusWithin: within, has: has, counted: counted, sib: sib, hasKeys: hasKeys };
     return reach;
   }
   // one sheet's part of selectorReach, read from its rules once (until
@@ -550,6 +682,7 @@
     var rules = sheet._rules || [];
     if (sheet._reach && sheet._reachOf === rules) return sheet._reach;
     var reach = 1, struct = 0, hover = 0, focus = 0, within = 0, has = 0, counted = 0, sib = [], last = null;
+    var hasKeys = { cls: {}, id: {}, tag: {}, sibOn: false, sib: { cls: {}, id: {}, tag: {} } };
     for (var j = 0; j < rules.length; j++) {
       var t = rules[j].text;
       // (the selectors of one list follow each other with the list's text)
@@ -563,8 +696,20 @@
       // reaches the changed element's ancestors too (hasReached); one
       // relative to siblings (:has(+ x)) or above the subject: the page
       if (/:has\(/i.test(t)) {
-        if (/:has\(\s*[+~]/i.test(t) || pseudoPlace(t, /:has\(/i) === 2) { reach = 0; break; }
-        has = 1;
+        var sibHas = /:has\(\s*[+~]/i.test(t);
+        if (sibHas || pseudoPlace(t, /:has\(/i) === 2) {
+          // (above the subject: what is under the compound it is in; with
+          // a + or ~ first in it: what is under the compound's parent)
+          var an = hasAnchors(t, sibHas), into = sibHas ? hasKeys.sib : hasKeys;
+          if (!an) { reach = 0; break; }
+          if (sibHas) hasKeys.sibOn = true;
+          for (var ai = 0; ai < an.length; ai++) {
+            if (an[ai].cls.length) for (var ac = 0; ac < an[ai].cls.length; ac++) into.cls[an[ai].cls[ac]] = 1;
+            else if (an[ai].id) into.id[an[ai].id] = 1;
+            else into.tag[an[ai].tag] = 1;
+          }
+          has = 2;
+        } else if (!has) has = 1;
       }
       if (/[+~]/.test(t)) { var sl = siblingLefts(t); if (sl.length) { reach = 2; sib = sib.concat(sl); } }
       if (struct < 2 && STRUCT.test(t)) struct = Math.max(struct, pseudoPlace(t, STRUCT));
@@ -574,7 +719,7 @@
       if (within < 2 && FOCUS_WITHIN.test(t)) within = Math.max(within, pseudoPlace(t, FOCUS_WITHIN));
     }
     sheet._reachOf = rules;
-    sheet._reach = { reach: reach, struct: struct, hover: hover, focus: focus, focusWithin: within, has: has, counted: counted, sib: sib };
+    sheet._reach = { reach: reach, struct: struct, hover: hover, focus: focus, focusWithin: within, has: has, counted: counted, sib: sib, hasKeys: hasKeys };
     return sheet._reach;
   }
   // Invalidation sets (as Blink's): what a change of one feature of an
@@ -1260,6 +1405,10 @@
       return out;
     }
     set textContent(v) {
+      // a style sheet given the text it has (PrimeReact's useStyle, at
+      // every render of every component): the rules stay, and so does every
+      // style of the page
+      if (this.localName === 'style' && this._c.length === 1 && this._c[0].nodeType === 3 && this._c[0]._data === (v === null || v === undefined ? '' : String(v))) return;
       // only texts replaced by a text: the styles stay (styleGen)
       var styled = false;
       for (var i = 0; i < this._c.length; i++) if (!isText(this._c[i])) styled = true;
@@ -1326,8 +1475,13 @@
       for (var i = 0; i < n._c.length; i++) connected(n._c[i]);
     }
   }
+  // the elements taken out of the page since the last render: the render
+  // tells the host ("gone"), which lets go of what it kept for them then
+  // (10 000 rows cleared: 0.7 GB held as long as the page lived)
+  var goneEls = 0;
   function disconnected(n) {
     if (n.nodeType === 1) {
+      goneEls++;
       if (n._disconnected) n._disconnected();
       for (var i = 0; i < n._c.length; i++) disconnected(n._c[i]);
     }
@@ -1814,6 +1968,9 @@
   // A custom property keeps its tokens.
   function specifiedText(n, v) {
     if (n.slice(0, 2) === '--' || !/[,(]|\s\s|\s\)/.test(v)) return v;
+    // (no string and no url(): the same by four replaces. A transform set
+    // on 500 elements each frame spent half its time in the loop below)
+    if (!/["'\\]|url\(|,\s*,/i.test(v)) return v.replace(/\s+/g, ' ').replace(/\( /g, '(').replace(/ \)/g, ')').replace(/ ?, ?/g, ', ').trim();
     var out = '', depth = 0, i = 0, len = v.length;
     while (i < len) {
       var c = v.charAt(i);
@@ -2489,7 +2646,11 @@
     // (HTML 4.2.6: the element's disabled is its sheet's)
     get disabled() { var sh = this.sheet; return sh ? sh.disabled : false; }
     set disabled(v) { var sh = this.sheet; if (sh) sh.disabled = v; }
-    _connected() { changed(); }
+    // (one with no text yet has no rules: PrimeReact puts each component's
+    // <style> in empty and gives it its text after, and an empty one for
+    // its focus trap when a dialog opens: the whole page was styled again)
+    _connected() { if (this._c.length) changed(); }
+    _disconnected() { if (this._c.length) changed(); }
   }
   reflect(HTMLStyleElement, ['media', 'type']);
   class HTMLLinkElement extends HTMLElement {
@@ -3626,8 +3787,14 @@
       };
       this._cookie = '';
       this.currentScript = null;
-      this.adoptedStyleSheets = [];
+      this._adopted = [];
     }
+    // (on the prototype: Lit shares one constructed sheet between all the
+    // shadow roots of a component only when 'adoptedStyleSheets' is in
+    // Document.prototype, and gives every root its own <style> otherwise,
+    // parsed again for each element)
+    get adoptedStyleSheets() { return this._adopted; }
+    set adoptedStyleSheets(v) { this._adopted = Array.from(v || []); changed(); }
     get nodeType() { return 9; }
     get nodeName() { return '#document'; }
     get documentElement() { return this.firstElementChild; }
@@ -4369,8 +4536,9 @@
   // last ({"~":1,"set":{id:box},"gone":[ids]}; a host that keeps them,
   // DomView.boxesSince). A page of 4 000 boxes was 100 KB of JSON for every
   // forced layout and every frame, whatever changed.
-  var boxesGone = 0;
+  var boxesGone = 0, boxSeq = 0;
   function takeBoxes(m) {
+    boxSeq++;
     if (m['~'] !== 1) { boxes = m; boxesGone = 0; return; }
     var set = m.set, gone = m.gone, k, i;
     for (k in set) boxes[k] = set[k];
@@ -4631,6 +4799,29 @@
     // element, which rectOf adds up per element (a wheel event over AG
     // Grid's 1 000 elements read 30 000 offsets).
     reflow();
+    var f = hitList(), els = f.els, ls = f.ls, ts = f.ts, ws = f.ws, hs = f.hs;
+    orderOf = f.orderOf;
+    for (var i = 0; i < els.length; i++) {
+      var l = ls[i], t = ts[i];
+      if (x >= l && x < l + ws[i] && y >= t && y < t + hs[i]) {
+        var n = els[i];
+        if (hittable(n) && insideTransformed(n, x, y) && !clippedAway(n, x, y)) {
+          var key = paintKey(n, orderOf);
+          if (!best || keyAfter(key, bestKey)) { best = n; bestKey = key; }
+        }
+      }
+    }
+    return best;
+  }
+  // The elements with a box in tree order, each box where the scroll
+  // offsets above it put it, and every element's place in that order: kept
+  // while the tree, the boxes and the scroll offsets are the same, so a
+  // run of hit tests on a still page (elementFromPoint over a grid of
+  // points, the moves of a pointer) walks the tree once.
+  var hitFlat = null;
+  function hitList() {
+    if (hitFlat && hitFlat.g === generation && hitFlat.b === boxSeq && hitFlat.s === scrollBumps && hitFlat.d === doc) return hitFlat;
+    var els = [], ls = [], ts = [], ws = [], hs = [], orderOf = {}, order = 0;
     var stack = [], sxs = [], sys = [], top = doc._c;
     for (var i = top.length - 1; i >= 0; i--) { stack.push(top[i]); sxs.push(0); sys.push(0); }
     while (stack.length) {
@@ -4638,17 +4829,12 @@
       if (n._attrs === undefined) continue;
       orderOf[n.__id] = order++;
       var b = boxes[n.__id];
-      if (b) {
-        var l = b[0] - sx, t = b[1] - sy;
-        if (x >= l && x < l + b[2] && y >= t && y < t + b[3] && hittable(n) && insideTransformed(n, x, y) && !clippedAway(n, x, y)) {
-          var key = paintKey(n, orderOf);
-          if (!best || keyAfter(key, bestKey)) { best = n; bestKey = key; }
-        }
-      }
+      if (b) { els.push(n); ls.push(b[0] - sx); ts.push(b[1] - sy); ws.push(b[2]); hs.push(b[3]); }
       var kx = sx + (n._sLeft || 0), ky = sy + (n._sTop || 0), kids = n._c;
       for (var j = kids.length - 1; j >= 0; j--) { stack.push(kids[j]); sxs.push(kx); sys.push(ky); }
     }
-    return best;
+    hitFlat = { g: generation, b: boxSeq, s: scrollBumps, d: doc, els: els, ls: ls, ts: ts, ws: ws, hs: hs, orderOf: orderOf };
+    return hitFlat;
   }
   function positionedOf(cs) { return cs.position && cs.position !== 'static'; }
   function zOf(cs) { var z = cs['z-index']; return z === undefined || z === 'auto' ? null : parseInt(z, 10) || 0; }
@@ -6438,6 +6624,19 @@
       for (var q = 0; q < list.length && same; q++) same = have.list[q] === list[q] && have.of[q] === list[q]._index;
       if (same) return have;
     }
+    // (another scope's set of the same sheets: its index is this one's
+    // too. The shadow roots of one component share their constructed
+    // sheets, and 50 new buttons made the same index 50 times.)
+    for (var g = sigSets.length - 1; g >= 0; g--) {
+      var o = sigSets[g];
+      if (o.list.length !== list.length) continue;
+      var eq = true;
+      for (var q2 = 0; q2 < list.length && eq; q2++) eq = o.list[q2] === list[q2] && o.of[q2] === list[q2]._index;
+      if (!eq) continue;
+      var sh = { list: o.list, of: o.of, idx: o.idx, pidx: o.pidx, _sc: new Map(), _sa: o._sa, _base: o };
+      sigSets.push(sh); if (sigSets.length > 8) sigSets.shift();
+      return sh;
+    }
     var rs = { list: list.slice(), of: [], idx: Object.create(null), pidx: Object.create(null), _sc: new Map(), _sa: null };
     sigSets.push(rs); if (sigSets.length > 8) sigSets.shift();
     var build = ++ruleSetBuild;
@@ -6560,7 +6759,7 @@
   var sigIds = new Map(), sigUid = 0;
   function sigOf(el, rs) {
     var sa = rs._sa;
-    if (!sa) { sa = rs._sa = selAttrsOf(rs); }
+    if (!sa) { sa = rs._sa = (rs._base && rs._base._sa) || selAttrsOf(rs); if (rs._base && !rs._base._sa) rs._base._sa = sa; }
     var p = el.parentNode, ps = 'x';
     if (p) {
       if (p.nodeType === 1) {
@@ -6682,7 +6881,7 @@
     var hits = kept !== undefined ? kept.slice() : [];
     var svCtx = shadowCtx;
     shadowCtx = esr;
-    var cand = [], rs = null, sg = 0, sc = null, dyn = null, nPlain = 0;
+    var cand = [], rs = null, sg = 0, sc = null, dyn = null, nPlain = 0, scw = null;
     if (kept === undefined) {
       rs = scopeRuleSet(d, esr);
       // (elements alike in what the plain selectors read, see sigOf: the
@@ -6696,6 +6895,14 @@
         sc = rs._sc.get(sck);
         // (kept for the viewport its media rules were answered for)
         if (sc && (sc.vw !== viewport.w || sc.vh !== viewport.h)) sc = undefined;
+        // (a pseudo-element of elements alike with plain rules only: the
+        // declarations found for the first one. Bootstrap's `*, ::before,
+        // ::after` gives every element two, asked again whenever its
+        // style is dropped.)
+        if (sc && pe && !sc.dyn.length) {
+          if (sc.og === styleGen) { shadowCtx = svCtx; return sc.out; }
+          scw = sc;
+        }
         if (sc) { for (var sh = 0; sh < sc.plain.length; sh++) hits.push(sc.plain[sh]); cand = sc.dyn; }
         else { setCandidates(rs, el, cand, pe); dyn = []; }
       } else setCandidates(rs, el, cand, pe);
@@ -6733,7 +6940,9 @@
       // kept ones, so that elements alike get the same key below)
       var plain = hits.slice();
       if (rs._sc.size >= 20000) rs._sc.clear();
-      rs._sc.set(pe ? sg + ':' + pe : sg, { plain: plain, dyn: dyn, vw: viewport.w, vh: viewport.h });
+      var scn = { plain: plain, dyn: dyn, vw: viewport.w, vh: viewport.h, og: -1, out: null };
+      rs._sc.set(pe ? sg + ':' + pe : sg, scn);
+      if (pe && !dyn.length) scw = scn;
       for (var di = 0; di < dyn.length; di++) {
         var w2 = dyn[di], r2 = w2.r;
         if (r2.sel._sn && !(r2.sel._sn & stOn)) continue;
@@ -6756,7 +6965,7 @@
       hm.m[hmk] = hits.slice();
     }
     // (a pseudo-element no rule names: none, nothing built)
-    if (pe && !hits.length) return null;
+    if (pe && !hits.length) { if (scw) { scw.out = null; scw.og = styleGen; } return null; }
     // the same rules, inline style and presentational attributes give the
     // same declarations: elements alike (a table's rows and cells) share
     // one object, which computeStyle then knows them by (_sid)
@@ -6798,7 +7007,7 @@
       for (var pk = 0; pk < hits.length; pk++) pek += ',' + (hits[pk].r._uid || (hits[pk].r._uid = ++ruleUid)) + ':' + hits[pk].sheet;
       if (peSpec.gen !== styleGen) peSpec = { gen: styleGen, map: {}, n: 0 };
       var peHit = peSpec.map[pek];
-      if (peHit) return peHit;
+      if (peHit) { if (scw) { scw.out = peHit; scw.og = styleGen; } return peHit; }
     }
     hits.sort(function (a, b) { return (a.ua === b.ua ? 0 : a.ua ? -1 : 1) || (!a.inner === !b.inner ? 0 : a.inner ? -1 : 1) || cmpSpec(a.r.sel.spec, b.r.sel.spec) || a.sheet - b.sheet || a.r.order - b.r.order; });
     // (seq: when each key was last set, for computeStyle to tell a logical
@@ -6827,7 +7036,7 @@
         var dp = hits[hp].r.decls;
         for (var jp = 0; jp < dp.length; jp++) if (dp[jp].important) put(dp[jp].name, dp[jp].value, true, hits[hp].ua);
       }
-      if (peSpec.n < 20000) { Object.defineProperty(out, '_sid', { value: ++specUid, enumerable: false }); peSpec.map[pek] = out; peSpec.n++; }
+      if (peSpec.n < 20000) { Object.defineProperty(out, '_sid', { value: ++specUid, enumerable: false }); peSpec.map[pek] = out; peSpec.n++; if (scw) { scw.out = out; scw.og = styleGen; } }
       return out;
     }
     // inline style
@@ -8788,7 +8997,7 @@
       var own = JSON.stringify(o);
       var kj = kids.join(',');
       if (deltaOn) {
-        if (kdj) renderDj = own.slice(1, -1) + (kids.length ? ',"c":[' + kdj.join(',') + ']}' : '}');
+        if (kdj) { renderDj = own.slice(1, -1) + (kids.length ? ',"c":[' + kdj.join(',') + ']}' : '}'); if (kel && !pm && !pb && !pa && !fl) renderOwn = { el: n, own: own, kids: kids, kel: kel, cs: cs, st: null }; }
         else { unmark(dm0); renderDj = null; }
       }
       // (a table part's own members and children, for its table's border
@@ -9039,9 +9248,45 @@
       else if (d === 'table-column-group') { var any = false; (k.c || []).forEach(function (c) { if (c.s && c.s.display === 'table-column') { colOf(c, k); any = true; } }); if (!any) colOf(k, k); }
     });
     if (!rows.length) return kids;
+    // A table with no columns and no cell that spans rows (lazy): a row's
+    // cells are at the columns its own cells give (ci, kept with the row's
+    // parts), and only the rows whose borders are settled again, and the
+    // ones next to them, have their cells put in the grid (need). A table
+    // of 1 000 rows went through its 4 000 cells five times for one
+    // row's change.
+    var lazy = !!json && !cols.length;
+    for (var li = 0; li < rows.length && lazy; li++) {
+      var lr = rows[li], lp = lr.row._p, inf = lp && lp.ci;
+      if (!inf) {
+        inf = { n: 0, w: 0, span: false, at: [], c: [], cs: [] };
+        var lc = lr.row.c || [];
+        for (var lk = 0; lk < lc.length; lk++) {
+          var lo = lc[lk];
+          if (!lo.s || lo.s.display !== 'table-cell') continue;
+          var lcs = Math.max(1, parseInt(lo.a && lo.a.colspan, 10) || 1);
+          if ((parseInt(lo.a && lo.a.rowspan, 10) || 1) > 1) inf.span = true;
+          inf.at.push(lk); inf.c.push(inf.w); inf.cs.push(lcs); inf.w += lcs; inf.n++;
+        }
+        if (lp) lp.ci = inf;
+      }
+      if (inf.span) lazy = false;
+      lr.info = inf;
+    }
     // the grid: which cell is at each slot
     var grid = [], cells = [], anySpan = false;
-    rows.forEach(function (r, ri) {
+    var need = function (ri) {
+      var r = rows[ri];
+      if (!r || r.cells) return r ? r.cells : null;
+      var ni = r.info, rc = r.row.c, out = [], g = [];
+      for (var k = 0; k < ni.n; k++) {
+        var cell = { o: rc[ni.at[k]], r: ri, c: ni.c[k], rs: 1, cs: ni.cs[k], rowo: r, k: k };
+        out.push(cell);
+        for (var x = 0; x < cell.cs; x++) g[cell.c + x] = cell;
+      }
+      grid[ri] = g; r.cells = out;
+      return out;
+    };
+    if (!lazy) rows.forEach(function (r, ri) {
       r.n = 0; r.m = null; r.ok = false;
       grid[ri] = grid[ri] || [];
       var ci = 0;
@@ -9058,6 +9303,7 @@
       });
     });
     var ncols = 0; grid.forEach(function (g) { if (g.length > ncols) ncols = g.length; });
+    if (lazy) for (var lz = 0; lz < rows.length; lz++) { var lzr = rows[lz]; lzr.n = lzr.info.n; lzr.m = null; lzr.ok = false; lzr.cells = null; if (lzr.info.w > ncols) ncols = lzr.info.w; }
     var colorOf = function (o, inh) { return (o && o.s && o.s.color) || inh; };
     var side = function (o, sd, rank, inh) {
       var s = (o && o.s) || null;
@@ -9161,15 +9407,18 @@
         else ro0.m = rp.cm = { tsig: tsig, prev: pv, next: nx0, grp: g0, pg: g1, ng: g2, won: [], out: undefined };
       }
     }
-    var won = cells.map(function (cell) {
+    var won = null;
+    var SD = ['left', 'right', 'top', 'bottom'];
+    var outerOf = function (cell, sd) { return (sd === 'left' && cell.c === 0) || (sd === 'right' && cell.c + cell.cs === ncols) || (sd === 'top' && cell.r === 0) || (sd === 'bottom' && cell.r + cell.rs === rows.length); };
+    var mixed = {};
+    if (!lazy) {
+    won = cells.map(function (cell) {
       var ro = cell.rowo;
       if (ro.ok) return ro.m.won[cell.k];
       var w4 = [edge(cell, 'left'), edge(cell, 'right'), edge(cell, 'top'), edge(cell, 'bottom')];
       if (ro.m) ro.m.won[cell.k] = w4;
       return w4;
     });
-    var SD = ['left', 'right', 'top', 'bottom'];
-    var outerOf = function (cell, sd) { return (sd === 'left' && cell.c === 0) || (sd === 'right' && cell.c + cell.cs === ncols) || (sd === 'top' && cell.r === 0) || (sd === 'bottom' && cell.r + cell.rs === rows.length); };
     // (the cells along the table's sides only: one of 4 000 cells inside
     // asked nothing here)
     var nrows = rows.length, atSide = function (cell) { return cell.c === 0 || cell.c + cell.cs === ncols || cell.r === 0 || cell.r + cell.rs === nrows; };
@@ -9184,7 +9433,6 @@
     // (outer edges that differ along a side: the table's border keeps the
     // widest for layout, unpainted, and each outer cell paints its own
     // outer half with a positioned strip over it)
-    var mixed = {};
     if (!capt) for (var mx = 0; mx < cells.length; mx++) {
       var mc = cells[mx];
       if (!atSide(mc)) continue;
@@ -9195,23 +9443,67 @@
         if (!mb || mb.st !== outer[msd].st || mb.w !== outer[msd].w || mb.c !== outer[msd].c) mixed[msd] = true;
       }
     }
+    } else {
+      var nrl = rows.length;
+      for (var wr = 0; wr < nrl; wr++) {
+        var wro = rows[wr];
+        if (wro.ok) { wro.won = wro.m.won; continue; }
+        need(wr - 1); need(wr + 1);
+        var wcs = need(wr), ww = [];
+        for (var wk = 0; wk < wcs.length; wk++) ww.push([edge(wcs[wk], 'left'), edge(wcs[wk], 'right'), edge(wcs[wk], 'top'), edge(wcs[wk], 'bottom')]);
+        wro.won = ww;
+        if (wro.m) wro.m.won = ww;
+      }
+      // (the cells along the table's sides, in the order of the cells:
+      // all of the first and the last row, the first and the last cell of
+      // the others)
+      var eachSide = function (fn) {
+        for (var ri = 0; ri < nrl; ri++) {
+          var r = rows[ri], ei = r.info, n = ei.n, top = ri === 0, bot = ri === nrl - 1;
+          for (var k = 0; k < n; k++) {
+            if (!top && !bot && k > 0 && k < n - 1) { k = n - 2; continue; }
+            var c0 = ei.c[k], w4 = r.won[k];
+            if (c0 === 0) fn(0, w4[0]);
+            if (c0 + ei.cs[k] === ncols) fn(1, w4[1]);
+            if (top) fn(2, w4[2]);
+            if (bot) fn(3, w4[3]);
+          }
+        }
+      };
+      eachSide(function (si, ob) { var osd = SD[si]; if (ob && ob.st !== 'hidden' && ob.w && (!outer[osd] || ob.w > outer[osd].w)) outer[osd] = ob; });
+      if (!capt) eachSide(function (si, mb) {
+        var msd = SD[si];
+        if (!outer[msd]) return;
+        if (!mb || mb.st !== outer[msd].st || mb.w !== outer[msd].w || mb.c !== outer[msd].c) mixed[msd] = true;
+      });
+    }
     var anyMixed = mixed.left || mixed.right || mixed.top || mixed.bottom;
     // (a row settled as last time goes out as it did, partsJson)
     var useOut = function (ro) { return ro.ok && !anyMixed && ro.m.out !== undefined; };
-    cells.forEach(function (cell, ix) {
-      if (useOut(cell.rowo)) return;
+    var settle = function (cell, cw) {
       // (a cell from its render's parts whose borders won as last time:
       // its JSON as last time, partsJson)
       var p = cell.o._p, key = null;
       if (p && !anyMixed) {
         key = '';
-        for (var si = 0; si < 4; si++) { var b0 = won[ix][si]; key += (b0 ? b0.st + ' ' + b0.w + ' ' + b0.c : '-') + (capt && outerOf(cell, SD[si]) ? '!' : '') + '|'; }
+        for (var si = 0; si < 4; si++) { var b0 = cw[si]; key += (b0 ? b0.st + ' ' + b0.w + ' ' + b0.c : '-') + (capt && outerOf(cell, SD[si]) ? '!' : '') + '|'; }
         Object.defineProperty(cell.o, '_key', { value: key, enumerable: false, writable: true });
         if (p.clKey === key) return;
       }
       var s = cell.o.s = Object.assign({}, cell.o.s);
-      SD.forEach(function (sd, si) { put(s, sd, won[ix][si], !(capt && outerOf(cell, sd))); });
-    });
+      SD.forEach(function (sd, si) { put(s, sd, cw[si], !(capt && outerOf(cell, sd))); });
+    };
+    if (!lazy) cells.forEach(function (cell, ix) { if (!useOut(cell.rowo)) settle(cell, won[ix]); });
+    else {
+      for (var ar = 0; ar < rows.length; ar++) {
+        var aro = rows[ar];
+        if (useOut(aro)) continue;
+        var acs = need(ar);
+        for (var ak = 0; ak < acs.length; ak++) settle(acs[ak], aro.won[ak]);
+      }
+      // (differing outer edges: every cell is asked below)
+      if (anyMixed) { cells = []; won = []; for (var fr = 0; fr < rows.length; fr++) { var fcs = need(fr); for (var fk = 0; fk < fcs.length; fk++) { cells.push(fcs[fk]); won.push(rows[fr].won[fk]); } } }
+    }
     // rows, groups and columns draw no borders of their own
     var strip = function (o) { if (!o || !o.s) return; o.s = Object.assign({}, o.s); ['left', 'right', 'top', 'bottom'].forEach(function (sd) { delete o.s['border-' + sd + '-style']; delete o.s['border-' + sd + '-width']; }); };
     var stripped = [];
@@ -9727,6 +10019,66 @@
     for (var i = from; i < marks.length; i++) marks[i].dj = null;
     marks.length = from;
   }
+  // n's kept render (k) with a new transform: el.style.transform was the
+  // only change at or under n since (attrChanged), and its style is the one
+  // k was rendered with but for the transform (patchedStyle). The text k
+  // has of n itself with the two values replaced, the children as they
+  // are. 500 boxes moved each frame were each rendered whole (30 ms of a
+  // frame natively). null: not so, renderNode then.
+  var renderOwn = null, fastCheck = null;
+  // (a style patched from another lists its properties in another order:
+  // the same render)
+  function sortedJson(t) {
+    var srt = function (v) { if (Array.isArray(v)) return v.map(srt); if (v && typeof v === 'object') { var o = {}; Object.keys(v).sort().forEach(function (k) { o[k] = srt(v[k]); }); return o; } return v; };
+    try { return JSON.stringify(srt(JSON.parse(t))); } catch (e) { return t; }
+  }
+  function movedJson(n, k, parentStyle, sc) {
+    var fp = k.fp, cs = computedOf(n), df = cs._dfrom;
+    if (!df || df.base !== fp.cs) return null;
+    var pn = n._tfn;
+    for (var dn in df.keys) if (dn !== pn) return null;
+    var a = fp.cs[pn], b = cs[pn], st = n.getAttribute('style');
+    if (typeof a !== 'string' || typeof b !== 'string' || !a || !b || PLAIN_TEXT.test(b) || PLAIN_TEXT.test(st || '"') || fp.st === null) return null;
+    // (with a transform, and less than opaque, before and after)
+    if (pn === 'transform' ? a === 'none' || b === 'none' : !(parseFloat(a) < 1 && parseFloat(b) < 1 && parseFloat(a) > 0 && parseFloat(b) > 0)) return null;
+    // (cut: fp.own around its two values, found once and the same for each
+    // render after it)
+    var cut = fp.cut && fp.cut.pn === pn ? fp.cut : null;
+    if (!cut) {
+      var own0 = fp.own, ta = '"' + pn + '":' + JSON.stringify(a), sa = '"style":' + JSON.stringify(fp.st);
+      var i = own0.indexOf(ta), j = own0.indexOf(sa);
+      if (i < 0 || j < i || own0.indexOf(ta, i + 1) >= 0 || own0.indexOf(sa, j + 1) >= 0) return null;
+      cut = { pn: pn, pre: own0.slice(0, i) + '"' + pn + '":"', mid: '"' + own0.slice(i + ta.length, j) + '"style":"', post: '"' + own0.slice(j + sa.length, -1), kj: null, kd: null };
+      var kids0 = fp.kids, kel0 = fp.kel, plain = true;
+      for (var q0 = 0; q0 < kids0.length && plain; q0++) plain = !kel0[q0] || kel0[q0].nodeType !== 1;
+      cut.kj = kids0.length ? ',"c":[' + kids0.join(',') + ']}' : '}';
+      // (no element among the children: their delta text is their text)
+      if (plain) cut.kd = cut.kj;
+    }
+    var open = cut.pre + b + cut.mid + st + cut.post, dm = marks.length, kd = cut.kd;
+    if (kd === null) {
+      var kids = fp.kids, kel = fp.kel, kdj = [];
+      for (var q = 0; q < kids.length; q++) {
+        var ke = kel[q];
+        if (!ke || ke.nodeType !== 1) { kdj.push(kids[q]); continue; }
+        var kk = ke._rj;
+        if (!kk || kk.json !== kids[q] || kk.de !== deltaEpoch) { marks.length = dm; return null; }
+        deltaOf(kk);
+        kdj.push(lastDelta);
+      }
+      kd = ',"c":[' + kdj.join(',') + ']}';
+    }
+    var json = open + cut.kj;
+    var nk = { sg: styleGen, rv: n._rv, ps: parentStyle, sc: sc, json: json, ct: false, parts: null, fp: { el: n, own: open + '}', kids: fp.kids, kel: fp.kel, cs: cs, st: st, cut: cut }, _dm: dm };
+    nk.n = ++deltaSerial;
+    nk.dj = '{"n":' + nk.n + ',' + open.slice(1) + kd;
+    nk.sent = 0; nk.de = deltaEpoch;
+    n._rjl = nk; n._rj = nk;
+    deltaOf(nk);
+    return json;
+  }
+  // (a text JSON.stringify would write otherwise than between two quotes)
+  var PLAIN_TEXT = /["\\\x00-\x1f\u2028\u2029%]/;
   function renderJson(n, parentStyle) {
     if (n.nodeType === 3) { var tj = n._data ? JSON.stringify(smallCapsText(n, parentStyle)) : ''; lastDelta = tj; return tj; }
     if (n.nodeType !== 1) { lastDelta = ''; return ''; }
@@ -9740,12 +10092,23 @@
       if (deltaOn) deltaOf(k);
       return k.json;
     }
+    // (kf: the last render of n, which a style change lets go of as _rj)
+    var kf = deltaOn && n._tfv === n._rv ? n._rjl : null;
+    if (kf && kf.fp && !deltaOff && !kf.ct && !kf.parts && kf.sg === styleGen && kf.ps === parentStyle && kf.sc === sc && kf.de === deltaEpoch && kf.rv >= n._tf0) {
+      var moved = movedJson(n, kf, parentStyle, sc);
+      if (moved !== null) {
+        if (fastCheck) { var mdj = lastDelta, mk = n._rj; n._rj = null; n._rjl = null; n._tfv = 0; marks.length = mk._dm; var slow = renderJson(n, parentStyle); n._tfv = n._rv; fastCheck.n++; if (sortedJson(slow) !== sortedJson(moved) || sortedJson(lastDelta.replace(/^\{"n":\d+,/, '{')) !== sortedJson(mdj.replace(/^\{"n":\d+,/, '{'))) { fastCheck.bad++; if (!fastCheck.first) fastCheck.first = moved.slice(0, 400) + ' /// ' + slow.slice(0, 400) + ' /// ' + mdj.slice(0, 300) + ' /// ' + lastDelta.slice(0, 300); } return slow; }
+        return moved;
+      }
+    }
     var t0 = ctrTouch;
-    renderParts = null; renderDj = null;
+    renderParts = null; renderDj = null; renderOwn = null;
     var dm = marks.length;
     var r = renderNode(n, parentStyle, true);
     var json = r === null ? '' : typeof r === 'string' ? r : JSON.stringify(r);
-    var nk = { sg: styleGen, rv: n._rv, ps: parentStyle, sc: sc, json: json, ct: ctrTouch !== t0, parts: typeof r === 'string' ? renderParts : null };
+    var nk = { sg: styleGen, rv: n._rv, ps: parentStyle, sc: sc, json: json, ct: ctrTouch !== t0, parts: typeof r === 'string' ? renderParts : null, fp: typeof r === 'string' && renderOwn && renderOwn.el === n ? renderOwn : null };
+    if (nk.fp) nk.fp.st = n.getAttribute('style');
+    renderOwn = null;
     if (deltaOn) {
       // (rendered again to the same text, a restyle that changed nothing:
       // what the host has of it holds, under the number it had)
@@ -10044,7 +10407,9 @@
       marks = [];
       root = (root || 'null') + (whole ? ',"whole":' + whole : '') + ',"d":' + deltaEpoch;
     }
-    return '{"v":' + generation + ',"w":' + JSON.stringify(viewport.w) + ',"h":' + JSON.stringify(viewport.h) + ',"root":' + (root || 'null') + ',"title":' + JSON.stringify(doc.title) + (doc.compatMode === 'BackCompat' ? ',"quirks":true' : '') + (browserFonts ? ',"fm":"' + (browserFonts === 'measure' ? 'measure' : 'browser') + '"' : '') + '}';
+    var gone = goneEls ? ',"gone":' + goneEls : '';
+    goneEls = 0;
+    return '{"v":' + generation + gone + ',"w":' + JSON.stringify(viewport.w) + ',"h":' + JSON.stringify(viewport.h) + ',"root":' + (root || 'null') + ',"title":' + JSON.stringify(doc.title) + (doc.compatMode === 'BackCompat' ? ',"quirks":true' : '') + (browserFonts ? ',"fm":"' + (browserFonts === 'measure' ? 'measure' : 'browser') + '"' : '') + '}';
   }
 
   // ---- input from the host -------------------------------------------------
@@ -11537,6 +11902,35 @@
   // renderJson): again = the host lost what it kept, everything is sent
   G.__renderDelta = function (again) { var was = reflowing; reflowing = true; if (again) deltaEpoch++; try { return render(deltaOn); } finally { reflowing = was; } };
   G.__deltaCheck = function (on) { deltaCheck = !!on; return String(deltaCheck); };
+  // a test's: the page as the kept styles and renders give it against the
+  // page with every style found and every node rendered again: '' when
+  // the two are alike, else the texts around where they part
+  G.__styleCheck = function () {
+    var was = reflowing; reflowing = true;
+    try {
+      // (a patched style has its properties in another order, patchedStyle:
+      // members by name; a script's scrollTop renders nothing again, the
+      // host moves the box: "sc" left out)
+      var norm = function (v) {
+        if (Array.isArray(v)) return v.map(norm);
+        if (!v || typeof v !== 'object') return v;
+        var o = {}, ks = Object.keys(v).sort();
+        for (var i = 0; i < ks.length; i++) if (ks[i] !== 'v' && ks[i] !== 'sc') o[ks[i]] = norm(v[ks[i]]);
+        return o;
+      };
+      var a = render(false);
+      changed();
+      var b = render(false);
+      if (a === b) return '';
+      a = JSON.stringify(norm(JSON.parse(a))); b = JSON.stringify(norm(JSON.parse(b)));
+      if (a === b) return '';
+      var i = 0;
+      while (i < a.length && a.charCodeAt(i) === b.charCodeAt(i)) i++;
+      return 'kept ' + a.slice(Math.max(0, i - 200), i + 120) + ' fresh ' + b.slice(Math.max(0, i - 200), i + 120);
+    } finally { reflowing = was; }
+  };
+  // a test's: each text movedJson gives is compared with renderNode's
+  G.__fastRenderCheck = function (on) { if (on === undefined) return fastCheck ? JSON.stringify(fastCheck) : ''; fastCheck = on ? { n: 0, bad: 0, first: '' } : null; return ''; };
   G.__deltaRender = function (on) { on = !!on; if (on !== deltaOn) { deltaOn = on; deltaEpoch++; } return String(deltaOn); };
   // the host draws text with the browser's own faces (the playground's
   // canvas), so a line of Arial has Arial's height, not that of the Open
