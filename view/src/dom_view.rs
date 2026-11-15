@@ -2126,7 +2126,10 @@ impl DomView {
     /// grew, a stretched grid item) is laid out again at that size
     #[doc(hidden)]
     pub fn settle(el: &Rc<RefCell<EVGElement>>) {
-        if DomText::index_of(&el.borrow().class_name, "mfd-wm") == 0 {
+        // (most boxes have no class: nothing is looked for in it, and the
+        // children are met by their place, not through a copy of the list)
+        let plain: bool = el.borrow().class_name.is_empty();
+        if !plain && DomText::index_of(&el.borrow().class_name, "mfd-wm") == 0 {
             let __n_li = el.borrow().children.len() as i64;
             for li in 0..__n_li {
                 let l = Rc::clone(&el.borrow().children[li as usize]);
@@ -2153,8 +2156,9 @@ impl DomView {
             }
             return;
         }
-        let __it_c = el.borrow().children.clone();
-        for c in __it_c.iter().cloned() {
+        let __n_c = el.borrow().children.len() as i64;
+        for ci in 0..__n_c {
+            let c = Rc::clone(&el.borrow().children[ci as usize]);
             DomView::settle(&c);
         }
     }
@@ -3874,8 +3878,12 @@ impl DomView {
         // transform-origin, as EVG paints it) moves its box and what is inside
         // (a box turned for painting by its writing mode, orthogonal: its
         // frame is turned by the mfd-wm box above already)
+        // (a box with no class and no transform of its own, as most are:
+        // nothing is looked for in the class and no frame is made)
+        let plain: bool = el.borrow().class_name.is_empty();
         let mut kf: Rc<RefCell<DomFrame>> = Rc::clone(fr);
-        if DomText::index_of(&el.borrow().class_name, "mfd-qt") < 0 {
+        let still: bool = (el.borrow().rotate == 0.0 && ((el.borrow().scale - 1.0).abs()) < 0.000001) && (!el.borrow().flip_y && (el.borrow().translate_x == 0.0 && el.borrow().translate_y == 0.0));
+        if !still && (plain || DomText::index_of(&el.borrow().class_name, "mfd-qt") < 0) {
             kf = fr.borrow().then(&DomView::ownFrame(el));
         }
         if DomView::has(&el.borrow().id.clone(), pfx) {
@@ -3925,7 +3933,7 @@ impl DomView {
             }
         }
         // a vertical box in the other vertical mode: turned over
-        if DomText::index_of(&el.borrow().class_name, "mfd-flip") >= 0 {
+        if !plain && DomText::index_of(&el.borrow().class_name, "mfd-flip") >= 0 {
             let g: Rc<RefCell<DomFrame>> = Rc::new(RefCell::new(DomFrame::new()));
             g.borrow_mut().e = 0.0 - 1.0;
             g.borrow_mut().f = 2.0 * el.borrow().calculated_y + el.borrow().calculated_height;
@@ -3937,7 +3945,7 @@ impl DomView {
             return;
         }
         // a box in another writing mode: its own frame turned into this one
-        if DomText::index_of(&el.borrow().class_name, "mfd-wm") == 0 {
+        if !plain && DomText::index_of(&el.borrow().class_name, "mfd-wm") == 0 {
             let __n_li = el.borrow().children.len() as i64;
             for li in 0..__n_li {
                 let l = Rc::clone(&el.borrow().children[li as usize]);
@@ -3974,8 +3982,9 @@ impl DomView {
         if esl != 0.0 || est != 0.0 {
             kf = kf.borrow().then(&DomFrame::shift(esl, est));
         }
-        let __it_c = el.borrow().children.clone();
-        for c_1 in __it_c.iter().cloned() {
+        let __n_c = el.borrow().children.len() as i64;
+        for ci in 0..__n_c {
+            let c_1 = Rc::clone(&el.borrow().children[ci as usize]);
             DomView::collectIn(&c_1, pfx, &kf, acc);
         }
     }
