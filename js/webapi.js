@@ -4266,6 +4266,24 @@
   // boxes back). Golden Layout sizes its panes from the header it has just
   // inserted, and laid out a frame late every pane came out 2 px wide.
   var syncLayout = false, layoutGen = -1, reflowing = false;
+  // The host's boxes: all of them, or what changed since the ones it sent
+  // last ({"~":1,"set":{id:box},"gone":[ids]}; a host that keeps them,
+  // DomView.boxesSince). A page of 4 000 boxes was 100 KB of JSON for every
+  // forced layout and every frame, whatever changed.
+  var boxesGone = 0;
+  function takeBoxes(m) {
+    if (m['~'] !== 1) { boxes = m; boxesGone = 0; return; }
+    var set = m.set, gone = m.gone, k, i;
+    for (k in set) boxes[k] = set[k];
+    for (i = 0; i < gone.length; i++) boxes[gone[i]] = undefined;
+    boxesGone += gone.length;
+    // (the ids let go are taken out once they are many)
+    if (boxesGone > 20000) {
+      var keep = {};
+      for (k in boxes) if (boxes[k] !== undefined) keep[k] = boxes[k];
+      boxes = keep; boxesGone = 0;
+    }
+  }
   function reflow() {
     if (!syncLayout || reflowing || layoutGen === generation || !doc || !doc.documentElement) return;
     reflowing = true;
@@ -4273,7 +4291,7 @@
       var json = render(deltaOn), g = generation, sb = scrollBumps, out = __hostSync(json);
       // (a host that does not have a node the delta names: everything again)
       if (out === '!' && deltaOn) { deltaEpoch++; json = render(true); out = __hostSync(json); if (out === '!') out = ''; }
-      if (out) { boxes = JSON.parse(out); layoutGen = g; layoutSb = sb; if (scrollers.length) clampScrolls(); }
+      if (out) { takeBoxes(JSON.parse(out)); layoutGen = g; layoutSb = sb; if (scrollers.length) clampScrolls(); }
     } catch (e) { syncLayout = false; reportError(e); }
     reflowing = false;
   }
@@ -11119,7 +11137,7 @@
       if (m.viewport[0] !== viewport.w || m.viewport[1] !== viewport.h) { viewport = { w: m.viewport[0], h: m.viewport[1] }; mediaCache = {}; sizeChanged = true; changed(); }
     }
     if (m.boxes) {
-      boxes = m.boxes;
+      takeBoxes(m.boxes);
       layoutGen = generation;
       layoutSb = scrollBumps;
       boxSvgs = boxSvgs.filter(function (e) { return e.isConnected; });
