@@ -762,6 +762,8 @@ pub struct DomView {
     /// again (a grid's baseline items, a <scene3d>, another writing mode):
     /// counted, and an element whose build counted any is not kept
     pub memoBad: i64,
+    /// inheritedNames(), made once
+    inhNames: Vec<String>,
     /// memoKey's last text and what it was made of
     mkNums: Vec<f64>,
     mkWm: String,
@@ -811,6 +813,7 @@ impl DomView {
             spH: -1.0,
             dirNow: String::new(),
             memoBad: 0,
+            inhNames: DomView::inheritedNames(),
             mkNums: Vec::new(),
             mkWm: String::new(),
             mkDir: String::new(),
@@ -4083,16 +4086,17 @@ impl DomView {
     }
     pub fn inherit(&self, parent: &Rc<RefCell<JsonValue>>, s: &Rc<RefCell<JsonValue>>) -> Rc<RefCell<JsonValue>> {
         let o: Rc<RefCell<JsonValue>> = JsonValue::mkObj();
-        let __n_i = parent.borrow().keys.len() as i64;
-        for i in 0..__n_i {
-            let k = parent.borrow().keys[i as usize].clone();
-            o.borrow_mut().put(&k, parent.borrow().items[i as usize].clone());
-        }
-        // (the names once: each call makes the list again)
-        let names: Vec<String> = DomView::inheritedNames();
-        for n in names.iter().cloned() {
-            if s.borrow().has(&n) {
-                o.borrow_mut().put(&n, s.borrow().get(&n));
+        // (the parent's members as they are: its keys are each there once,
+        // so none is looked for in what is copied so far)
+        o.borrow_mut().keys = parent.borrow().keys.clone();
+        o.borrow_mut().items = parent.borrow().items.clone();
+        // (the names are made once for the view: this runs for every
+        // element of every frame)
+        let __n_n = self.inhNames.len() as i64;
+        for ni in 0..__n_n {
+            let at: i64 = s.borrow().keyAt(&self.inhNames[ni as usize]);
+            if at >= 0 {
+                o.borrow_mut().put(&self.inhNames[ni as usize], s.borrow().items[at as usize].clone());
             }
         }
         // (text-decoration: the lines of the boxes above reach the text of
@@ -6685,6 +6689,23 @@ impl DomView {
     }
     /// the state an element's build reads besides its node, its parent's
     /// style and what it inherits (DomMemo): the same key, the same element
+    /// an inherited style as one text, for telling two of them apart: its
+    /// names and values a line each (toJson quoted every one of them,
+    /// a fifth of a frame that kept 4 000 table cells)
+    fn inhText(o: &Rc<RefCell<JsonValue>>) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        let n: i64 = o.borrow().keys.len() as i64;
+        for i in 0..n {
+            parts.push(o.borrow().keys[i as usize].clone());
+            let v: Rc<RefCell<JsonValue>> = o.borrow().items[i as usize].clone();
+            if v.borrow().kind == 3 {
+                parts.push(v.borrow().str.clone());
+            } else {
+                parts.push(v.borrow().toJson());
+            }
+        }
+        parts.join("\n")
+    }
     fn memoKey(&mut self) -> String {
         // (the same for most children of an element: its text is made
         // again only when one of its parts changed, some 35 strings)
@@ -10045,7 +10066,7 @@ impl DomView {
                     // for the children that share it)
                     let ist: String = self.stampOf(&iinh);
                     if !inh_sigs.contains_key(&ist) {
-                        let itext: String = iinh.borrow().toJson();
+                        let itext: String = DomView::inhText(&iinh);
                         inh_sigs.insert(ist.clone(), memo.borrow_mut().inhId(&itext).to_string());
                     }
                     mkey = format!("{}|{}|{}", msig, self.memoKey(), inh_sigs.get(&ist).cloned().unwrap());
