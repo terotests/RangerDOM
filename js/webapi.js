@@ -8627,7 +8627,9 @@
     Object.defineProperty(o, '_p', { value: p, enumerable: false, writable: true });
     // (a cell: its children are p.raw, JSON text)
     if (p.raw !== undefined) return o;
-    o.c = p.kids.map(function (k, i) { return partsOf(k, p.kel[i]); });
+    // (cw: a row's cells as collapseTable left them untouched, the row
+    // having gone out as it did before)
+    o.c = p.cw || p.kids.map(function (k, i) { return partsOf(k, p.kel[i]); });
     return o;
   }
   // (pjDelta: a delta render's text of the same part is left in pjLast. A
@@ -8872,6 +8874,8 @@
     var strip = function (o) { if (!o || !o.s) return; o.s = Object.assign({}, o.s); ['left', 'right', 'top', 'bottom'].forEach(function (sd) { delete o.s['border-' + sd + '-style']; delete o.s['border-' + sd + '-width']; }); };
     var stripped = [];
     rows.forEach(function (r) {
+      var rp1 = r.row._p;
+      if (rp1) rp1.cw = useOut(r) ? r.row.c : null;
       if (useOut(r)) Object.defineProperty(r.row, '_cmOut', { value: r.m.out, enumerable: false });
       else { strip(r.row); if (r.m) { r.m.out = undefined; if (!anyMixed) Object.defineProperty(r.row, '_cmRec', { value: r.m, enumerable: false }); } }
       if (r.grp && stripped.indexOf(r.grp) < 0) { strip(r.grp); stripped.push(r.grp); }
