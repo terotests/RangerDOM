@@ -60,8 +60,12 @@ window.addEventListener("resize", fit);
 let pg = null;
 let busy = false;
 let errors = [];
-const acc = { render: 0, layout: 0, paint: 0, gl: 0, frames: 0 };
-function resetAcc() { acc.render = acc.layout = acc.paint = acc.gl = acc.frames = 0; }
+// frames: the frames shown while the step ran (each followed by a wait
+// for the display), gap: the longest time between two of them (from the
+// step's start); the browser's are counted the same way, with its own
+// animation frames (nativeRun)
+const acc = { render: 0, layout: 0, paint: 0, gl: 0, frames: 0, gap: 0, gaps: [], last: 0, counting: true };
+function resetAcc() { acc.render = acc.layout = acc.paint = acc.gl = acc.frames = acc.gap = 0; acc.gaps = []; acc.last = performance.now(); acc.counting = true; }
 
 // the page as it is now: render tree, EVG layout (boxes back), display list, WebGL
 function draw() {
@@ -81,8 +85,14 @@ function draw() {
     gl.clear(gl.COLOR_BUFFER_BIT);
     renderDisplayList(gl, { width: W, height: H, list }, { dpr: DPR });
   }
-  acc.gl += performance.now() - t2;
-  acc.frames++;
+  const end = performance.now();
+  acc.gl += end - t2;
+  if (acc.counting) {
+    acc.frames++;
+    acc.gap = Math.max(acc.gap, end - acc.last);
+    acc.gaps.push(Math.round(end - acc.last));
+    acc.last = end;
+  }
 }
 function drain() {
   let msgs = [];
@@ -116,6 +126,7 @@ async function pump(done, ms) {
     // (what was drawn is shown before the page's next frame runs)
     if (due === 0 && !drew) await sleep(0); else await frame();
   }
+  acc.counting = false;
   // (a page's animation frames run one per tick: the frames it has asked
   // for are given their 17 ms each here, without the wait, and the page is
   // drawn when none is due; what the layout then tells the page may ask
@@ -182,13 +193,26 @@ function nativeLoad(name) {
 async function nativeRun(call) {
   const w = iframe.contentWindow;
   const t0 = performance.now();
+  // the browser's frames while the step runs (its animation frames: a
+  // main thread busy with the step skips them)
+  const fr = { n: 0, gap: 0, last: t0, on: true };
+  const count = () => {
+    if (!fr.on) return;
+    const now = performance.now();
+    fr.n++;
+    fr.gap = Math.max(fr.gap, now - fr.last);
+    fr.last = now;
+    w.requestAnimationFrame(count);
+  };
+  w.requestAnimationFrame(count);
   let line = null;
   try { line = await call(w.__bench); } catch (e) { line = { error: String(e) }; }
+  fr.on = false;
   await new Promise((ok) => w.requestAnimationFrame(() => w.requestAnimationFrame(() => ok())));
   const drawn = performance.now() - t0;
   let probe = null;
   try { probe = w.__benchCase && w.__benchCase.probe ? JSON.parse(JSON.stringify(w.__benchCase.probe())) : null; } catch (e) { probe = { probeError: String(e) }; }
-  return { line, drawn, probe };
+  return { line, drawn, probe, frames: fr.n, gap: fr.gap };
 }
 
 // ------------------------------------------------------------- the picture
@@ -362,12 +386,16 @@ let cases = [];
 let current = null;
 let state = null; // { steps: [names], next, rows: [] }
 
+// "frames · longest gap": how smooth the step looked
+function framesText(x) {
+  return x && x.frames !== undefined ? `${x.frames} · ${fmt(x.gap)}` : "";
+}
 function row(r) {
   const tr = document.createElement("tr");
   const sameProbe = JSON.stringify(r.nativeProbe) === JSON.stringify(r.rdProbe);
   const same = sameProbe && (!r.picture || r.picture.ok);
   r.same = same;
-  const cells = [r.name, fmt(r.native.js), fmt(r.native.drawn), fmt(r.rd.js), fmt(r.rd.render), fmt(r.rd.layout), fmt(r.rd.paint), fmt(r.rd.gl), fmt(r.rd.drawn)];
+  const cells = [r.name, fmt(r.native.js), fmt(r.native.drawn), framesText(r.native), fmt(r.rd.js), fmt(r.rd.render), fmt(r.rd.layout), fmt(r.rd.paint), fmt(r.rd.gl), fmt(r.rd.drawn), framesText(r.rd)];
   for (const c of cells) { const td = document.createElement("td"); td.textContent = c; tr.appendChild(td); }
   const td = document.createElement("td");
   if (r.skipped) {
@@ -436,13 +464,13 @@ async function step() {
   const native = await nativeRun((b) => b.run(k));
   let r;
   if (state.over) {
-    r = { name: state.steps[k], native: { js: native.line && native.line.total, drawn: native.drawn }, rd: {}, nativeProbe: native.probe, rdProbe: undefined, skipped: true };
+    r = { name: state.steps[k], native: { js: native.line && native.line.total, drawn: native.drawn, frames: native.frames, gap: native.gap }, rd: {}, nativeProbe: native.probe, rdProbe: undefined, skipped: true };
   } else {
     resetAcc();
     const t0 = performance.now();
     const line = await rdRun(`__bench.run(${k})`, 20000);
     const drawn = performance.now() - t0;
-    r = { name: state.steps[k], native: { js: native.line && native.line.total, drawn: native.drawn }, rd: { js: line && line.total, render: acc.render, layout: acc.layout, paint: acc.paint, gl: acc.gl, frames: acc.frames, drawn }, nativeProbe: native.probe, rdProbe: rdProbe() };
+    r = { name: state.steps[k], native: { js: native.line && native.line.total, drawn: native.drawn, frames: native.frames, gap: native.gap }, rd: { js: line && line.total, render: acc.render, layout: acc.layout, paint: acc.paint, gl: acc.gl, frames: acc.frames, gap: acc.gap, gaps: acc.gaps, drawn }, nativeProbe: native.probe, rdProbe: rdProbe() };
     r.picture = pictureCheck();
     if (BUDGET > 0 && drawn > BUDGET) state.over = true;
   }
@@ -465,12 +493,12 @@ async function everyCase() {
     await open(c.name);
     const r = await runAll();
     const sum = (f) => r.rows.reduce((a, x) => a + (f(x) || 0), 0);
-    out.push({ name: c.name, steps: r.rows.filter((x) => !x.skipped).length, skipped: r.rows.filter((x) => x.skipped).length, same: r.rows.filter((x) => x.same).length, native: sum((x) => x.native.drawn), rd: sum((x) => x.rd.drawn), errors: r.errors.length });
+    out.push({ name: c.name, steps: r.rows.filter((x) => !x.skipped).length, skipped: r.rows.filter((x) => x.skipped).length, same: r.rows.filter((x) => x.same).length, native: sum((x) => x.native.drawn), rd: sum((x) => x.rd.drawn), nativeFrames: sum((x) => x.native.frames), rdFrames: sum((x) => x.rd.frames), nativeGap: Math.max(0, ...r.rows.map((x) => x.native.gap || 0)), rdGap: Math.max(0, ...r.rows.map((x) => x.rd.gap || 0)), errors: r.errors.length });
   }
   const div = $("summary");
   div.hidden = false;
-  div.innerHTML = "<h3>Every case</h3><table><thead><tr><th>Case</th><th>Same result</th><th>Browser, until drawn (ms)</th><th>RangerDOM, until drawn (ms)</th><th>Errors</th></tr></thead><tbody>" +
-    out.map((o) => `<tr><td>${o.name}</td><td>${o.same}/${o.steps}${o.skipped ? ` (${o.skipped} skipped)` : ""}</td><td>${fmt(o.native)}</td><td>${fmt(o.rd)}</td><td>${o.errors}</td></tr>`).join("") + "</tbody></table>";
+  div.innerHTML = "<h3>Every case</h3><table><thead><tr><th>Case</th><th>Same result</th><th>Browser, until drawn (ms)</th><th>RangerDOM, until drawn (ms)</th><th>Frames · longest gap, browser</th><th>Frames · longest gap, RangerDOM</th><th>Errors</th></tr></thead><tbody>" +
+    out.map((o) => `<tr><td>${o.name}</td><td>${o.same}/${o.steps}${o.skipped ? ` (${o.skipped} skipped)` : ""}</td><td>${fmt(o.native)}</td><td>${fmt(o.rd)}</td><td>${o.nativeFrames} · ${fmt(o.nativeGap)}</td><td>${o.rdFrames} · ${fmt(o.rdGap)}</td><td>${o.errors}</td></tr>`).join("") + "</tbody></table>";
   window.__pgEvery = out;
   return out;
 }
