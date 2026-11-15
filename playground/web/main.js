@@ -122,7 +122,40 @@ function scanPictures(json) {
     img.src = u;
   }
 }
+const fullScanned = new Set();
+function missingPicture(list) {
+  const cmds = Array.isArray(list) ? list : list && (list.cmds || Object.values(list).find(Array.isArray));
+  if (!cmds) return false;
+  let miss = false;
+  for (const c of cmds) {
+    if (c.k === 2 && typeof c.src === "string" && c.src.startsWith("dompng-") && !pictures.has(c.src) && !fullScanned.has(c.src)) { fullScanned.add(c.src); miss = true; }
+  }
+  return miss;
+}
+// (a picture drawn at an opacity, the alpha of its command's colour: the
+// WebGL painter draws pictures opaque, so a faded copy is drawn once and
+// named for it, Bootstrap's half-transparent close button)
+function fadedPictures(list) {
+  const cmds = Array.isArray(list) ? list : list && (list.cmds || Object.values(list).find(Array.isArray));
+  if (!cmds) return;
+  for (const c of cmds) {
+    if (c.k !== 2 || !c.c || !(c.c[3] < 1) || typeof c.src !== "string" || c.src.indexOf("@") >= 0) continue;
+    const base = loadedPictures.get(c.src);
+    if (!base) continue;
+    const a = Math.round(c.c[3] * 100) / 100, name = `${c.src}@${a}`;
+    if (!loadedPictures.has(name)) {
+      const f = document.createElement("canvas");
+      f.width = base.width; f.height = base.height;
+      const g = f.getContext("2d");
+      g.globalAlpha = a;
+      g.drawImage(base, 0, 0);
+      loadedPictures.set(name, f);
+    }
+    c.src = name;
+  }
+}
 function paintGl(list) {
+  fadedPictures(list);
   gl.viewport(0, 0, canvas.width, canvas.height);
   gl.clearColor(1, 1, 1, 1);
   gl.clear(gl.COLOR_BUFFER_BIT);
@@ -142,6 +175,9 @@ function draw() {
   t2 = performance.now();
   acc.paint += t2 - t;
   lastList = list;
+  // (a picture of a node the delta renders did not carry, one unchanged
+  // since the first render: the whole render tree is looked through once)
+  if (missingPicture(list)) scanPictures(pg.eval("__render()"));
   if (gl) paintGl(list);
   const end = performance.now();
   acc.gl += end - t2;

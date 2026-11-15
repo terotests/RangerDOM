@@ -364,6 +364,11 @@ fn lay_out(page: &Rc<RefCell<JsonValue>>, delta: bool, w: f64, h: f64, kept: &mu
     }
     lap("share");
     kept.svgs.borrow_mut().frame();
+    // (the last field's caret goes, its element may be kept)
+    if let Some(old) = kept.deco.take() {
+        let ks: Vec<_> = old.borrow().children.iter().filter(|c| { let n = c.borrow().class_name.clone(); n != "mfd-dcaret" && n != "mfd-dsel" }).cloned().collect();
+        old.borrow_mut().children = ks;
+    }
     let b = DomView::buildKept(&page, 0, w, h, Rc::clone(&kept.svgs));
     lap("build");
     EVGElement::add_child(&root, b.clone());
@@ -373,6 +378,18 @@ fn lay_out(page: &Rc<RefCell<JsonValue>>, delta: bool, w: f64, h: f64, kept: &mu
     lap("evg");
     DomView::settle(&b);
     lap("settle");
+    // the focused text field's caret, or its selection, over its laid out
+    // text (DomView::decorate)
+    // (a delta's tree is under "root", resolved to the whole page)
+    let top = if page.borrow().has("root") { page.borrow().get("root") } else { page.clone() };
+    let ff = DomView::focusedField(&top);
+    if ff.borrow().kind == 5 {
+        let fid = format!("mfd-xd-0-{}", ff.borrow().getText("i"));
+        if let Some(fe) = find_el(&b, &fid) {
+            DomView::decorate(&EVGLayout::get_text_engine(&lay), &fe, &ff);
+            kept.deco = Some(fe);
+        }
+    }
     #[cfg(not(target_arch = "wasm32"))]
     let all = std::env::var("PG_FULLBOXES").is_ok();
     #[cfg(target_arch = "wasm32")]
@@ -458,6 +475,14 @@ fn lay_out(page: &Rc<RefCell<JsonValue>>, delta: bool, w: f64, h: f64, kept: &mu
     (boxes, root, lay)
 }
 
+/// the element of id `id` under `el`
+fn find_el(el: &Rc<RefCell<EVGElement>>, id: &str) -> Option<Rc<RefCell<EVGElement>>> {
+    if el.borrow().id == id { return Some(el.clone()); }
+    let ks = el.borrow().children.clone();
+    for k in ks.iter() { if let Some(f) = find_el(k, id) { return Some(f); } }
+    None
+}
+
 /// What one layout keeps for the next: the page's nodes by their ids with a
 /// hash of what each holds, and the elements built from them (DomView's
 /// memo). The next render tree gets the last one's node wherever a node
@@ -465,6 +490,8 @@ fn lay_out(page: &Rc<RefCell<JsonValue>>, delta: bool, w: f64, h: f64, kept: &mu
 /// node instead of building it again: a scroll that brings three rows into
 /// a grid builds those rows, not the page.
 struct Kept {
+    /// the field decorate drew a caret or selection on last time
+    deco: Option<Rc<RefCell<EVGElement>>>,
     svgs: Rc<RefCell<DomSvgDocs>>,
     /// the boxes the page has: what DomView::boxesSince sends is what
     /// changed since (PG_FULLBOXES: all of them every time)
@@ -590,7 +617,7 @@ impl Kept {
         let off = std::env::var("PG_NORETAIN").is_ok();
         #[cfg(target_arch = "wasm32")]
         let off = false;
-        Kept { svgs: svgs, boxes: Rc::new(RefCell::new(DomBoxes::new())), #[cfg(not(target_arch = "wasm32"))] mirror: HashMap::new(), nodes: HashMap::new(), styles: HashMap::new(), seen: 0, same: 0, off: off, unused: 0, noted: false, hits0: 0, misses0: 0, by_n: HashMap::new(), epoch: 0, total: 0, fresh: 0, live: 0, root: None }
+        Kept { deco: None, svgs: svgs, boxes: Rc::new(RefCell::new(DomBoxes::new())), #[cfg(not(target_arch = "wasm32"))] mirror: HashMap::new(), nodes: HashMap::new(), styles: HashMap::new(), seen: 0, same: 0, off: off, unused: 0, noted: false, hits0: 0, misses0: 0, by_n: HashMap::new(), epoch: 0, total: 0, fresh: 0, live: 0, root: None }
     }
     /// a delta page (webapi.js renderJson): each node it names ({"r": n})
     /// is the node kept under that number, each node with a number is kept.
