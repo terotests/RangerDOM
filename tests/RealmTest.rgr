@@ -167,6 +167,16 @@ class RealmTest {
         def got (r.eval("var a = document.getElementById('app'), o = []; __render(); a.style.width = '300px'; __render(); o.push(__styleCheck() === ''); __render(); a.className = 'flex'; __render(); o.push(__styleCheck() === ''); __render(); a.style.backgroundColor = 'rgb(9,9,9)'; __render(); o.push(__styleCheck() === ''); __render(); a.className = ''; a.style.padding = '3px'; __render(); o.push(__styleCheck() === ''); o.push(getComputedStyle(document.querySelector('u')).width, getComputedStyle(document.querySelector('p')).backgroundColor); o.join()"))
         this.check("kept styles: a box's own change leaves the page as styled anew" (got == "true,true,true,true,300px,rgb(9, 9, 9)"))
     }
+    ; one constructed sheet adopted by two shadow roots styles both, each
+    ; by its own host (the roots share the sheet's rule index), and
+    ; 'adoptedStyleSheets' is in Document.prototype (Lit asks, and gives
+    ; every root a <style> of its own otherwise)
+    fn adopted:void () {
+        def r:DomRealm (this.realm("<html><body><div id=a></div><div id=b class=k></div></body></html>"))
+        r.runScripts()
+        def got (r.eval("var sh = new CSSStyleSheet(); sh.replaceSync(':host{color:rgb(1,1,1)}:host(.k){color:rgb(2,2,2)}p{margin-left:7px}'); var o = [('adoptedStyleSheets' in Document.prototype)]; ['a', 'b'].forEach(function (id) { var h = document.getElementById(id), sr = h.attachShadow({ mode: 'open' }); sr.innerHTML = '<p>x</p>'; sr.adoptedStyleSheets = [sh]; }); __render(); ['a', 'b'].forEach(function (id) { var p = document.getElementById(id).shadowRoot.querySelector('p'); o.push(getComputedStyle(p).color, getComputedStyle(p).marginLeft); }); document.adoptedStyleSheets = [sh]; o.push(document.adoptedStyleSheets.length); o.join(';')"))
+        this.check("adopted sheets: one sheet in two shadow roots, each styled by its own host" (got == "true;rgb(1, 1, 1);7px;rgb(2, 2, 2);7px;1"))
+    }
     fn run:void () {
         this.plainDom()
         this.react()
@@ -176,6 +186,7 @@ class RealmTest {
         this.parser()
         this.shadow()
         this.keptStyles()
+        this.adopted()
         print ("passed " + (to_string passes) + ", failed " + (to_string fails))
     }
 
