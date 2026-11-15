@@ -1032,8 +1032,9 @@ impl DomView {
         // (a host drawing with the browser's own faces: their metrics,
         // metricFace)
         let seed: Rc<RefCell<JsonValue>> = JsonValue::mkObj();
-        if page.borrow().getText("fm") == "browser" {
-            seed.borrow_mut().putStr("_fm", "browser");
+        let fm: String = page.borrow().getText("fm");
+        if fm == "browser" || fm == "measure" {
+            seed.borrow_mut().putStr("_fm", &fm);
         }
         let inh: Rc<RefCell<JsonValue>> = v.borrow().inherit(&seed, &root.borrow().get("s"));
         let body: Rc<RefCell<JsonValue>> = v.borrow().child(&root, "body");
@@ -1831,7 +1832,7 @@ impl DomView {
     /// browser's Arial for the faces a native host draws as Open Sans
     pub fn metricFace(inh: &Rc<RefCell<JsonValue>>) -> String {
         let f: String = DomView::faceOf(&inh.borrow().getText("font-family"), "")[0].clone();
-        if f == "Arial" && inh.borrow().getText("_fm") == "browser" {
+        if f == "Arial" && !inh.borrow().getText("_fm").is_empty() {
             return "Arial (browser)".to_string();
         }
         f
@@ -4313,7 +4314,7 @@ impl DomView {
             // (drawn with the browser's faces: their normal line, which
             // EVG's measurer does not know, and splitOf's face)
             if k == "_fm" {
-                if v == "browser" {
+                if v == "browser" || v == "measure" {
                     let fc: String = DomView::metricFace(inh);
                     if fc == "Arial (browser)" {
                         let cn: String = e.borrow().class_name.clone();
@@ -4348,10 +4349,21 @@ impl DomView {
         }
         let mut face: Vec<String> = DomView::faceOf(&inh.borrow().getText("font-family"), &inh.borrow().getText("font-weight"));
         // (the browser's Arial has no semibold face: 600 is drawn bold)
-        if face[0].clone() == "Arial-Semibold" && inh.borrow().getText("_fm") == "browser" {
+        if face[0].clone() == "Arial-Semibold" && !inh.borrow().getText("_fm").is_empty() {
             face = vec!["Arial".to_string(), "bold".to_string()].clone();
         }
-        EVGElement::set_attribute(&e, "font-family", face[0].clone());
+        // (a host that measures with the browser gets the page's families;
+        // the last name, which EVG's bold suffix lands on, is none)
+        if inh.borrow().getText("_fm") == "measure" && face[0].clone() == "Arial" {
+            let ff: String = inh.borrow().getText("font-family");
+            if !ff.is_empty() {
+                EVGElement::set_attribute(&e, "font-family", format!("{}, mfd", ff));
+            } else {
+                EVGElement::set_attribute(&e, "font-family", face[0].clone());
+            }
+        } else {
+            EVGElement::set_attribute(&e, "font-family", face[0].clone());
+        }
         // (the text-decoration lines that reach it; an underline through a
         // face of solid glyphs is left only under the spaces, skip-ink)
         let tdl: String = inh.borrow().getText("_tdeco");

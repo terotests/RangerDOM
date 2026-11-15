@@ -3,9 +3,9 @@
   "packages": {
     "cer": {
       "git": "https://github.com/terotests/componentengine.git",
-      "rev": "b622ec8b646b0620d5cc1a21e9964c67eaaec472",
+      "rev": "5f349834047690eab6f49cd730b09d57b7e71152",
       "subdir": "cer",
-      "sha256": "0c9166dd22dda482e92b09d99b6576ee725383fd4c43cd49b5173a1e3fee4d5b"
+      "sha256": "6e0d9e5b93df6ec430ad2141341c2adea48e6c8053f85ee8beb65abe7aec5291"
     }
   }
 }
