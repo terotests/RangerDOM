@@ -8299,7 +8299,10 @@
   function rjPseudoBlock(k, rj) {
     if (k.nodeType !== 1) return false;
     var d = computedOf(k).display;
-    if (d && d !== 'inline' && d !== 'contents') return false;
+    // (a `display: contents` box is written as one: not an inline, so
+    // pseudoBlock says no; ag-grid's three roots are such, and the whole
+    // grid's JSON was parsed for each at every render)
+    if (d && d !== 'inline') return false;
     var c = k._rj;
     if (c && c.json === rj) {
       if (c.pbk === undefined) c.pbk = rj.indexOf('"pe":1') >= 0 && pseudoBlock(JSON.parse(rj));
@@ -9016,7 +9019,7 @@
     if (n.nodeType !== 1) return '';
     var k = n._rj;
     // a script's scrollTop is no change (generation): the box's own say
-    var sc = (n.scrollTop || 0) + ',' + (n.scrollLeft || 0);
+    var sc = n._sTop || n._sLeft ? (n._sTop || 0) + ',' + (n._sLeft || 0) : '0,0';
     // (one whose render set or read a counter or a quote renders again:
     // what it shows and leaves to what follows depends on what came before;
     // a <ul> anywhere no longer renders the whole page again each frame)

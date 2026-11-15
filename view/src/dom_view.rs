@@ -393,11 +393,15 @@ impl DomMemo {
     #[doc(hidden)]
     pub fn settle(&mut self) {
         self.carry();
-        let ks: Vec<String> = self.curEls.keys().cloned().collect::<Vec<String>>();
-        for sk in ks.iter().cloned() {
-            let el: Rc<RefCell<EVGElement>> = self.curEls.get(&sk).cloned().unwrap();
-            let sig: String = DomMemo::marginSig(&el);
-            self.curSig.insert(sk.clone(), sig.clone());
+        // (the margins are noted only for kept layouts: with keepLayout off
+        // nothing reads them, and writing them was a tenth of a layout)
+        if self.keepLayout {
+            let ks: Vec<String> = self.curEls.keys().cloned().collect::<Vec<String>>();
+            for sk in ks.iter().cloned() {
+                let el: Rc<RefCell<EVGElement>> = self.curEls.get(&sk).cloned().unwrap();
+                let sig: String = DomMemo::marginSig(&el);
+                self.curSig.insert(sk.clone(), sig.clone());
+            }
         }
         let tk: Vec<String> = self.taken.clone();
         for sk in tk.iter().cloned() {
