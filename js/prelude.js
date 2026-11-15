@@ -8,9 +8,10 @@
 //   __tick(ms)        the host's clock moved ms on: the timers that are due
 //                     run, in the order of their due times (setInterval
 //                     repeats), at most 500 of them; answers how many ran.
-//                     One tick is at most one animation frame: the frame
-//                     callbacks (__frame) run once in it, however far the
-//                     clock moved, so the host can draw between two frames
+//                     One tick is one animation frame (__frame callbacks)
+//                     however far the clock moved, so the host can draw
+//                     between two frames, unless a later timer is due in it:
+//                     the frames before that timer's time run first
 //   __dueIn()         ms until the next timer, -1 without timers
 //   __drain()         the outbox as JSON text, emptied: {tag: "open", url,
 //                     target}, {tag: "fetch", id, url}, {tag: "console",
@@ -75,9 +76,21 @@ function __tick(ms) {
   var until = __clock + Math.max(0, Number(ms) || 0);
   var n = 0, frameRan = false;
   while (n < 500) {
-    var best = -1;
+    var best = -1, later = -1;
     for (var i = 0; i < __timers.length; i++) {
-      if (__timers[i].due <= until && !(frameRan && __timers[i].frame) && (best < 0 || __timers[i].due < __timers[best].due)) best = i;
+      var ti = __timers[i];
+      if (ti.due > until) continue;
+      if (!ti.frame && !ti.quiet && (later < 0 || ti.due < later)) later = ti.due;
+      if (!(frameRan && ti.frame) && (best < 0 || ti.due < __timers[best].due)) best = i;
+    }
+    // (a frame already ran in this tick: another one runs only before a
+    // timer due after it, so what that timer reads is as of its time;
+    // the frames the host did not draw are dropped as a browser drops them)
+    if (frameRan) {
+      for (var j = 0; j < __timers.length; j++) {
+        var tj = __timers[j];
+        if (tj.frame && later >= 0 && tj.due <= later && (best < 0 || tj.due < __timers[best].due)) best = j;
+      }
     }
     if (best < 0) break;
     var t = __timers[best];

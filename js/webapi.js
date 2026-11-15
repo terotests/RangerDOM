@@ -158,6 +158,37 @@
     eachElement(e, dropStyle);
     return false;
   }
+  // e's animations moved on (a frame): when nothing else dropped its style
+  // since, the style it has without them is kept (e._ab) and only the
+  // animations are applied again; otherwise as restyle
+  function animRestyle(e) {
+    var old = computedCache.map[e.__id], ab = e._ab;
+    // (its first animation: the style it has is the one without)
+    if (old && !ab && !shadowCount && !e._anims && !(old.animation && old.animation !== 'none') && !(old['animation-name'] && old['animation-name'] !== 'none')) {
+      var pel = e.parentNode && e.parentNode.nodeType === 1 ? e.parentNode : null, ps = pel ? computedCache.map[pel.__id] : null;
+      if (ps && old.display !== 'table-cell') ab = e._ab = { gen: styleGen, parent: ps, base: old, out: old, t: animNow() };
+    }
+    if (!old || !ab || ab.gen !== styleGen || ab.out !== old) return restyle(e);
+    delete computedCache.map[e.__id];
+    e._rj = null; e._pc = null;
+    e._abKeep = true;
+    if (sameBelow(e, old, computedOf(e))) return true;
+    eachElement(e, dropStyle);
+    return false;
+  }
+  // a computed style's copy, its hidden properties too (_sid new)
+  function copyStyle(c) {
+    var out = {};
+    for (var k in c) out[k] = c[k];
+    var names = Object.getOwnPropertyNames(c);
+    for (var i = 0; i < names.length; i++) {
+      var n = names[i];
+      if (n === '_sid' || Object.prototype.propertyIsEnumerable.call(c, n)) continue;
+      Object.defineProperty(out, n, { value: c[n], enumerable: false, configurable: true, writable: true });
+    }
+    Object.defineProperty(out, '_sid', { value: ++styleUid, enumerable: false });
+    return out;
+  }
   // what nothing renders, only getComputedStyle reads (the host keeps its own
   // cursor): React Flow's pane gets cursor: grabbing for a drag, which every
   // node, edge and label under it would take
@@ -7023,12 +7054,24 @@
   // the wall clock: pages set their start times from performance.now and
   // frame timestamps
   function animNow() { return typeof __clock === 'number' ? __clock : now(); }
+  // a timer of webapi.js's own that reads nothing of the page's (an
+  // animation's end): the host's tick runs no frames to catch up to it
+  // (prelude.js __tick)
+  function quietTimeout(fn, ms) {
+    var id = setTimeout(fn, ms);
+    if (typeof __timers !== 'undefined' && __timers.length && __timers[__timers.length - 1].id === id) __timers[__timers.length - 1].quiet = true;
+    return id;
+  }
   var animating = [], animTick = false;
   function scheduleAnimationFrame(el) {
     if (animating.indexOf(el) < 0) animating.push(el);
     if (animTick) return;
     animTick = true;
-    setTimeout(function animFrame() {
+    // (an animation frame is the page's frame, with its requestAnimationFrame
+    // callbacks: one a tick, so the host draws between two of them; on 16 ms
+    // timers a host whose tick was long ran a whole animation inside one
+    // tick and drew only its end)
+    requestAnimationFrame(function animFrame() {
       animTick = false;
       var list = animating;
       animating = [];
@@ -7038,9 +7081,9 @@
         generation++;
         textStamp++;
         for (var p = e; p; p = p.parentNode) p._rv = textStamp;
-        if (computedCache.gen === styleGen) restyle(e);
+        if (computedCache.gen === styleGen) animRestyle(e);
       }
-    }, 16);
+    });
   }
   function animEvent(el, type, a, elapsed) {
     setTimeout(function () {
@@ -7239,7 +7282,7 @@
     _timer() {
       var self = this, ct = this.currentTime, left = this._rate > 0 ? this._end() - ct : ct;
       if (ct === null) return;
-      if (isFinite(left) && this._rate) setTimeout(function () { if (self._state === 'running') self._check(); }, Math.max(0, left / Math.abs(this._rate)) + 1);
+      if (isFinite(left) && this._rate) quietTimeout(function () { if (self._state === 'running') self._check(); }, Math.max(0, left / Math.abs(this._rate)) + 1);
     }
     pause() { var ct = this.currentTime; this._hold = ct === null ? 0 : ct; this._state = 'paused'; this._start = null; this._touch(); }
     finish() {
@@ -7275,7 +7318,7 @@
       if (!el || !el.isConnected) return;
       generation++; textStamp++;
       for (var p = el; p; p = p.parentNode) p._rv = textStamp;
-      if (computedCache.gen === styleGen) restyle(el);
+      if (computedCache.gen === styleGen) animRestyle(el);
     }
     _check() {
       if (this._done || this.playState !== 'finished') return;
@@ -7318,6 +7361,31 @@
     }
     if (again) scheduleAnimationFrame(el);
   }
+  // a keyframe's computed style for el: the same from frame to frame while
+  // el's style without animations (el._ab) and its parent's are the same
+  function frameStyle(el, parent, fr) {
+    var ab = el._ab, k = fr._cs;
+    if (k && ab && k.ab === ab && k.el === el && ab.gen === styleGen && ab.parent === parent) return k.cs;
+    var cs = ab && fr.decls ? frameValues(ab.base, parent, fr.decls) : null;
+    if (!cs) cs = computeStyle(el, parent, undefined, fr.decls);
+    if (fr.decls && ab) fr._cs = { ab: ab, el: el, cs: cs };
+    return cs;
+  }
+  // a keyframe's own properties computed over el's style without
+  // animations (only what applyFrames reads), when each is a plain value of
+  // a longhand: no var(), percentage, keyword or font size (null otherwise,
+  // the whole style is computed then). A spring's keyframes are many, each
+  // met once: a whole style for each was 0.4 ms an element a frame.
+  function frameValues(base, parent, decls) {
+    var out = null, ctx = null;
+    for (var n in decls) {
+      var v = decls[n];
+      if (typeof v !== 'string' || base[n] === undefined || n === 'font-size' || n === 'font' || n.slice(0, 2) === '--' || v.indexOf('var(') >= 0 || v.indexOf('%') >= 0 || /^\s*(inherit|initial|unset|revert|revert-layer|currentcolor)\s*$/i.test(v) || /\d(ch|ex|cap|ic|lh|rlh)\b|currentcolor/i.test(v)) return null;
+      if (!out) { out = {}; ctx = { em: base._fontPx, rem: rootFontPx(), vw: viewport.w / 100, vh: viewport.h / 100 }; }
+      out[n] = computeValue(n, v, ctx, parent, base);
+    }
+    return out || {};
+  }
   // keyframes at progress (0..1, eased) onto c: the computed styles of the
   // two keyframes around it, interpolated
   function applyFrames(el, c, parent, frames, progress, easing) {
@@ -7329,7 +7397,7 @@
     var props = {};
     frames.forEach(function (fr) { for (var k in fr.decls) props[k] = true; });
     // (a property a keyframe leaves out: the underlying value there)
-    var ca = computeStyle(el, parent, undefined, A.decls), cb = A === B ? ca : computeStyle(el, parent, undefined, B.decls);
+    var ca = frameStyle(el, parent, A), cb = A === B ? ca : frameStyle(el, parent, B);
     for (var pk in props) {
       if (pk.slice(0, 2) === '--') continue;
       c[pk] = interpolateValue(pk, A.decls[pk] !== undefined || !from ? ca[pk] : c[pk], B.decls[pk] !== undefined || !to ? cb[pk] : c[pk], local);
@@ -7375,14 +7443,32 @@
     if (treePending.size) flushTree();
     if (computedCache.gen !== styleGen) { computedCache = { gen: styleGen, map: {} }; treePending.clear(); }
     var c = computedCache.map[el.__id];
-    if (c) return c;
+    if (c) {
+      // (an animated style read after the clock moved on, between two
+      // frames: getComputedStyle sees the animations now)
+      var ab0 = el._ab;
+      if (!ab0 || ab0.out !== c || ab0.t === animNow()) return c;
+      delete computedCache.map[el.__id];
+      el._rj = null;
+      el._abKeep = true;
+    }
     var pel = shadowCount ? flatParent(el) : el.parentNode && el.parentNode.nodeType === 1 ? el.parentNode : null;
     var parent = pel ? computedOf(pel) : null;
-    c = (el._pc ? patchedStyle(el, parent) : null) || computeStyle(el, parent);
+    // (an animation frame: the style without the animations kept, animRestyle)
+    var ab = el._ab, keep = el._abKeep;
+    el._abKeep = false;
+    if (keep && ab && ab.gen === styleGen && ab.parent === parent) c = copyStyle(ab.base);
+    else c = (el._pc ? patchedStyle(el, parent) : null) || computeStyle(el, parent);
     el._pc = null;
-    if ((c.animation && c.animation !== 'none') || (c['animation-name'] && c['animation-name'] !== 'none')) applyAnimations(el, c, parent);
-    else if (el._anims) el._anims = null;
-    if (el._waapi && el._waapi.length) applyWaapi(el, c, parent);
+    var cssAnim = (c.animation && c.animation !== 'none') || (c['animation-name'] && c['animation-name'] !== 'none'), waapi = el._waapi && el._waapi.length;
+    if (cssAnim || waapi) {
+      if (!(keep && ab && ab.gen === styleGen && ab.parent === parent)) { ab = el._ab = { gen: styleGen, parent: parent, base: c, out: null }; c = copyStyle(c); }
+      if (cssAnim) applyAnimations(el, c, parent);
+      if (waapi) applyWaapi(el, c, parent);
+      ab.out = c;
+      ab.t = animNow();
+    } else el._ab = null;
+    if (!cssAnim && el._anims) el._anims = null;
     computedCache.map[el.__id] = c;
     // (styled: its ancestors are noted with it, so one never styled has
     // nothing styled under it; treeChanged keeps that true for a move)
