@@ -6646,6 +6646,18 @@
       var hit = (inl ? specInline : specCache).map[ckey];
       if (hit) return hit;
     }
+    // (a pseudo-element's declarations come from its rules alone: one
+    // object for all with the same rules, as specCache is for elements. A
+    // page's `*, ::before, ::after` rule gives every element two, and each
+    // was sorted and expanded again at every render.)
+    var pek = null;
+    if (pe) {
+      pek = pe;
+      for (var pk = 0; pk < hits.length; pk++) pek += ',' + (hits[pk].r._uid || (hits[pk].r._uid = ++ruleUid)) + ':' + hits[pk].sheet;
+      if (peSpec.gen !== styleGen) peSpec = { gen: styleGen, map: {}, n: 0 };
+      var peHit = peSpec.map[pek];
+      if (peHit) return peHit;
+    }
     hits.sort(function (a, b) { return (a.ua === b.ua ? 0 : a.ua ? -1 : 1) || (!a.inner === !b.inner ? 0 : a.inner ? -1 : 1) || cmpSpec(a.r.sel.spec, b.r.sel.spec) || a.sheet - b.sheet || a.r.order - b.r.order; });
     // (seq: when each key was last set, for computeStyle to tell a logical
     // longhand and the physical property it maps to apart, the later winning)
@@ -6673,7 +6685,8 @@
         var dp = hits[hp].r.decls;
         for (var jp = 0; jp < dp.length; jp++) if (dp[jp].important) put(dp[jp].name, dp[jp].value, true, hits[hp].ua);
       }
-      return hits.length ? out : null;
+      if (peSpec.n < 20000) { Object.defineProperty(out, '_sid', { value: ++specUid, enumerable: false }); peSpec.map[pek] = out; peSpec.n++; }
+      return out;
     }
     // inline style
     if (el._style || attrOf(el, 'style') !== null) {
@@ -6699,7 +6712,7 @@
     return out;
   }
   var ruleUid = 0, specUid = 0, styleUid = 0;
-  var specCache = { gen: -1, map: {}, n: 0 };
+  var specCache = { gen: -1, map: {}, n: 0 }, peSpec = { gen: -1, map: {}, n: 0 };
   // computed styles by declarations (_sid) and parent style (_sid): an
   // element with the same declarations as its sibling, under the same
   // parent style, has the same computed style (Blink's matched properties
@@ -7446,7 +7459,9 @@
   function computeStyle(el, parent, pe, extra) {
     var spec = pe ? cascade(el, pe) : cascade(el);
     var skey = null, ikey = null, tookOwn = false;
-    if (!pe && !extra && spec._sid && el !== (doc && doc.documentElement) && (!parent || parent._sid) && !(el._waapi && el._waapi.length)) {
+    // (a pseudo-element's style too: it takes nothing from its element but
+    // the element's style, its parent here)
+    if (!extra && spec && spec._sid && el !== (doc && doc.documentElement) && (!parent || parent._sid) && !(el._waapi && el._waapi.length)) {
       skey = spec._sid + ':' + (parent ? parent._sid : 0);
       if (sharedCache.gen !== styleGen) { sharedCache = { gen: styleGen, map: {}, n: 0 }; ikMap = {}; }
       if (sharedInline.gen !== styleGen) sharedInline = { gen: styleGen, map: {}, n: 0 };
@@ -7455,7 +7470,7 @@
       // (or by what the parent hands down, when the declarations take
       // nothing else from it: no `inherit`)
       if (!shared && parent) { ikey = spec._sid + ';' + inheritKey(parent); shared = scache.map[ikey]; }
-      if (shared) { el._ia = shared._ia0; return shared; }
+      if (shared) { if (!pe) el._ia = shared._ia0; return shared; }
     }
     // (an animation's keyframe: its declarations over the cascade's)
     if (extra) { var sp2 = {}; for (var sk0 in spec) sp2[sk0] = spec[sk0]; for (var ek in extra) sp2[ek] = extra[ek]; spec = sp2; }
