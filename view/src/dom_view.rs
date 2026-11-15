@@ -873,6 +873,53 @@ impl DomView {
         }
         format!("dompng-{}-{}", n, h)
     }
+    /// a background longhand's first layer (the one the first url() is
+    /// drawn with): up to its first comma outside parentheses
+    pub fn firstLayer(v: &str) -> String {
+        let mut depth: i64 = 0;
+        let mut i: i64 = 0;
+        for b in v.bytes() {
+            if b == 40 {
+                depth += 1;
+            }
+            if b == 41 {
+                depth -= 1;
+            }
+            if b == 44 && depth == 0 {
+                return v[(0) as usize..(i) as usize].to_string().trim().to_string();
+            }
+            i += 1;
+        }
+        v.trim().to_string()
+    }
+    /// the SVG data: URL of a background-image (its first url()), else
+    /// empty: a host that draws pictures from their URLs (the playground's
+    /// WebGL painter) has it by the name pngPart gives it
+    pub fn bgSvgUrl(v: &str) -> String {
+        let at: i64 = DomText::index_of(&v, "url(");
+        if at < 0 {
+            return String::new();
+        }
+        let rest: String = v[(at + 4) as usize..(v.as_bytes().len() as i64) as usize].to_string();
+        let mut u: String = rest.trim().to_string();
+        let mut close: String = ")".to_string();
+        if u.starts_with("\"") {
+            close = "\")".to_string();
+            u = u[(1) as usize..(u.as_bytes().len() as i64) as usize].to_string();
+        } else if u.starts_with("'") {
+            close = "')".to_string();
+            u = u[(1) as usize..(u.as_bytes().len() as i64) as usize].to_string();
+        }
+        let end: i64 = DomText::index_of(&u, &close);
+        if end < 0 {
+            return String::new();
+        }
+        u = u[(0) as usize..(end) as usize].to_string();
+        if DomView::svgUrl(&u) {
+            return u;
+        }
+        String::new()
+    }
     /// the data: URL picture of a background-image (its first url()), else
     /// empty
     pub fn bgUrl(v: &str) -> String {
@@ -5953,15 +6000,31 @@ impl DomView {
         }
         // a background picture given as a data: URL, tiled by the display
         // list over the box (bg-picture)
-        let bg_url: String = DomView::bgUrl(&s.borrow().getText("background-image"));
+        let mut bg_url: String = DomView::bgUrl(&s.borrow().getText("background-image"));
+        if bg_url.is_empty() {
+            bg_url = DomView::bgSvgUrl(&s.borrow().getText("background-image"));
+        }
         let mut bg_em: f64 = DomView::pxOf(&s.borrow().getText("font-size"));
         if bg_em <= 0.0 {
             bg_em = self.emPx;
         }
         if !bg_url.is_empty() {
-            let nat: Vec<f64> = DomView::imageSize(&bg_url);
+            let mut nat: Vec<f64> = DomView::imageSize(&bg_url);
+            // (an SVG with a viewBox and no size: the viewBox's ratio, which
+            // a background's size of one length keeps; Bootstrap's chevron)
+            if DomView::svgUrl(&bg_url) {
+                let bsvg: String = DomView::svgOfUrl(&bg_url);
+                let bvb: Vec<String> = DomView::listOf(&DomView::svgAttrText(&bsvg, "viewBox"));
+                if (bvb.len() as i64) == 4 && DomView::svgAttr(&bsvg, "width") <= 0.0 && DomView::svgAttr(&bsvg, "height") <= 0.0 {
+                    let bvw: Option<f64> = bvb[2].parse::<f64>().ok();
+                    let bvh: Option<f64> = bvb[3].parse::<f64>().ok();
+                    if bvw.is_some() && bvh.is_some() && bvw.unwrap() > 0.0 && bvh.unwrap() > 0.0 {
+                        nat = vec![bvw.unwrap(), bvh.unwrap()];
+                    }
+                }
+            }
             if nat.len() == 2 {
-                let mut rep: String = s.borrow().getText("background-repeat");
+                let mut rep: String = DomView::firstLayer(&s.borrow().getText("background-repeat"));
                 if rep.is_empty() || rep == "repeat repeat" || rep == "space" || rep == "round" {
                     rep = "repeat".to_string();
                 }
@@ -5974,7 +6037,7 @@ impl DomView {
                 if rep == "no-repeat no-repeat" {
                     rep = "no-repeat".to_string();
                 }
-                let mut size: String = s.borrow().getText("background-size");
+                let mut size: String = DomView::firstLayer(&s.borrow().getText("background-size"));
                 if size.is_empty() {
                     size = "auto".to_string();
                 }
@@ -5986,7 +6049,7 @@ impl DomView {
                 EVGElement::set_attribute(
                     &e,
                     "bg-picture",
-                    format!("{}|{}|{}|{}|{}|{}{}", DomView::pngPart(&bg_url), DomView::fmt(nat[0]), DomView::fmt(nat[1]), rep, DomView::bgPosition(&s.borrow().getText("background-position"), bg_em), size, fixed)
+                    format!("{}|{}|{}|{}|{}|{}{}", DomView::pngPart(&bg_url), DomView::fmt(nat[0]), DomView::fmt(nat[1]), rep, DomView::bgPosition(&DomView::firstLayer(&s.borrow().getText("background-position")), bg_em), size, fixed)
                 );
             }
         }
