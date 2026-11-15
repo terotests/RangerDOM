@@ -2488,8 +2488,11 @@
     constructor(qname) {
       if (qname === undefined && upgrading) { var u = upgrading; upgrading = null; return u; }
       super(qname === undefined ? customName(new.target) : qname, HTML_NS);
-      this.dataset = datasetOf(this);
     }
+    // (made the first time it is asked for: a Proxy and its handler's
+    // seven functions for every element were a third of a 10 000-row
+    // table's objects)
+    get dataset() { return this._ds || (this._ds = datasetOf(this)); }
     get title() { return this.getAttribute('title') || ''; }
     set title(v) { this.setAttribute('title', v); }
     get lang() { return this.getAttribute('lang') || ''; }
@@ -3679,7 +3682,8 @@
   class HTMLMenuElement extends HTMLElement {}
 
   class SVGElement extends Element {
-    constructor(q) { super(q, SVG_NS); this.dataset = datasetOf(this); }
+    constructor(q) { super(q, SVG_NS); }
+    get dataset() { return this._ds || (this._ds = datasetOf(this)); }
     get className() { var el = this; return { get baseVal() { return el.getAttribute('class') || ''; }, set baseVal(v) { el.setAttribute('class', v); }, get animVal() { return el.getAttribute('class') || ''; }, toString: function () { return el.getAttribute('class') || ''; } }; }
     set className(v) { this.setAttribute('class', v); }
     get ownerSVGElement() { for (var n = this.parentNode; n && n.nodeType === 1; n = n.parentNode) if (n.localName === 'svg') return n; return null; }
