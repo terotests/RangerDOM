@@ -1462,7 +1462,8 @@
     for (var i = root._c.length - 1; i >= 0; i--) stack.push(root._c[i]);
     while (stack.length) {
       var n = stack.pop();
-      if (n.nodeType !== 1) continue;
+      // (an element: only they have _attrs; nodeType is a getter)
+      if (n._attrs === undefined) continue;
       if (fn(n) === true) return;
       for (var j = n._c.length - 1; j >= 0; j--) stack.push(n._c[j]);
     }
@@ -1554,7 +1555,8 @@
     for (var i = top.length - 1; i >= 0; i--) stack.push(top[i]);
     while (stack.length) {
       var n = stack.pop();
-      if (n.nodeType !== 1) continue;
+      // (an element: only they have _attrs; nodeType is a getter)
+      if (n._attrs === undefined) continue;
       if (fn(n) === true) return;
       var k = flatKids(n);
       for (var j = k.length - 1; j >= 0; j--) stack.push(k[j]);
@@ -4280,7 +4282,8 @@
     var b = boxes[el.__id];
     if (!b) return DOMRect(0, 0, 0, 0);
     var sx = 0, sy = 0;
-    for (var n = el.parentNode; n && n.nodeType === 1; n = n.parentNode) { sx += n.scrollLeft || 0; sy += n.scrollTop || 0; }
+    // (the offsets as they are: the layout above has clamped them)
+    for (var n = el.parentNode; n && n._attrs !== undefined; n = n.parentNode) { sx += n._sLeft || 0; sy += n._sTop || 0; }
     return DOMRect(b[0] - sx, b[1] - sy, b[2], b[3]);
   }
   // an element's laid-out border box size: under a scale (a zoomed
@@ -4496,14 +4499,38 @@
     var best = null, bestKey = null, order = 0;
     if (!doc) return null;
     var orderOf = {};
-    (shadowCount ? eachFlat : eachElement)(doc, function (e) {
-      orderOf[e.__id] = order++;
-      var r = rectOf(e);
-      if (!(x >= r.left && x < r.right && y >= r.top && y < r.bottom) || !hittable(e)) return;
-      if (!insideTransformed(e, x, y) || clippedAway(e, x, y)) return;
-      var key = paintKey(e, orderOf);
-      if (!best || keyAfter(key, bestKey)) { best = e; bestKey = key; }
-    });
+    if (shadowCount) {
+      eachFlat(doc, function (e) {
+        orderOf[e.__id] = order++;
+        var r = rectOf(e);
+        if (!(x >= r.left && x < r.right && y >= r.top && y < r.bottom) || !hittable(e)) return;
+        if (!insideTransformed(e, x, y) || clippedAway(e, x, y)) return;
+        var key = paintKey(e, orderOf);
+        if (!best || keyAfter(key, bestKey)) { best = e; bestKey = key; }
+      });
+      return best;
+    }
+    // No shadow trees: the same walk carrying the scroll offsets above each
+    // element, which rectOf adds up per element (a wheel event over AG
+    // Grid's 1 000 elements read 30 000 offsets).
+    reflow();
+    var stack = [], sxs = [], sys = [], top = doc._c;
+    for (var i = top.length - 1; i >= 0; i--) { stack.push(top[i]); sxs.push(0); sys.push(0); }
+    while (stack.length) {
+      var n = stack.pop(), sx = sxs.pop(), sy = sys.pop();
+      if (n._attrs === undefined) continue;
+      orderOf[n.__id] = order++;
+      var b = boxes[n.__id];
+      if (b) {
+        var l = b[0] - sx, t = b[1] - sy;
+        if (x >= l && x < l + b[2] && y >= t && y < t + b[3] && hittable(n) && insideTransformed(n, x, y) && !clippedAway(n, x, y)) {
+          var key = paintKey(n, orderOf);
+          if (!best || keyAfter(key, bestKey)) { best = n; bestKey = key; }
+        }
+      }
+      var kx = sx + (n._sLeft || 0), ky = sy + (n._sTop || 0), kids = n._c;
+      for (var j = kids.length - 1; j >= 0; j--) { stack.push(kids[j]); sxs.push(kx); sys.push(ky); }
+    }
     return best;
   }
   function positionedOf(cs) { return cs.position && cs.position !== 'static'; }
@@ -6389,7 +6416,8 @@
     Object.defineProperty(sel, '_plain', { value: pl, enumerable: false, writable: true });
     return pl;
   }
-  // the attribute names the selectors of a rule set read
+  // the attribute names the selectors of a rule set read, and the ids they
+  // name ('#' + the id in lower case)
   function selAttrsOf(rs) {
     var names = Object.create(null);
     function ofList(list) { for (var i = 0; i < list.length; i++) ofSel(list[i]); }
@@ -6398,7 +6426,7 @@
       if (!parts) return;
       for (var k = 0; k < parts.length; k++) {
         var c = parts[k].c;
-        for (var q = 0; q < c.length; q++) { if (c[q].t === 'attr') names[c[q].n] = 1; else if (c[q].list) ofList(c[q].list); }
+        for (var q = 0; q < c.length; q++) { if (c[q].t === 'attr') names[c[q].n] = 1; else if (c[q].t === 'id') names['#' + String(c[q].v).toLowerCase()] = 1; else if (c[q].list) ofList(c[q].list); }
       }
     }
     function ofIdx(idx) { for (var key in idx) { var l = idx[key]; for (var i = 0; i < l.length; i++) ofSel(l[i].r.sel); } }
@@ -6430,7 +6458,9 @@
       var an = at[a].name;
       if (an === 'style') continue;
       if (!html) an = an.toLowerCase();
-      if (an === 'class' || an === 'id' || sa[an] === 1) key += '\u0001' + an + '\u0002' + at[a]._v;
+      // (an id no selector names tells elements apart for no rule: AG Grid
+      // gives every checkbox one of its own, a new signature per row)
+      if (an === 'class' || sa[an] === 1 || (an === 'id' && sa['#' + String(at[a]._v).toLowerCase()] === 1)) key += '\u0001' + an + '\u0002' + at[a]._v;
     }
     var id = sigIds.get(key);
     if (id === undefined) {
@@ -6516,7 +6546,10 @@
       // (elements alike in what the plain selectors read, see sigOf: the
       // rules found for the first one; only the others are tried)
       if (!shadowCount && d === doc) {
-        sg = sigOf(el, rs);
+        // (kept with the element as for a parent: its ::before and ::after
+        // ask again)
+        if (el._sgE === sigEpoch && el._sgR === rs) sg = el._sg;
+        else { sg = sigOf(el, rs); el._sg = sg; el._sgE = sigEpoch; el._sgR = rs; }
         var sck = pe ? sg + ':' + pe : sg;
         sc = rs._sc.get(sck);
         // (kept for the viewport its media rules were answered for)
@@ -6613,6 +6646,18 @@
       var hit = (inl ? specInline : specCache).map[ckey];
       if (hit) return hit;
     }
+    // (a pseudo-element's declarations come from its rules alone: one
+    // object for all with the same rules, as specCache is for elements. A
+    // page's `*, ::before, ::after` rule gives every element two, and each
+    // was sorted and expanded again at every render.)
+    var pek = null;
+    if (pe) {
+      pek = pe;
+      for (var pk = 0; pk < hits.length; pk++) pek += ',' + (hits[pk].r._uid || (hits[pk].r._uid = ++ruleUid)) + ':' + hits[pk].sheet;
+      if (peSpec.gen !== styleGen) peSpec = { gen: styleGen, map: {}, n: 0 };
+      var peHit = peSpec.map[pek];
+      if (peHit) return peHit;
+    }
     hits.sort(function (a, b) { return (a.ua === b.ua ? 0 : a.ua ? -1 : 1) || (!a.inner === !b.inner ? 0 : a.inner ? -1 : 1) || cmpSpec(a.r.sel.spec, b.r.sel.spec) || a.sheet - b.sheet || a.r.order - b.r.order; });
     // (seq: when each key was last set, for computeStyle to tell a logical
     // longhand and the physical property it maps to apart, the later winning)
@@ -6640,7 +6685,8 @@
         var dp = hits[hp].r.decls;
         for (var jp = 0; jp < dp.length; jp++) if (dp[jp].important) put(dp[jp].name, dp[jp].value, true, hits[hp].ua);
       }
-      return hits.length ? out : null;
+      if (peSpec.n < 20000) { Object.defineProperty(out, '_sid', { value: ++specUid, enumerable: false }); peSpec.map[pek] = out; peSpec.n++; }
+      return out;
     }
     // inline style
     if (el._style || attrOf(el, 'style') !== null) {
@@ -6666,7 +6712,7 @@
     return out;
   }
   var ruleUid = 0, specUid = 0, styleUid = 0;
-  var specCache = { gen: -1, map: {}, n: 0 };
+  var specCache = { gen: -1, map: {}, n: 0 }, peSpec = { gen: -1, map: {}, n: 0 };
   // computed styles by declarations (_sid) and parent style (_sid): an
   // element with the same declarations as its sibling, under the same
   // parent style, has the same computed style (Blink's matched properties
@@ -7413,7 +7459,9 @@
   function computeStyle(el, parent, pe, extra) {
     var spec = pe ? cascade(el, pe) : cascade(el);
     var skey = null, ikey = null, tookOwn = false;
-    if (!pe && !extra && spec._sid && el !== (doc && doc.documentElement) && (!parent || parent._sid) && !(el._waapi && el._waapi.length)) {
+    // (a pseudo-element's style too: it takes nothing from its element but
+    // the element's style, its parent here)
+    if (!extra && spec && spec._sid && el !== (doc && doc.documentElement) && (!parent || parent._sid) && !(el._waapi && el._waapi.length)) {
       skey = spec._sid + ':' + (parent ? parent._sid : 0);
       if (sharedCache.gen !== styleGen) { sharedCache = { gen: styleGen, map: {}, n: 0 }; ikMap = {}; }
       if (sharedInline.gen !== styleGen) sharedInline = { gen: styleGen, map: {}, n: 0 };
@@ -7422,7 +7470,7 @@
       // (or by what the parent hands down, when the declarations take
       // nothing else from it: no `inherit`)
       if (!shared && parent) { ikey = spec._sid + ';' + inheritKey(parent); shared = scache.map[ikey]; }
-      if (shared) { el._ia = shared._ia0; return shared; }
+      if (shared) { if (!pe) el._ia = shared._ia0; return shared; }
     }
     // (an animation's keyframe: its declarations over the cascade's)
     if (extra) { var sp2 = {}; for (var sk0 in spec) sp2[sk0] = spec[sk0]; for (var ek in extra) sp2[ek] = extra[ek]; spec = sp2; }
@@ -8338,7 +8386,7 @@
       var kids0 = kids;
       kids = anonTables(cs.display, kids, kd, o.i, true);
       if (kids !== kids0) { kel = null; kdj = null; }
-      if (cs['border-collapse'] === 'collapse' && /^(inline-)?table$/.test(cs.display)) { kids = collapseTable(o, kids, true, cs.color, kel); kdj = null; }
+      if (cs['border-collapse'] === 'collapse' && /^(inline-)?table$/.test(cs.display)) { pjDelta = deltaOn && !deltaOff; kids = collapseTable(o, kids, true, cs.color, kel); pjDelta = false; kdj = collapseDj; collapseDj = null; }
       var own = JSON.stringify(o);
       var kj = kids.join(',');
       if (deltaOn) {
@@ -8525,27 +8573,62 @@
     o.c = p.kids.map(function (k, i) { return partsOf(k, p.kel[i]); });
     return o;
   }
+  // (pjDelta: a delta render's text of the same part is left in pjLast. A
+  // row with its borders settled is a numbered part of its own: one that
+  // came out as the host has it is only named, so a change in one row of a
+  // table with collapsed borders sends that row and not the table. A
+  // table's 1000 rows went whole for one row's class.)
+  var pjDelta = false, pjLast = '', collapseDj = null;
+  function rowDelta(p, out) {
+    if (!p) return out;
+    var f = p.fin;
+    if (!f || f.de !== deltaEpoch || f.json !== out) f = p.fin = { json: out, n: ++deltaSerial, sent: 0, de: deltaEpoch, dj: null };
+    deltaOf(f);
+    return lastDelta;
+  }
   function partsJson(o) {
     var p = o._p;
     if (o._raw === undefined) {
-      if (!o.c || !o.c.length || typeof o.c[0] !== 'object') return JSON.stringify(o);
+      if (o._cmOut !== undefined) { pjLast = pjDelta ? rowDelta(p, o._cmOut) : o._cmOut; return o._cmOut; }
+      if (!o.c || !o.c.length || typeof o.c[0] !== 'object') { var j0 = JSON.stringify(o); pjLast = j0; return j0; }
       var cs0 = o.c; delete o.c;
       // (a row or group's own members are stripped of borders the same way
       // each time its parts are the same)
       var own = p ? p.ownJson || (p.ownJson = JSON.stringify(o)) : JSON.stringify(o);
-      return own.slice(0, -1) + ',"c":[' + cs0.map(partsJson).join(',') + ']}';
+      if (!pjDelta) { var nj = own.slice(0, -1) + ',"c":[' + cs0.map(partsJson).join(',') + ']}'; if (o._cmRec) o._cmRec.out = nj; return nj; }
+      if (o.s && o.s.display === 'table-row') {
+        pjDelta = false;
+        var rj = own.slice(0, -1) + ',"c":[' + cs0.map(partsJson).join(',') + ']}';
+        pjDelta = true;
+        if (o._cmRec) o._cmRec.out = rj;
+        pjLast = rowDelta(p, rj);
+        return rj;
+      }
+      // (a row group is numbered too: the host takes the parts under a
+      // numbered one only)
+      var js = [], ds = [], dm = marks.length;
+      for (var i = 0; i < cs0.length; i++) { js.push(partsJson(cs0[i])); ds.push(pjLast); }
+      var gj = own.slice(0, -1) + ',"c":[' + js.join(',') + ']}';
+      if (!p) { unmark(dm); pjLast = gj; return gj; }
+      var f = p.fin;
+      if (!f || f.de !== deltaEpoch || f.json !== gj) f = p.fin = { json: gj, n: ++deltaSerial, sent: 0, de: deltaEpoch, dj: null };
+      if (f.sent === deltaEpoch) { unmark(dm); pjLast = '{"r":' + f.n + '}'; }
+      else { f.dj = '{"n":' + f.n + ',' + own.slice(1, -1) + ',"c":[' + ds.join(',') + ']}'; deltaOf(f); pjLast = lastDelta; }
+      return gj;
     }
-    if (p && o._key !== undefined && p.clKey === o._key) return p.clOut;
+    if (p && o._key !== undefined && p.clKey === o._key) { pjLast = p.clOut; return p.clOut; }
     var extra = o.c; if (extra) delete o.c;
     var own2 = JSON.stringify(o);
     var raw = o._raw + (extra && extra.length ? (o._raw ? ',' : '') + extra.map(function (k) { return JSON.stringify(k); }).join(',') : '');
     var out = raw ? own2.slice(0, -1) + ',"c":[' + raw + ']}' : own2;
     if (p && o._key !== undefined) { p.clKey = o._key; p.clOut = out; }
+    pjLast = out;
     return out;
   }
   function collapseTable(tbl, kids, json, tcolor, kel) {
     var objs = kids.map(function (k, i) { return typeof k === 'string' ? partsOf(k, kel && kel[i]) : k; });
     var rows = [], cols = [];
+    collapseDj = null;
     var colOf = function (c, grp) { var n = Math.max(1, parseInt(c.a && c.a.span, 10) || 1); for (var q = 0; q < n; q++) cols.push({ col: c, grp: grp }); };
     objs.forEach(function (k) {
       var d = k.s && k.s.display;
@@ -8556,8 +8639,9 @@
     });
     if (!rows.length) return kids;
     // the grid: which cell is at each slot
-    var grid = [], cells = [];
+    var grid = [], cells = [], anySpan = false;
     rows.forEach(function (r, ri) {
+      r.n = 0; r.m = null; r.ok = false;
       grid[ri] = grid[ri] || [];
       var ci = 0;
       (r.row.c || []).forEach(function (c) {
@@ -8565,7 +8649,8 @@
         while (grid[ri][ci]) ci++;
         var cs = Math.max(1, parseInt(c.a && c.a.colspan, 10) || 1), rs = Math.max(1, parseInt(c.a && c.a.rowspan, 10) || 1);
         rs = Math.min(rs, rows.length - ri);
-        var cell = { o: c, r: ri, c: ci, rs: rs, cs: cs, rowo: r };
+        var cell = { o: c, r: ri, c: ci, rs: rs, cs: cs, rowo: r, k: r.n++ };
+        if (rs > 1) anySpan = true;
         cells.push(cell);
         for (var y = 0; y < rs; y++) { grid[ri + y] = grid[ri + y] || []; for (var x = 0; x < cs; x++) grid[ri + y][ci + x] = cell; }
         ci += cs;
@@ -8649,7 +8734,39 @@
     // (a table with a caption draws no border: the table's box holds the
     // caption too, so its outer cells take the outer borders whole)
     var capt = objs.some(function (k) { return k.s && k.s.display === 'table-caption'; });
-    var won = cells.map(function (cell) { return ['left', 'right', 'top', 'bottom'].map(function (sd) { return edge(cell, sd); }); });
+    // A row's borders follow from the row, the rows above and below it,
+    // their groups and the table: while those are the renders they were
+    // (their parts, _p), the borders its cells won and the row's JSON are
+    // as last time (cm, kept with the row's parts). One row's class changed
+    // in a table of 1000 settled four edges of every cell again. Not in a
+    // table with columns or a cell that spans rows.
+    var memoOn = !!json && !cols.length && !anySpan, tsig = '';
+    if (memoOn) {
+      tsig = (capt ? 'c' : '') + ncols + '|' + tc + '|' + tcolor;
+      var ts0 = tbl.s || {};
+      for (var tq = 0; tq < 4; tq++) tsig += '|' + ts0['border-' + SIDES4[tq] + '-style'] + ' ' + ts0['border-' + SIDES4[tq] + '-width'] + ' ' + ts0['border-' + SIDES4[tq] + '-color'];
+      // (a group by its own style, and whether a neighbour is in the same
+      // one: the group is rendered again whenever a row of it is)
+      var NOP = {}, partOf = function (ro) { return ro ? ro.row._p || NOP : null; };
+      var gsOf = function (g) { if (!g) return ''; if (g._gs === undefined) Object.defineProperty(g, '_gs', { value: JSON.stringify(g.s || null), enumerable: false }); return g._gs; };
+      var grpOf = function (ro, of) { return !ro ? '-' : of && ro.grp === of.grp ? '=' : gsOf(ro.grp); };
+      for (var mr = 0; mr < rows.length; mr++) {
+        var ro0 = rows[mr], rp = ro0.row._p;
+        if (!rp) continue;
+        var pv = partOf(rows[mr - 1]), nx0 = partOf(rows[mr + 1]), g0 = grpOf(ro0, null), g1 = grpOf(rows[mr - 1], ro0), g2 = grpOf(rows[mr + 1], ro0);
+        if (pv === NOP || nx0 === NOP) continue;
+        var cm = rp.cm;
+        if (cm && cm.tsig === tsig && cm.prev === pv && cm.next === nx0 && cm.grp === g0 && cm.pg === g1 && cm.ng === g2 && cm.won.length === ro0.n) { ro0.m = cm; ro0.ok = true; }
+        else ro0.m = rp.cm = { tsig: tsig, prev: pv, next: nx0, grp: g0, pg: g1, ng: g2, won: [], out: undefined };
+      }
+    }
+    var won = cells.map(function (cell) {
+      var ro = cell.rowo;
+      if (ro.ok) return ro.m.won[cell.k];
+      var w4 = [edge(cell, 'left'), edge(cell, 'right'), edge(cell, 'top'), edge(cell, 'bottom')];
+      if (ro.m) ro.m.won[cell.k] = w4;
+      return w4;
+    });
     var SD = ['left', 'right', 'top', 'bottom'];
     var outerOf = function (cell, sd) { return (sd === 'left' && cell.c === 0) || (sd === 'right' && cell.c + cell.cs === ncols) || (sd === 'top' && cell.r === 0) || (sd === 'bottom' && cell.r + cell.rs === rows.length); };
     cells.forEach(function (cell, ix) {
@@ -8670,7 +8787,10 @@
       });
     });
     var anyMixed = mixed.left || mixed.right || mixed.top || mixed.bottom;
+    // (a row settled as last time goes out as it did, partsJson)
+    var useOut = function (ro) { return ro.ok && !anyMixed && ro.m.out !== undefined; };
     cells.forEach(function (cell, ix) {
+      if (useOut(cell.rowo)) return;
       // (a cell from its render's parts whose borders won as last time:
       // its JSON as last time, partsJson)
       var p = cell.o._p, key = null;
@@ -8685,7 +8805,12 @@
     });
     // rows, groups and columns draw no borders of their own
     var strip = function (o) { if (!o || !o.s) return; o.s = Object.assign({}, o.s); ['left', 'right', 'top', 'bottom'].forEach(function (sd) { delete o.s['border-' + sd + '-style']; delete o.s['border-' + sd + '-width']; }); };
-    rows.forEach(function (r) { strip(r.row); strip(r.grp); });
+    var stripped = [];
+    rows.forEach(function (r) {
+      if (useOut(r)) Object.defineProperty(r.row, '_cmOut', { value: r.m.out, enumerable: false });
+      else { strip(r.row); if (r.m) { r.m.out = undefined; if (!anyMixed) Object.defineProperty(r.row, '_cmRec', { value: r.m, enumerable: false }); } }
+      if (r.grp && stripped.indexOf(r.grp) < 0) { strip(r.grp); stripped.push(r.grp); }
+    });
     cols.forEach(function (c) { strip(c.col); strip(c.grp); });
     tbl.s = Object.assign({}, tbl.s);
     ['left', 'right', 'top', 'bottom'].forEach(function (sd) {
@@ -8715,7 +8840,11 @@
       if (!s.position || s.position === 'static') s.position = 'relative';
       cell.o.c = (cell.o.c || []).concat(strips);
     });
-    return json ? objs.map(partsJson) : objs;
+    if (!json) return objs;
+    var outs = [], djs = pjDelta ? [] : null;
+    for (var oi = 0; oi < objs.length; oi++) { outs.push(partsJson(objs[oi])); if (djs) djs.push(pjLast); }
+    collapseDj = djs;
+    return outs;
   }
   function anonTables(pd, kids, kd, id, json) {
     if (pd === 'table-row') return anonCells(kids, kd, id, json);
