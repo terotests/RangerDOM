@@ -13,21 +13,22 @@ export async function loadWasmPlayground(url) {
   const view = () => new DataView(memory.buffer);
   const wasi = {
     clock_time_get(_id, _precision, out) {
-      view().setBigUint64(out, BigInt(Math.round((performance.timeOrigin + performance.now()) * 1e6)), true);
+      view().setBigUint64(out >>> 0, BigInt(Math.round((performance.timeOrigin + performance.now()) * 1e6)), true);
       return 0;
     },
     random_get(ptr, len) {
-      crypto.getRandomValues(new Uint8Array(memory.buffer, ptr, len));
+      crypto.getRandomValues(new Uint8Array(memory.buffer, ptr >>> 0, len));
       return 0;
     },
     environ_sizes_get(count, size) {
-      view().setUint32(count, 0, true);
-      view().setUint32(size, 0, true);
+      view().setUint32(count >>> 0, 0, true);
+      view().setUint32(size >>> 0, 0, true);
       return 0;
     },
     environ_get() { return 0; },
     fd_write(fd, iovs, n, written) {
       const v = view();
+      iovs >>>= 0; written >>>= 0;
       let total = 0, text = "";
       for (let i = 0; i < n; i++) {
         const p = v.getUint32(iovs + i * 8, true), l = v.getUint32(iovs + i * 8 + 4, true);
@@ -52,11 +53,12 @@ export async function loadWasmPlayground(url) {
   const put = (s) => {
     const b = enc.encode(String(s));
     if (!b.length) return [0, 0];
-    const p = x.pg_alloc(b.length);
+    // (>>> 0: past 2 GB of memory a pointer comes back negative)
+    const p = x.pg_alloc(b.length) >>> 0;
     new Uint8Array(memory.buffer, p, b.length).set(b);
     return [p, b.length];
   };
-  const out = (n) => (n ? dec.decode(new Uint8Array(memory.buffer, x.pg_out_ptr(), n)) : "");
+  const out = (n) => (n ? dec.decode(new Uint8Array(memory.buffer, x.pg_out_ptr() >>> 0, n)) : "");
 
   // the compiled js/ scripts (build.mjs writes them beside the module):
   // without them, or with ?units=0, every page compiles webapi.js
