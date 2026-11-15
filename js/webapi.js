@@ -9632,7 +9632,7 @@
       marks = [];
       root = (root || 'null') + (whole ? ',"whole":' + whole : '') + ',"d":' + deltaEpoch;
     }
-    return '{"v":' + generation + ',"w":' + JSON.stringify(viewport.w) + ',"h":' + JSON.stringify(viewport.h) + ',"root":' + (root || 'null') + ',"title":' + JSON.stringify(doc.title) + (doc.compatMode === 'BackCompat' ? ',"quirks":true' : '') + (browserFonts ? ',"fm":"browser"' : '') + '}';
+    return '{"v":' + generation + ',"w":' + JSON.stringify(viewport.w) + ',"h":' + JSON.stringify(viewport.h) + ',"root":' + (root || 'null') + ',"title":' + JSON.stringify(doc.title) + (doc.compatMode === 'BackCompat' ? ',"quirks":true' : '') + (browserFonts ? ',"fm":"' + (browserFonts === 'measure' ? 'measure' : 'browser') + '"' : '') + '}';
   }
 
   // ---- input from the host -------------------------------------------------
@@ -11107,7 +11107,9 @@
   // canvas), so a line of Arial has Arial's height, not that of the Open
   // Sans a native host draws for it
   var browserFonts = false;
-  G.__browserFonts = function (on) { browserFonts = !!on; generation++; return String(browserFonts); };
+  // (on "measure": the host also measures the text with the browser, so
+  // the page's own font families go to it, not Arial's metrics)
+  G.__browserFonts = function (on) { browserFonts = on === 'measure' ? 'measure' : !!on; generation++; return String(browserFonts); };
   G.__syncLayout = function (on) { syncLayout = !!on && typeof __hostSync === 'function'; return String(syncLayout); };
   G.__generation = function () { return String(generation); };
   G.__layout = function (json) {

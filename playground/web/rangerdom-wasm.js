@@ -8,7 +8,10 @@
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-export async function loadWasmPlayground(url) {
+// opts.measure(family, text, size, bold): a run's width in the face the
+// painter draws it with (main.js); without it a canvas with the family as
+// given
+export async function loadWasmPlayground(url, opts = {}) {
   let memory = null;
   const view = () => new DataView(memory.buffer);
   const wasi = {
@@ -41,10 +44,22 @@ export async function loadWasmPlayground(url) {
     },
     proc_exit(code) { throw new Error("rangerdom wasm exited (" + code + ")"); },
   };
+  let mctx = null;
+  const measure = opts.measure || ((family, text, size, bold) => {
+    if (!mctx) mctx = (typeof OffscreenCanvas !== "undefined" ? new OffscreenCanvas(1, 1) : document.createElement("canvas")).getContext("2d");
+    mctx.font = `${bold ? "bold " : ""}${size}px ${family}`;
+    return mctx.measureText(text).width;
+  });
+  const rangerdom = {
+    pg_measure(fp, fl, tp, tl, size, bold) {
+      const s = (p, l) => (l ? dec.decode(new Uint8Array(memory.buffer, p >>> 0, l)) : "");
+      return measure(s(fp, fl), s(tp, tl), size, bold !== 0);
+    },
+  };
   const res = await fetch(url);
   const { instance } = typeof WebAssembly.instantiateStreaming === "function" && (res.headers.get("content-type") || "").includes("wasm")
-    ? await WebAssembly.instantiateStreaming(res, { wasi_snapshot_preview1: wasi })
-    : await WebAssembly.instantiate(await res.arrayBuffer(), { wasi_snapshot_preview1: wasi });
+    ? await WebAssembly.instantiateStreaming(res, { wasi_snapshot_preview1: wasi, rangerdom })
+    : await WebAssembly.instantiate(await res.arrayBuffer(), { wasi_snapshot_preview1: wasi, rangerdom });
   const x = instance.exports;
   memory = x.memory;
   if (x._initialize) x._initialize();

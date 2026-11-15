@@ -19,7 +19,7 @@
 //                    case's later steps run in the browser only (default
 //                    5000; 0 runs every step). The JavaScript build of CEr
 //                    is slow, and a 10 000-row step can exhaust the tab.
-import { renderDisplayList } from "./evg-webgl.js";
+import { renderDisplayList, fontSpec } from "./evg-webgl.js";
 import { installCanvasMeasurer } from "./evg-measure.js";
 import { loadWasmPlayground } from "./rangerdom-wasm.js";
 
@@ -532,7 +532,17 @@ $("all").onclick = () => everyCase();
   await document.fonts.ready;
   if (params.get("engine") !== "js") {
     try {
-      Engine = await loadWasmPlayground("rangerdom_pg.wasm");
+      // (the text measured in the font the painter draws it with: the
+      // family DomView gave EVG, ", mfd" its last name, and the weight)
+      const mctx = document.createElement("canvas").getContext("2d");
+      let mfont = "";
+      Engine = await loadWasmPlayground("rangerdom_pg.wasm", {
+        measure(family, text, size, bold) {
+          const f = fontSpec({ font: family + ", mfd", size, weight: bold ? "bold" : "" }, 1);
+          if (f !== mfont) { mctx.font = f; mfont = f; }
+          return mctx.measureText(text).width;
+        },
+      });
       engineName = "WebAssembly";
     } catch (e) {
       console.warn("no WebAssembly engine, using JavaScript:", e);
