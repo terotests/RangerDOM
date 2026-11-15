@@ -227,6 +227,32 @@ impl DomMemoEnt {
     }
 }
 
+/// what a table reads of a row's children to place them, one entry for
+/// each child (DomView.rowInfo): kept by the row's stamp, so a row that a
+/// change left alone is not read again
+#[derive(Clone)]
+pub struct DomRowInfo {
+    /// 0: left out of the grid, 1: absolute or fixed, 2: in a cell
+    pub kinds: Vec<i64>,
+    pub cs: Vec<i64>,
+    pub rs: Vec<i64>,
+    /// a table-cell (tableCols counts these), and its text's length
+    pub tc: Vec<bool>,
+    pub lens: Vec<f64>,
+}
+
+impl DomRowInfo {
+    pub fn new() -> Self {
+        Self {
+            kinds: Vec::new(),
+            cs: Vec::new(),
+            rs: Vec::new(),
+            tc: Vec::new(),
+            lens: Vec::new(),
+        }
+    }
+}
+
 /// the elements built from a page's nodes, by the node's stamp
 /// (JsonValue.stamp): a patched page shares the nodes a change left alone
 /// with the last one, and such a node built in the same surroundings (key:
@@ -275,6 +301,8 @@ pub struct DomMemo {
     /// what it inherits by this number, not by a copy of the text
     inhIds: HashMap<String,i64>,
     inhNext: i64,
+    /// rows' children as a table reads them, by the row's stamp
+    rows: HashMap<String,Rc<RefCell<DomRowInfo>>>,
     pub hits: i64,
     pub misses: i64,
 }
@@ -296,6 +324,7 @@ impl DomMemo {
             stickyOn: HashMap::new(),
             inhIds: HashMap::new(),
             inhNext: 0,
+            rows: HashMap::new(),
             hits: 0,
             misses: 0,
         }
@@ -9477,27 +9506,26 @@ impl DomView {
         // (its cells inherit from it)
         let rinh: Rc<RefCell<JsonValue>> = self.inherit(inh, &row.borrow().get("s"));
         let kids: Rc<RefCell<JsonValue>> = row.borrow().get("c");
+        let info: Rc<RefCell<DomRowInfo>> = self.rowInfo(row);
         let __it_c = kids.borrow().items.clone();
-        for c in __it_c.iter().cloned() {
+        let __n_ci = __it_c.len() as i64;
+        for ci in 0..__n_ci {
+            let c: Rc<RefCell<JsonValue>> = __it_c[ci as usize].clone();
             // (a box that is not a table part is in a cell of its own,
             // CSS 2.1 17.2.1; misplaced table parts are left out)
-            let cd: String = DomView::displayOf(&c);
-            let cpos: String = c.borrow().get("s").borrow().getText("position");
-            if self.isText(&c) || cd == "none" {
+            let kind: i64 = info.borrow().kinds[ci as usize];
+            if kind == 0 {
                 continue;
             }
-            if cpos == "absolute" || cpos == "fixed" {
+            if kind == 1 {
                 self.tableItem(&c, &rinh, "auto".to_string(), "auto".to_string());
-                continue;
-            }
-            if cd != "table-cell" && cd.starts_with("table-") {
                 continue;
             }
             while DomView::occHas(occ, r, col) {
                 col += 1;
             }
-            let cs: i64 = DomView::spanOf(&c);
-            let rs: i64 = DomView::rowSpanOf(&c);
+            let cs: i64 = info.borrow().cs[ci as usize];
+            let rs: i64 = info.borrow().rs[ci as usize];
             // (only the rows under this one need to know: a cell of one
             // row leaves no mark, which keeps a long table's list short)
             let mut rr: i64 = r + 1;
@@ -9523,7 +9551,57 @@ impl DomView {
         }
         last
     }
+    /// a row's children as the table places them (DomRowInfo): read once
+    /// for a row, by its stamp, while the memo is on
+    fn rowInfo(&self, row: &Rc<RefCell<JsonValue>>) -> Rc<RefCell<DomRowInfo>> {
+        let memo: Rc<RefCell<DomMemo>> = Rc::clone(&self.svgs.borrow().memo);
+        let on: bool = memo.borrow().on;
+        let mut sk: String = String::new();
+        if on {
+            sk = self.stampOf(row);
+            if memo.borrow().rows.contains_key(&sk) {
+                return memo.borrow().rows.get(&sk).cloned().unwrap();
+            }
+        }
+        let info: Rc<RefCell<DomRowInfo>> = Rc::new(RefCell::new(DomRowInfo::new()));
+        let kids: Rc<RefCell<JsonValue>> = row.borrow().get("c");
+        let __it_c = kids.borrow().items.clone();
+        for c in __it_c.iter().cloned() {
+            let cd: String = DomView::displayOf(&c);
+            let cpos: String = c.borrow().get("s").borrow().getText("position");
+            let mut kind: i64 = 2;
+            if self.isText(&c) || cd == "none" {
+                kind = 0;
+            } else if cpos == "absolute" || cpos == "fixed" {
+                kind = 1;
+            } else if cd != "table-cell" && cd.starts_with("table-") {
+                kind = 0;
+            }
+            let cs: i64 = DomView::spanOf(&c);
+            let mut __len: f64 = 0.0;
+            if cd == "table-cell" && cs == 1 {
+                let _tmp_2 = DomView::collapse(&self.textOf(&c));
+                __len = ((DomView::trimmed(&_tmp_2).as_bytes().len() as i64)) as f64;
+            }
+            info.borrow_mut().kinds.push(kind);
+            info.borrow_mut().cs.push(cs);
+            info.borrow_mut().rs.push(DomView::rowSpanOf(&c));
+            info.borrow_mut().tc.push(cd == "table-cell");
+            info.borrow_mut().lens.push(__len);
+        }
+        if on {
+            // (rows that are gone stay until the map is let go whole)
+            if memo.borrow().rows.len() > 60000 {
+                memo.borrow_mut().rows = HashMap::new();
+            }
+            memo.borrow_mut().rows.insert(sk, Rc::clone(&info));
+        }
+        info
+    }
     fn occHas(occ: &Vec<String>, r: i64, c: i64) -> bool {
+        if occ.is_empty() {
+            return false;
+        }
         let k: String = format!("{}:{}", r, c);
         for o in occ.iter().cloned() {
             if o == k {
@@ -9548,19 +9626,18 @@ impl DomView {
         let rows: Vec<Rc<RefCell<JsonValue>>> = DomView::rowsOf(table);
         for r in rows.iter().cloned() {
             let mut col: i64 = 0;
-            let kids: Rc<RefCell<JsonValue>> = r.borrow().get("c");
-            let __it_c = kids.borrow().items.clone();
-            for c in __it_c.iter().cloned() {
-                if DomView::displayOf(&c) != "table-cell" {
+            let info: Rc<RefCell<DomRowInfo>> = self.rowInfo(&r);
+            let __n_ci = info.borrow().tc.len() as i64;
+            for ci in 0..__n_ci {
+                if !info.borrow().tc[ci as usize] {
                     continue;
                 }
-                let span: i64 = DomView::spanOf(&c);
+                let span: i64 = info.borrow().cs[ci as usize];
                 while (w.len() as i64) < col + span {
                     w.push(4.0);
                 }
                 if span == 1 {
-                    let _tmp_2 = DomView::collapse(&self.textOf(&c));
-                    let mut __len: f64 = ((DomView::trimmed(&_tmp_2).as_bytes().len() as i64)) as f64;
+                    let mut __len: f64 = info.borrow().lens[ci as usize];
                     if __len > 60.0 {
                         __len = 60.0;
                     }
@@ -10032,9 +10109,11 @@ impl DomView {
             }
             if !text && !end {
                 let d: String = DomView::displayOf(&kid);
-                let kinh: Rc<RefCell<JsonValue>> = self.inherit(&iinh,
-                    &kid.borrow().get("s")
-                );
+                // (what the child inherits is made when it is built, or when
+                // a grid asks for its baseline: a kept child needs neither,
+                // and 4 000 kept table cells made 4 000 of these a frame)
+                let mut kinh: Rc<RefCell<JsonValue>> = Rc::clone(&iinh);
+                let mut kinh_made: bool = false;
                 let was_flex: bool = self.inFlex;
                 let was_outer: Rc<RefCell<JsonValue>> = self.outerS.clone().clone();
                 if d == "list-item" {
@@ -10093,6 +10172,8 @@ impl DomView {
                         }
                         memo.borrow_mut().begin(kid.borrow().stamp);
                     }
+                    kinh = self.inherit(&iinh, &kid.borrow().get("s"));
+                    kinh_made = true;
                     ke = self.element(&kid, kinh.clone());
                     if mon {
                         memo.borrow_mut().end();
@@ -10103,11 +10184,19 @@ impl DomView {
                     }
                 }
                 if tbl && k < (flat_row.len() as i64) {
-                    EVGElement::set_attribute(&ke, "grid-row", flat_row[k as usize].clone());
-                    EVGElement::set_attribute(&ke, "grid-column", flat_col[k as usize].clone());
+                    // (the members themselves: set_attribute finds a name
+                    // by comparing it with every one before it)
+                    ke.borrow_mut().grid_row = flat_row[k as usize].clone();
+                    ke.borrow_mut().grid_column = flat_col[k as usize].clone();
                 }
                 self.inTransform = was_tr;
-                self.parallelBaseline(Rc::clone(&ke), &kid, &kinh);
+                let pod: String = self.outerS.borrow().getText("display");
+                if pod == "grid" || pod == "inline-grid" {
+                    if !kinh_made {
+                        kinh = self.inherit(&iinh, &kid.borrow().get("s"));
+                    }
+                    self.parallelBaseline(Rc::clone(&ke), &kid, &kinh);
+                }
                 self.inFlex = was_flex;
                 self.outerS = was_outer.clone();
                 let pos: String = kid.borrow().get("s").borrow().getText("position");
