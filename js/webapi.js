@@ -3582,7 +3582,10 @@
     select() { if (!hasSelectionApi(this) && !/^(email|number|date|month|week|time|datetime-local|color)$/.test(this.type)) return; this._ss = 0; this._se = this.value.length; this._sd = 'none'; selectionChanged(this); }
     setSelectionRange(s, e, d) { selectionGuard(this); setSelection(this, s, e, d); }
     setRangeText(t, s, e, mode) { selectionGuard(this); rangeText(this, t, s, e, mode); }
-    showPicker() {}
+    showPicker() {
+      if (this.disabled || this.readOnly) throw new DOMException("Failed to execute 'showPicker' on 'HTMLInputElement': HTMLInputElement::showPicker() cannot be used on immutable controls.", 'InvalidStateError');
+      if (this.type === 'file') askFiles(this); else popOpen(this);
+    }
     stepUp(n) { stepValue(this, n === undefined ? 1 : +n); }
     stepDown(n) { stepValue(this, -(n === undefined ? 1 : +n)); }
   }
@@ -4428,6 +4431,7 @@
       var l = n.localName;
       if (l === 'input') {
         var t = n.type;
+        if (t === 'file' && !n.disabled) { askFiles(n); return; }
         if (t === 'submit' || t === 'image') submitForm(n);
         else if (t === 'reset') { var rf = n.form; if (rf) rf.reset(); }
         return;
@@ -4478,7 +4482,7 @@
       items.push(it);
     }
     (doc.body || doc.documentElement).appendChild(box);
-    picker = { sel: sel, box: box, items: items, at: sel.selectedIndex };
+    picker = { sel: sel, box: box, items: items, at: sel.selectedIndex, kind: 'select' };
     pickerMark(picker.at);
   }
   function pickerMark(i) {
@@ -4495,14 +4499,322 @@
     picker = null;
   }
   function pickerChoose(i) {
-    if (!picker) return;
+    if (!picker || picker.kind !== 'select') { pickerClose(); return; }
     var sel = picker.sel, o = sel.options[i];
     pickerClose();
     if (o && !o.disabled && sel.selectedIndex !== i) { sel.selectedIndex = i; fireChange(sel); }
   }
   function pickerItemOf(t) {
-    for (var n = t; n && n.nodeType === 1; n = n.parentNode) if (n._pickIndex !== undefined && picker && n.parentNode === picker.box) return n;
+    for (var n = t; n && n.nodeType === 1; n = n.parentNode) if ((n._pickIndex !== undefined || n._pickAct) && picker && picker.box.contains(n)) return n;
     return null;
+  }
+  // ---- the pickers of the input types a browser draws itself ---------------
+  // (date, datetime-local, week, month: a calendar; time: hour, minute and
+  // AM/PM columns; color: swatches), as Chromium opens them on a press: a
+  // box under the field over the page, en-US as the field shows its value,
+  // closed by a choice that ends it, a press elsewhere or Escape
+  var POP_BLUE = 'rgb(26, 115, 232)';
+  function popOpen(ctl) {
+    var t = ctl.type;
+    if (t === 'date' || t === 'datetime-local' || t === 'week' || t === 'month') calOpen(ctl);
+    else if (t === 'time') timeOpen(ctl);
+    else if (t === 'color') colorOpen(ctl);
+  }
+  function popBox(ctl, w) {
+    pickerClose();
+    var r = ctl.getBoundingClientRect();
+    var box = doc.createElement('div');
+    box.setAttribute('data-rd-picker', '');
+    box.style.cssText = 'position:fixed;z-index:2147483647;box-sizing:border-box;background:#fff;border:1px solid #c6c6c6;border-radius:4px;' +
+      'box-shadow:0 2px 8px rgba(0,0,0,.25);color:#000;font:13px Arial,sans-serif;line-height:normal;white-space:nowrap;text-align:left;' +
+      'left:' + Math.round(r.left) + 'px;top:' + Math.round(r.bottom + 1) + 'px;' + (w ? 'width:' + w + 'px;' : '');
+    (doc.body || doc.documentElement).appendChild(box);
+    picker = { sel: ctl, box: box, items: [], at: -1, kind: ctl.type };
+    return box;
+  }
+  function popEl(parent, css, text, act) {
+    var e = doc.createElement('div');
+    if (css) e.style.cssText = css;
+    if (text !== undefined) e.textContent = text;
+    if (act) e._pickAct = act;
+    parent.appendChild(e);
+    return e;
+  }
+  function popClear(box) { while (box.firstChild) box.removeChild(box.firstChild); }
+  // the control's value set as a choice in its picker sets it
+  function popSet(ctl, v, close) {
+    if (close) pickerClose();
+    if (ctl.value !== v) { ctl.value = v; fireChange(ctl); }
+  }
+  function popToday() { var d = new Date(); return { y: d.getFullYear(), m: d.getMonth(), d: d.getDate(), h: d.getHours(), mi: d.getMinutes() }; }
+  function ymd(y, m, d) { return pad(y, 4) + '-' + pad(m + 1, 2) + '-' + pad(d, 2); }
+  function popRange(ctl) {
+    var t = ctl.type, mn = ctl.getAttribute('min') || '', mx = ctl.getAttribute('max') || '';
+    // (a datetime-local's bounds: their dates; a week's: a day of it)
+    var day = function (s) { if (t === 'datetime-local') return s.split('T')[0]; if (t === 'week' && s) { var tmp = { type: 'week', value: s }; var n = valueAsNumberOf(tmp); return isNaN(n) ? '' : formatNumberValue({ type: 'date' }, n); } return s; };
+    return [day(mn), day(mx)];
+  }
+  // a calendar: the month shown (picker.view), its days, today's outline,
+  // the chosen day (or week) on blue; the title's ▾ shows the months of a
+  // year (and a month field shows nothing else)
+  function calOpen(ctl) {
+    var t = ctl.type, v = ctl.value, td = popToday(), y = td.y, m = td.m;
+    if (v) {
+      if (t === 'week') { var wd = new Date(valueAsNumberOf(ctl)); y = wd.getUTCFullYear(); m = wd.getUTCMonth(); }
+      else { var p = v.split('T')[0].split('-'); y = +p[0]; m = +p[1] - 1; }
+    }
+    popBox(ctl, t === 'datetime-local' ? 420 : t === 'week' ? 296 : t === 'month' ? 250 : 266);
+    picker.view = { y: y, m: m, months: t === 'month' };
+    calDraw();
+  }
+  function calDraw() {
+    var p = picker, ctl = p.sel, t = ctl.type, vw = p.view, box = p.box;
+    popClear(box);
+    var row = popEl(box, 'display:flex;align-items:stretch');
+    var cal = popEl(row, 'flex:1 1 auto;padding:8px 10px 6px');
+    var head = popEl(cal, 'display:flex;align-items:center;height:30px;margin-bottom:4px');
+    var title = vw.months ? String(vw.y) : MONTHS[vw.m] + ' ' + vw.y;
+    popEl(head, 'flex:1 1 auto;font-weight:bold;font-size:15px;padding-left:4px', title + (t === 'month' ? '' : ' ▾'), t === 'month' ? null : function () { vw.months = !vw.months; calDraw(); });
+    var step = function (k) { return function () { if (vw.months) vw.y += k; else { vw.m += k; if (vw.m < 0) { vw.m = 11; vw.y--; } else if (vw.m > 11) { vw.m = 0; vw.y++; } } calDraw(); }; };
+    popEl(head, 'width:30px;text-align:center;font-size:20px', '↑', step(-1));
+    popEl(head, 'width:30px;text-align:center;font-size:20px', '↓', step(1));
+    var lim = popRange(ctl), td = popToday(), v = ctl.value;
+    if (vw.months) {
+      // the months of the year shown
+      var grid = popEl(cal, 'display:grid;grid-template-columns:repeat(4,1fr);gap:4px;padding:4px 0');
+      var cur = t === 'month' ? v : v ? v.slice(0, 7) : '';
+      for (var mi = 0; mi < 12; mi++) {
+        var key = pad(vw.y, 4) + '-' + pad(mi + 1, 2), on = key === cur;
+        var off = (lim[0] && key < lim[0].slice(0, 7)) || (lim[1] && key > lim[1].slice(0, 7));
+        popEl(grid, 'height:34px;line-height:34px;text-align:center;border-radius:3px;' + (on ? 'background:' + POP_BLUE + ';color:#fff;font-weight:bold;' : off ? 'color:#bbb;' : ''),
+          MONTHS[mi].slice(0, 3), off ? null : (function (k, mm) { return function () { if (t === 'month') popSet(ctl, k, true); else { vw.m = mm; vw.months = false; calDraw(); } }; })(key, mi));
+      }
+    } else {
+      // the days: weeks from Sunday (a week field's from Monday, its number first)
+      var iso = t === 'week', cols = iso ? 8 : 7;
+      var grid2 = popEl(cal, 'display:grid;grid-template-columns:repeat(' + cols + ',1fr);row-gap:2px');
+      var names = iso ? ['', 'M', 'T', 'W', 'T', 'F', 'S', 'S'] : ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+      for (var ni = 0; ni < names.length; ni++) popEl(grid2, 'height:28px;line-height:28px;text-align:center;font-weight:bold' + (iso && !ni ? ';color:#777;font-weight:normal' : ''), names[ni]);
+      var first = new Date(Date.UTC(vw.y, vw.m, 1)).getUTCDay(), lead = iso ? (first + 6) % 7 : first;
+      var start = Date.UTC(vw.y, vw.m, 1) - lead * 86400000;
+      var chosenDay = t === 'date' ? v : t === 'datetime-local' ? v.split('T')[0] : '';
+      var chosenWeek = t === 'week' ? v : '';
+      for (var w = 0; w < 6; w++) {
+        var wk = formatNumberValue({ type: 'week' }, start + w * 7 * 86400000);
+        if (iso) popEl(grid2, 'height:30px;line-height:30px;text-align:center;color:#777;font-size:11px', String(+wk.split('W')[1]));
+        for (var dd = 0; dd < 7; dd++) {
+          var at = new Date(start + (w * 7 + dd) * 86400000), Y = at.getUTCFullYear(), M = at.getUTCMonth(), D = at.getUTCDate(), key2 = ymd(Y, M, D);
+          var inMonth = M === vw.m, isToday = Y === td.y && M === td.m && D === td.d;
+          var sel = key2 === chosenDay || (chosenWeek && wk === chosenWeek);
+          var out = (lim[0] && key2 < lim[0]) || (lim[1] && key2 > lim[1]);
+          var css = 'height:30px;line-height:28px;text-align:center;box-sizing:border-box;border:1px solid transparent;border-radius:3px;';
+          if (sel) css += 'background:' + POP_BLUE + ';color:#fff;font-weight:bold;';
+          else if (out) css += 'color:#c8c8c8;';
+          else if (!inMonth) css += 'color:#767676;';
+          if (isToday && !sel) css += 'border-color:#767676;';
+          popEl(grid2, css, String(D), out ? null : (function (k, wkey) { return function () { calPick(k, wkey); }; })(key2, wk));
+        }
+      }
+    }
+    // Clear and Today (This week, This month)
+    var foot = popEl(cal, 'display:flex;justify-content:space-between;padding:6px 4px 2px;color:' + POP_BLUE);
+    popEl(foot, '', 'Clear', function () { popSet(ctl, '', true); });
+    popEl(foot, '', t === 'week' ? 'This week' : t === 'month' ? 'This month' : 'Today', function () {
+      var tn = popToday(), tk = ymd(tn.y, tn.m, tn.d);
+      if (t === 'month') popSet(ctl, tk.slice(0, 7), true);
+      else calPick(tk, formatNumberValue({ type: 'week' }, Date.UTC(tn.y, tn.m, tn.d)));
+    });
+    // a datetime-local's time: the clock's columns beside the calendar
+    if (t === 'datetime-local') { var side = popEl(row, 'border-left:1px solid #e0e0e0;display:flex'); clockColumns(side, ctl); }
+  }
+  function calPick(day, week) {
+    var ctl = picker.sel, t = ctl.type;
+    if (t === 'date') popSet(ctl, day, true);
+    else if (t === 'week') popSet(ctl, week, true);
+    else if (t === 'datetime-local') {
+      var tm = ctl.value ? ctl.value.split('T')[1] : (function () { var n = popToday(); return pad(n.h, 2) + ':' + pad(n.mi, 2); })();
+      popSet(ctl, day + 'T' + tm, false);
+      var p = day.split('-');
+      picker.view.y = +p[0]; picker.view.m = +p[1] - 1;
+      calDraw();
+    }
+  }
+  // a time's columns: hours 01-12, minutes, AM/PM, each scrolled to the
+  // chosen one; a press sets that part and leaves the picker open
+  function timeOpen(ctl) {
+    var box = popBox(ctl, 3 * 62 + 2);
+    var row = popEl(box, 'display:flex');
+    clockColumns(row, ctl);
+  }
+  var CLOCK_ROW = 32;
+  function clockParts(ctl) {
+    var v = ctl.type === 'datetime-local' ? (ctl.value.split('T')[1] || '') : ctl.value, m = TIME_RE.exec(v);
+    if (!m) return null;
+    return { h: +m[1], mi: +m[2], rest: v.slice(5) };
+  }
+  function clockColumns(row, ctl) {
+    var cols = [], parts = clockParts(ctl);
+    var col = function (labels, which) {
+      var c = popEl(row, 'width:56px;height:' + (CLOCK_ROW * 7) + 'px;overflow-y:auto;scrollbar-width:none;padding:4px 3px;box-sizing:content-box');
+      var cells = [];
+      for (var i = 0; i < labels.length; i++) cells.push(popEl(c, 'height:' + (CLOCK_ROW - 2) + 'px;line-height:' + (CLOCK_ROW - 2) + 'px;margin-bottom:2px;text-align:center;border-radius:3px;font-size:15px', labels[i], (function (k) { return function () { clockSet(ctl, which, k); }; })(i)));
+      cols.push({ el: c, cells: cells, which: which });
+    };
+    var hrs = [], mins = [];
+    for (var h = 1; h <= 12; h++) hrs.push(pad(h, 2));
+    for (var mm = 0; mm < 60; mm++) mins.push(pad(mm, 2));
+    col(hrs, 'h'); col(mins, 'm'); col(['AM', 'PM'], 'ap');
+    picker.clock = cols;
+    clockMark(ctl, true);
+  }
+  function clockMark(ctl, scroll) {
+    var parts = clockParts(ctl), cols = picker && picker.clock;
+    if (!cols) return;
+    for (var ci = 0; ci < cols.length; ci++) {
+      var c = cols[ci], at = -1;
+      if (parts) at = c.which === 'h' ? (parts.h % 12 || 12) - 1 : c.which === 'm' ? parts.mi : parts.h < 12 ? 0 : 1;
+      for (var k = 0; k < c.cells.length; k++) {
+        c.cells[k].style.backgroundColor = k === at ? POP_BLUE : '';
+        c.cells[k].style.color = k === at ? '#fff' : '';
+        c.cells[k].style.fontWeight = k === at ? 'bold' : '';
+      }
+      if (scroll && at >= 0 && c.which !== 'ap') c.el.scrollTop = at * CLOCK_ROW;
+    }
+  }
+  function clockSet(ctl, which, k) {
+    var p = clockParts(ctl) || { h: 0, mi: 0, rest: '' }, h = p.h, mi = p.mi;
+    if (which === 'h') h = (k + 1) % 12 + (h >= 12 ? 12 : 0);
+    else if (which === 'm') mi = k;
+    else h = h % 12 + (k ? 12 : 0);
+    var tm = pad(h, 2) + ':' + pad(mi, 2) + p.rest;
+    if (ctl.type === 'datetime-local') {
+      var day = ctl.value ? ctl.value.split('T')[0] : (function () { var n = popToday(); return ymd(n.y, n.m, n.d); })();
+      popSet(ctl, day + 'T' + tm, false);
+    } else popSet(ctl, tm, false);
+    clockMark(ctl, false);
+  }
+  // a color's swatches, the chosen one outlined, and its hex value
+  var SWATCHES = ['#000000', '#434343', '#666666', '#999999', '#b7b7b7', '#cccccc', '#efefef', '#ffffff',
+    '#980000', '#ff0000', '#ff9900', '#ffff00', '#00ff00', '#00ffff', '#4a86e8', '#0000ff',
+    '#9900ff', '#ff00ff', '#e6b8af', '#f4cccc', '#fce5cd', '#fff2cc', '#d9ead3', '#d0e0e3',
+    '#c9daf8', '#cfe2f3', '#d9d2e9', '#ead1dc', '#dd7e6b', '#ea9999', '#f9cb9c', '#ffe599',
+    '#b6d7a8', '#a2c4c9', '#a4c2f4', '#9fc5e8', '#b4a7d6', '#d5a6bd', '#cc4125', '#e06666',
+    '#3366cc', '#3c78d8', '#6aa84f', '#45818e', '#1155cc', '#674ea7', '#a61c00', '#85200c'];
+  function colorOpen(ctl) {
+    var box = popBox(ctl, 8 * 22 + 7 * 4 + 22);
+    var grid = popEl(box, 'display:grid;grid-template-columns:repeat(8,22px);gap:4px;padding:10px');
+    for (var i = 0; i < SWATCHES.length; i++) {
+      var on = SWATCHES[i] === ctl.value;
+      popEl(grid, 'width:22px;height:22px;box-sizing:border-box;border-radius:2px;background:' + SWATCHES[i] + ';border:' + (on ? '2px solid #000' : '1px solid rgba(0,0,0,.2)'), undefined, (function (c) { return function () { popSet(ctl, c, true); }; })(SWATCHES[i]));
+    }
+    var foot = popEl(box, 'display:flex;align-items:center;gap:8px;padding:0 10px 10px');
+    popEl(foot, 'width:34px;height:22px;border:1px solid #999;box-sizing:border-box;background:' + ctl.value);
+    popEl(foot, 'font:13px monospace', ctl.value.toUpperCase());
+  }
+  // a range's thumb follows a press and a drag: the value at x, snapped
+  // to the step, an input event at each change and change at the release
+  // (the thumb 16px wide, Chromium's, its centre on the value)
+  var rangeDrag = null;
+  function rangeAt(el, x) {
+    var r = el.getBoundingClientRect(), b = rangeBounds(el), f = r.width > 16 ? (x - r.left - 8) / (r.width - 16) : 0;
+    f = Math.max(0, Math.min(1, f));
+    var was = el.value;
+    el.value = String(b[0] + f * (b[1] - b[0]));
+    if (el.value !== was) dispatch(el, new InputEvent('input', { bubbles: true, composed: true }));
+  }
+  // a list box (select multiple, or size > 1): the option under a press,
+  // by its line; Ctrl (Cmd) toggles it, Shift selects from the last one
+  // pressed, else it alone is selected
+  function listPress(el, m) {
+    var r = el.getBoundingClientRect(), e = edgesOf(el), cs = computedOf(el);
+    var fs = parseFloat(cs['font-size']) || 13.333, lh = parseFloat(cs['line-height']);
+    if (!(lh > 0)) lh = Math.round(fs * 1.15);
+    var i = Math.floor((m.y - r.top - e.bt - e.pt + (el.scrollTop || 0)) / lh), opts = el.options;
+    if (i < 0 || i >= opts.length || opts[i].disabled) return;
+    var before = opts.map(function (o) { return o.selected; }).join();
+    if (el.multiple && (m.ctrl || m.meta)) { opts[i].selected = !opts[i].selected; el._anchor = i; }
+    else if (el.multiple && m.shift && el._anchor !== undefined) {
+      var a = Math.min(el._anchor, i), z = Math.max(el._anchor, i);
+      for (var k = 0; k < opts.length; k++) opts[k].selected = k >= a && k <= z && !opts[k].disabled;
+    } else {
+      for (var k2 = 0; k2 < opts.length; k2++) opts[k2].selected = k2 === i;
+      el._anchor = i;
+    }
+    if (opts.map(function (o) { return o.selected; }).join() !== before) fireChange(el);
+  }
+  // an editing host's caret: where a press puts it (the text offset
+  // nearest x in the element pressed), and the box drawn for it over the
+  // page while the host has focus and the selection is a caret in it
+  function editPress(t, m) {
+    var host = t;
+    while (host && host.nodeType === 1 && !(host.isContentEditable && (!host.parentNode || host.parentNode.nodeType !== 1 || !host.parentNode.isContentEditable))) host = host.parentNode;
+    if (!host || host.nodeType !== 1) return;
+    var c = caretIn(t, m.x) || caretIn(host, m.x);
+    if (c) selection.collapse(c[0], c[1]);
+    else { var rr = new Range(doc); rr.selectNodeContents(t); rr.collapse(false); selection.addRange(rr); }
+    changed();
+  }
+  var caretDrawn = null;
+  function editCaretBox() {
+    var el = doc && doc._active;
+    if (!el || el.nodeType !== 1 || !el.isContentEditable || !el.isConnected || !selection._ranges.length) return null;
+    var r = selection._ranges[0];
+    if (!r.collapsed || !el.contains(r.startContainer)) return null;
+    var p = pointX(r.startContainer, r.startOffset);
+    if (!p) return null;
+    var tp = r.startContainer.nodeType === 3 ? r.startContainer.parentNode : r.startContainer;
+    if (!tp || tp.nodeType !== 1 || !boxes[tp.__id]) return null;
+    var cs = computedOf(tp), e = edgesOf(tp), rr = rectOf(tp);
+    var fs = parseFloat(cs['font-size']) || 16, lh = parseFloat(cs['line-height']);
+    if (!(lh > 0)) lh = fs * 1.15;
+    var h = Math.round(Math.min(lh, fs * 1.2)), top = rr.top + e.bt + e.pt + Math.max(0, (lh - h) / 2);
+    var col = cs['caret-color'] && cs['caret-color'] !== 'auto' ? cs['caret-color'] : cs.color || '#000';
+    return { i: 'rdcaret', t: 'div', s: { display: 'block', position: 'fixed', left: Math.round(p.x) + 'px', top: Math.round(top) + 'px', width: '1px', height: h + 'px', 'background-color': col } };
+  }
+  // the caret moved by Left, Right, Home and End: through the host's text
+  function editMove(host, k, shift) {
+    var texts = [];
+    (function walk(n) { for (var i = 0; i < n._c.length; i++) { var c = n._c[i]; if (c.nodeType === 3) texts.push(c); else if (c.nodeType === 1) walk(c); } })(host);
+    if (!texts.length) return;
+    var r = selection._ranges[0], at = 0, total = 0, pos = -1;
+    for (var i = 0; i < texts.length; i++) { if (r && texts[i] === r.endContainer) pos = total + r.endOffset; total += texts[i].data.length; }
+    if (pos < 0) pos = total;
+    var to = k === 'Home' ? 0 : k === 'End' ? total : k === 'ArrowLeft' ? pos - 1 : pos + 1;
+    to = Math.max(0, Math.min(total, to));
+    for (var j = 0; j < texts.length; j++) {
+      var len = texts[j].data.length;
+      if (to <= at + len || j === texts.length - 1) { selection.collapse(texts[j], to - at); break; }
+      at += len;
+    }
+    changed();
+  }
+  // a file field's chooser is the host's: it is asked for files
+  // ({tag: "pick-file", id, multiple, accept}) and answers with __setFiles
+  function askFiles(el) {
+    if (typeof G.__post === 'function') G.__post({ tag: 'pick-file', id: el.__id, multiple: el.hasAttribute('multiple'), accept: el.getAttribute('accept') || '' });
+  }
+  // a text field's caret at a press: the offset nearest x (a textarea's on
+  // the line at y), as its text is drawn from the content box's left
+  function fieldPress(el, m) {
+    var v = el.type === 'password' ? el.value.replace(/./g, '\u2022') : el.value;
+    var r = el.getBoundingClientRect(), e = edgesOf(el), cs = computedOf(el);
+    var fs = parseFloat(cs['font-size']) || 13.333, w8 = cs['font-weight'] || '400';
+    var lineStart = 0, line = v;
+    if (el.localName === 'textarea') {
+      var lh = parseFloat(cs['line-height']);
+      if (!(lh > 0)) lh = Math.round(fs * 1.15);
+      var lines = v.split('\n'), li = Math.max(0, Math.min(lines.length - 1, Math.floor((m.y - r.top - e.bt - e.pt + (el.scrollTop || 0)) / lh)));
+      for (var q = 0; q < li; q++) lineStart += lines[q].length + 1;
+      line = lines[li];
+    }
+    var x0 = r.left + e.bl + e.pl - (el.scrollLeft || 0), best = 0, bestD = Infinity;
+    for (var o = 0; o <= line.length; o++) {
+      var d = Math.abs(x0 + canvasTextWidth(line.slice(0, o), { size: fs, weight: w8 }) - m.x);
+      if (d < bestD) { bestD = d; best = o; }
+    }
+    if (m.shift && doc._active === el) selectRange(el, el._sd === 'backward' ? el._se : el._ss, lineStart + best);
+    else { el._ss = el._se = lineStart + best; el._sd = 'none'; }
+    changed();
   }
   function submitForm(btn) {
     var f = btn.form;
@@ -4935,7 +5247,20 @@
   // with the text before node in el
   function textFrame(el) {
     var r = boxes[el.__id] ? rectOf(el) : estimatedRect(el), e = edgesOf(el);
-    return { x: r.left + e.bl + e.pl, y: r.top, w: Math.max(0, r.width - e.bx - e.px), h: r.height, mono: monospaced(el), text: el.textContent || '' };
+    var cs = computedOf(el);
+    return { x: r.left + e.bl + e.pl, y: r.top, w: Math.max(0, r.width - e.bx - e.px), h: r.height, mono: monospaced(el), text: el.textContent || '', fs: parseFloat(cs['font-size']) || 16, align: cs['text-align'] || 'start', weight: cs['font-weight'] || '400' };
+  }
+  // the x of the text before a point: its own width when the text fits on
+  // its line (where text-align puts it), else its share of the line
+  function textX(f, before) {
+    var px = function (s) { return f.mono ? s.length * f.fs * 0.6 : canvasTextWidth(s, { size: f.fs, weight: f.weight }); };
+    var all = px(f.text);
+    if (all <= f.w + 0.5) {
+      var lead = f.align === 'center' ? (f.w - all) / 2 : f.align === 'right' || f.align === 'end' ? f.w - all : 0;
+      return f.x + lead + px(before);
+    }
+    var a2 = textWidthOf(f.text, f);
+    return f.x + (a2 ? f.w * textWidthOf(before, f) / a2 : 0);
   }
   function textWidthOf(s, f) { return f.mono ? s.length : canvasTextWidth(s, { size: 1000, weight: '400' }); }
   function textBefore(el, node, offset) {
@@ -4954,8 +5279,8 @@
     if (container.nodeType === 3) {
       var el = textParent(container);
       if (!el) return null;
-      var f = textFrame(el), all = textWidthOf(f.text, f);
-      return { x: f.x + (all ? f.w * textWidthOf(textBefore(el, container, offset), f) / all : 0), y: f.y, h: f.h };
+      var f = textFrame(el);
+      return { x: textX(f, textBefore(el, container, offset)), y: f.y, h: f.h };
     }
     if (container.nodeType !== 1 || !boxes[container.__id]) return null;
     var kids = container._c, r;
@@ -4976,7 +5301,7 @@
     for (var t = 0; t < texts.length; t++) {
       var d = texts[t].data;
       for (var o = 0; o <= d.length; o++) {
-        var px = f.x + (all ? f.w * textWidthOf(before + d.slice(0, o), f) / all : 0), dist = Math.abs(px - x);
+        var px = textX(f, before + d.slice(0, o)), dist = Math.abs(px - x);
         if (dist < bestD) { bestD = dist; best = [texts[t], o]; }
       }
       before += d;
@@ -10595,8 +10920,11 @@
     marks = []; deltaOff = 0;
     var root = renderJson(doc.documentElement, null);
     var rk = doc.documentElement._rj, dmr = marks.length, topsJson = '';
+    // an editing host's caret, over everything (the top layer's place)
+    var cb = editCaretBox();
+    caretDrawn = cb ? JSON.stringify(cb) : null;
     // the top layer's boxes after everything else, children of the root
-    if (root && topLayer.length) {
+    if (root && (topLayer.length || cb)) {
       var rcs = computedOf(doc.documentElement), tops = [];
       for (var ti = 0; ti < topLayer.length; ti++) {
         var te = topLayer[ti];
@@ -10608,6 +10936,7 @@
         topNow = null;
         if (tr) { var to = typeof tr === 'string' ? JSON.parse(tr) : tr; to.tl = 1; tops.push(JSON.stringify(to)); }
       }
+      if (cb) { cb.tl = 1; tops.push(JSON.stringify(cb)); }
       // (a top layer box goes whole each time, with what is under it)
       unmark(dmr);
       if (tops.length) {
@@ -10672,7 +11001,8 @@
     // a press, release or key is a user gesture (window.open may follow)
     if ((t === 'down' || t === 'up' || t === 'key') && typeof G.__activate === 'function') G.__activate();
     if (t === 'move') {
-      if (picker && target) { var pmi = pickerItemOf(target); if (pmi && pmi._pickIndex !== picker.at) pickerMark(pmi._pickIndex); }
+      if (picker && target && picker.kind === 'select') { var pmi = pickerItemOf(target); if (pmi && pmi._pickIndex !== undefined && pmi._pickIndex !== picker.at) pickerMark(pmi._pickIndex); }
+      if (rangeDrag && rangeDrag.el.isConnected && m.x !== undefined) rangeAt(rangeDrag.el, m.x);
       var over = target || (doc && doc.documentElement);
       if (over !== hoverEl) {
         var old = hoverEl;
@@ -10687,8 +11017,11 @@
     }
     if (t === 'down' && picker) {
       var pit = target && pickerItemOf(target);
+      if (pit && pit._pickAct) { pit._pickAct(); return 'ok'; }
       if (pit) { pickerChoose(pit._pickIndex); return 'ok'; }
       var onPicker = target && picker.box.contains(target), again = target && (target === picker.sel || picker.sel.contains(target));
+      // (a calendar's or clock's own space between its choices keeps it)
+      if (onPicker && picker.kind !== 'select') return 'ok';
       pickerClose();
       if (onPicker) return 'ok';
       if (again) return 'ok';
@@ -10714,12 +11047,21 @@
         var ps = target;
         while (ps && ps.nodeType === 1 && ps.localName !== 'select') ps = ps.parentNode;
         if (ps && ps.nodeType === 1 && !ps.disabled && !ps.multiple && !(ps.size > 1)) pickerOpenFor(ps);
+        else if (ps && ps.nodeType === 1 && !ps.disabled && (m.button || 0) === 0) listPress(ps, m);
+        // (a date, time or color field opens its picker; a range's thumb
+        // goes to the press; an editing host's caret to it)
+        if (target.localName === 'input' && !target.disabled && (m.button || 0) === 0) {
+          if (/^(date|time|datetime-local|month|week|color)$/.test(target.type) && !target.readOnly) popOpen(target);
+          else if (target.type === 'range') { rangeDrag = { el: target, from: target.value }; rangeAt(target, m.x); }
+        } else if (target.isContentEditable) editPress(target, m);
+        if (isTextControl(target) && !/^(date|time|datetime-local|month|week)$/.test(target.type) && (m.button || 0) === 0) fieldPress(target, m);
       }
       return 'ok';
     }
     if (t === 'up') {
       var tgt = target || downTarget;
       if (!tgt) return 'no target';
+      if (rangeDrag) { var rd = rangeDrag; rangeDrag = null; if (rd.el.isConnected && rd.el.value !== rd.from) dispatch(rd.el, new Event('change', { bubbles: true })); }
       dispatch(tgt, new PointerEvent('pointerup', mouseInit(m, { detail: clickCount })));
       dispatch(tgt, new MouseEvent('mouseup', mouseInit(m, { detail: clickCount })));
       var wasActive = activeEl;
@@ -10870,6 +11212,14 @@
       var b = boxes[n.__id];
       if (!b) continue;
       var can = (cs['overflow-y'] === 'auto' || cs['overflow-y'] === 'scroll') && (b[7] || 0) > (b[5] || b[3]);
+      // (a list box scrolls its options, a line each)
+      if (n.localName === 'select' && (n.multiple || n.size > 1)) {
+        var le = edgesOf(n), lfs = parseFloat(cs['font-size']) || 13.333, llh = parseFloat(cs['line-height']);
+        if (!(llh > 0)) llh = Math.round(lfs * 1.15);
+        var lmax = Math.max(0, n.options.length * llh - (b[3] - le.by - le.py));
+        var ltop = Math.max(0, Math.min(lmax, n.scrollTop + (dy > 0 ? Math.max(llh, Math.round(dy / llh) * llh) : Math.min(-llh, Math.round(dy / llh) * llh))));
+        if (lmax > 0) { if (ltop !== n.scrollTop) { n.scrollTop = ltop; scrolled(n); dispatch(n, new Event('scroll')); } return; }
+      }
       if (can) {
         var max = (b[7] || 0) - (b[5] || b[3]);
         var top = Math.max(0, Math.min(max, n.scrollTop + dy));
@@ -10931,8 +11281,8 @@
       return;
     }
     if (el.isContentEditable) {
-      el.appendChild(el.ownerDocument.createTextNode(text));
-      dispatch(el, new InputEvent('input', { bubbles: true, composed: true, data: text, inputType: kind }));
+      if (!dispatch(el, new InputEvent('beforeinput', { bubbles: true, cancelable: true, composed: true, data: text, inputType: kind }))) return;
+      editCommand(el, kind === 'insertText' ? 'inserttext' : kind === 'insertLineBreak' ? 'insertlinebreak' : 'insertparagraph', text);
     }
   }
   // document.execCommand's editing in the focused field or editing host,
@@ -11002,12 +11352,19 @@
   }
   function keyDefault(el, m) {
     var k = m.key;
+    if (picker && picker.kind !== 'select' && (k === 'Escape' || k === 'Enter' || k === 'Tab')) { pickerClose(); if (k !== 'Tab') return; }
     if (k === 'Tab') {
       var order = tabOrder();
       if (!order.length) return;
       var i = order.indexOf(el);
       var next = m.shift ? order[(i <= 0 ? order.length : i) - 1] : order[(i + 1) % order.length];
       focusElement(next);
+      return;
+    }
+    if (el.localName === 'input' && el.type === 'number' && (k === 'ArrowUp' || k === 'ArrowDown') && !el.readOnly && !el.disabled) {
+      var nw = el.value;
+      try { stepValue(el, k === 'ArrowUp' ? 1 : -1); } catch (e0) {}
+      if (el.value !== nw) fireChange(el);
       return;
     }
     if (isTextControl(el)) {
@@ -11047,11 +11404,29 @@
       }
       return;
     }
+    if (el.localName === 'input' && el.type === 'range' && !el.disabled && /^(ArrowLeft|ArrowRight|ArrowUp|ArrowDown|Home|End|PageUp|PageDown)$/.test(k)) {
+      var rb = rangeBounds(el), was = el.value;
+      if (k === 'Home') el.value = String(rb[0]);
+      else if (k === 'End') el.value = String(rb[1]);
+      else { try { stepValue(el, (k === 'ArrowRight' || k === 'ArrowUp' || k === 'PageUp' ? 1 : -1) * (/^Page/.test(k) ? Math.max(1, Math.round((rb[1] - rb[0]) / (stepOf(el) || 1) / 10)) : 1)); } catch (e) {} }
+      if (el.value !== was) fireChange(el);
+      return;
+    }
+    if (el.localName === 'input' && /^(date|time|datetime-local|month|week|color)$/.test(el.type) && !el.disabled && !el.readOnly && (k === ' ' || (m.alt && k === 'ArrowDown'))) { popOpen(el); return; }
+    if (el.isContentEditable) {
+      if (k === 'Backspace' || k === 'Delete') { editCommand(el, k === 'Backspace' ? 'delete' : 'forwarddelete'); return; }
+      if (k === 'Enter') { editCommand(el, 'insertparagraph'); return; }
+      if (k === 'ArrowLeft' || k === 'ArrowRight' || k === 'Home' || k === 'End') { editMove(el, k, m.shift); return; }
+      if ((m.ctrl || m.meta) && k === 'a') { editCommand(el, 'selectall'); changed(); return; }
+    }
     if ((k === 'Enter' && (el.localName === 'button' || el.localName === 'a' || (el.localName === 'input' && /^(button|submit|reset|checkbox|radio)$/.test(el.type) && el.type !== 'checkbox'))) || (k === ' ' && (el.localName === 'button' || (el.localName === 'input' && /^(button|submit|reset|checkbox|radio)$/.test(el.type))))) {
       el.click();
       return;
     }
-    if (picker && picker.sel === el) {
+    if (picker && picker.sel === el && picker.kind !== 'select') {
+      if (k === 'Escape' || k === 'Enter') { pickerClose(); return; }
+    }
+    if (picker && picker.sel === el && picker.kind === 'select') {
       if (k === 'Escape') { pickerClose(); return; }
       if (k === 'Enter' || k === ' ') { pickerChoose(picker.at); return; }
       if (k === 'ArrowDown' || k === 'ArrowUp') {
@@ -12253,6 +12628,7 @@
       }
     }
     if (m.boxes && scrollers.length) clampScrolls();
+    if (m.boxes && (caretDrawn || (doc && doc._active && doc._active.isContentEditable))) { var cb2 = editCaretBox(); if ((cb2 ? JSON.stringify(cb2) : null) !== caretDrawn) generation++; }
     if (sizeChanged) { mediaChanged(); invoke(G, new UIEvent('resize', { view: G }), 2); if (typeof G.onresize === 'function') G.onresize(new UIEvent('resize')); }
     if (resizeObservers.length) fireResize();
     if (intersectionObservers.length) fireIntersect();
@@ -12261,6 +12637,17 @@
   G.__input = function (json) {
     var m = typeof json === 'string' ? JSON.parse(json) : json;
     try { return hostInput(m); } catch (e) { reportError(e); return 'error ' + (e && e.message); }
+  };
+  // the files the host's chooser gave a file field (askFiles): [{name,
+  // type, lastModified, b64}], then input and change, as a browser fires them
+  G.__setFiles = function (id, json) {
+    var el = nodeById(id), list = typeof json === 'string' ? JSON.parse(json) : json;
+    if (!el || el.localName !== 'input' || el.type !== 'file') return 'no field';
+    var files = list.map(function (f) { var x = new File([], f.name, { type: f.type || '', lastModified: f.lastModified }); x._s = f.b64 ? atob(f.b64) : ''; return x; });
+    el._files = fileList(files);
+    valueChanged(el);
+    fireChange(el);
+    return 'ok';
   };
   G.__querySelector = function (s) { var e = doc && doc.querySelector(s); return e ? String(e.__id) : ''; };
   G.__webdom = { restyleAll: function () { changed(); }, computedOf: computedOf, cascade: cascade, parseSelectorList: parseSelectorList, normalizeColor: normalizeColor, resolveURL: resolveURL, nodeById: nodeById, lengthPx: lengthPx };
