@@ -6992,6 +6992,12 @@
       return al === 1 ? 'rgb(' + ch.join(', ') + ')' : 'rgba(' + ch.join(', ') + ', ' + al + ')';
     });
   }
+  // CSS animations' clock: the host's timer clock (prelude.js __clock)
+  // where there is one, so a page's timers and its CSS animations see the
+  // same time however fast the host moves its clock. Web Animations keep
+  // the wall clock: pages set their start times from performance.now and
+  // frame timestamps
+  function animNow() { return typeof __clock === 'number' ? __clock : now(); }
   var animating = [], animTick = false;
   function scheduleAnimationFrame(el) {
     if (animating.indexOf(el) < 0) animating.push(el);
@@ -7021,7 +7027,7 @@
   // c: el's computed style without animations; gives it its animations'
   // values now
   function applyAnimations(el, c, parent) {
-    var list = animationList(c), st = el._anims || (el._anims = {}), keep = {}, t = now(), again = false;
+    var list = animationList(c), st = el._anims || (el._anims = {}), keep = {}, t = animNow(), again = false;
     for (var i = 0; i < list.length; i++) {
       var a = list[i], frames = keyframesNamed(a.name);
       if (!frames) continue;
