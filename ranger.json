@@ -7,7 +7,7 @@
   "dependencies": {
     "cer": {
       "git": "https://github.com/terotests/componentengine.git",
-      "rev": "a75945fb658b2d275a68f94a3e5f08b83966f296",
+      "rev": "b622ec8b646b0620d5cc1a21e9964c67eaaec472",
       "subdir": "cer"
     }
   }

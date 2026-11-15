@@ -718,6 +718,7 @@
   // what was laid out
   function scrolled(n) {
     generation++;
+    scrollBumps++;
     textStamp++;
     if (shadowCount) { stampUp(n); return; }
     for (; n; n = n.parentNode) n._rv = textStamp;
@@ -965,12 +966,35 @@
       if (!e.isConnected || (!e._sTop && !e._sLeft)) { e._scl = false; continue; }
       keep.push(e);
       if (!boxes[e.__id] || e === (doc && doc.documentElement)) continue;
-      var mt = Math.max(0, sizeOf(e, 'sh') - sizeOf(e, 'ch')), ml = Math.max(0, sizeOf(e, 'sw') - sizeOf(e, 'cw')), moved = false;
-      if (e._sTop > mt) { e._sTop = mt; moved = true; }
-      if (e._sLeft > ml) { e._sLeft = ml; moved = true; }
-      if (moved) scriptScrolled(e);
+      if (clampScroll(e)) scriptScrolled(e);
     }
     scrollers = keep;
+  }
+  // e's offsets brought into its range as the boxes have it: true when
+  // one moved
+  function clampScroll(e) {
+    var mt = Math.max(0, sizeNow(e, 'sh') - sizeNow(e, 'ch')), ml = Math.max(0, sizeNow(e, 'sw') - sizeNow(e, 'cw')), moved = false;
+    if (e._sTop > mt) { e._sTop = mt; moved = true; }
+    if (e._sLeft > ml) { e._sLeft = ml; moved = true; }
+    return moved;
+  }
+  // When only scroll offsets moved since the layout (scrollBumps: the
+  // changes that were scrolls) the boxes' sizes stand, and so do the scroll
+  // ranges: a size or a scroll offset read then needs no layout, a position
+  // does (a sticky box moves). AG Grid reads scrollLeft, scrollTop and
+  // offsetHeight in its scroll handlers, which laid the page out twice per
+  // wheel turn for nothing.
+  var scrollBumps = 0, layoutSb = 0;
+  function sizesStand() { return layoutGen !== generation && generation - layoutGen === scrollBumps - layoutSb; }
+  // a scroll offset read: the layout first when the page changed, as for a
+  // size, since the range may have (clampScrolls)
+  function scrollRead(e) {
+    if (!syncLayout) return;
+    if (sizesStand() && boxes[e.__id] && e !== (doc && doc.documentElement)) {
+      if (clampScroll(e)) scriptScrolled(e);
+      return;
+    }
+    reflow();
   }
   function scriptScrolled(el) {
     if (el._sq) return;
@@ -2087,9 +2111,9 @@
     // sends it (TanStack Virtual's scrollToIndex waits for it)
     // (a scrolled box's offset is clamped by a layout: read after its
     // content shrank, it is laid out first)
-    get scrollTop() { if (this._scl) reflow(); return this._sTop; }
+    get scrollTop() { if (this._scl) scrollRead(this); return this._sTop; }
     set scrollTop(v) { v = Math.max(0, +v || 0); if (v === this._sTop) return; this._sTop = v; keptScroll(this); scriptScrolled(this); }
-    get scrollLeft() { if (this._scl) reflow(); return this._sLeft; }
+    get scrollLeft() { if (this._scl) scrollRead(this); return this._sLeft; }
     set scrollLeft(v) { v = +v || 0; if (v === this._sLeft) return; this._sLeft = v; keptScroll(this); scriptScrolled(this); }
     get nodeName() { return this.tagName; }
     get tagName() { return this.namespaceURI === HTML_NS ? this._qname.toUpperCase() : this._qname; }
@@ -4244,10 +4268,10 @@
     if (!syncLayout || reflowing || layoutGen === generation || !doc || !doc.documentElement) return;
     reflowing = true;
     try {
-      var json = render(deltaOn), g = generation, out = __hostSync(json);
+      var json = render(deltaOn), g = generation, sb = scrollBumps, out = __hostSync(json);
       // (a host that does not have a node the delta names: everything again)
       if (out === '!' && deltaOn) { deltaEpoch++; json = render(true); out = __hostSync(json); if (out === '!') out = ''; }
-      if (out) { boxes = JSON.parse(out); layoutGen = g; if (scrollers.length) clampScrolls(); }
+      if (out) { boxes = JSON.parse(out); layoutGen = g; layoutSb = sb; if (scrollers.length) clampScrolls(); }
     } catch (e) { syncLayout = false; reportError(e); }
     reflowing = false;
   }
@@ -4264,7 +4288,7 @@
   // offsetWidth and ResizeObserver report it, getBoundingClientRect the
   // drawn box
   function layoutSize(el) {
-    reflow();
+    if (!sizesStand()) reflow();
     var b = boxes[el.__id];
     if (!b) return textOnlySize(el);
     return b[8] !== undefined ? [b[8], b[9]] : [b[2], b[3]];
@@ -4363,7 +4387,11 @@
     return DOMRect(x, y, size[0], size[1]);
   }
   function sizeOf(el, what) {
-    reflow();
+    if (!sizesStand()) reflow();
+    return sizeNow(el, what);
+  }
+  // (as the boxes have it now, no layout)
+  function sizeNow(el, what) {
     var b = boxes[el.__id];
     if (el === (doc && doc.documentElement) && (what === 'cw' || what === 'ch')) return what === 'cw' ? viewport.w : viewport.h;
     if (!b) return 0;
@@ -10924,6 +10952,7 @@
     if (m.boxes) {
       boxes = m.boxes;
       layoutGen = generation;
+      layoutSb = scrollBumps;
       boxSvgs = boxSvgs.filter(function (e) { return e.isConnected; });
       for (var bs = 0; bs < boxSvgs.length; bs++) {
         var sv = boxSvgs[bs], sb = boxes[sv.__id];
