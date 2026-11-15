@@ -8088,9 +8088,9 @@ impl DomView {
                 if t == "input" {
                     ws = "pre".to_string();
                     // (an input's line is in the middle of a taller box, as
-                    // a browser centres it: ag-grid's 32px filter field)
+                    // a browser centres it: ag-grid's 32px filter field; the
+                    // flex row below centres it)
                     if display == "block" || display == "inline-block" {
-                        EVGElement::set_attribute(&e, "justify-content", "center".to_string());
                         // (a min-height taller than its line is its height:
                         // EVG centres in a set height)
                         let imh: String = s.borrow().getText("min-height");
