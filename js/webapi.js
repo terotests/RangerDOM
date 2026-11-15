@@ -147,10 +147,11 @@
   // e keeps a style or the rules that matched it: noted on it and on what
   // it is in (_es), so a subtree never styled is known by its root
   function styledNow(e) { for (; e && !e._es; e = e.parentNode) e._es = true; }
-  function dropStyle(e) { delete computedCache.map[e.__id]; e._rj = null; e._hm = null; e._pc = null; }
+  // (and not from its style without animations: e._abKeep, animRestyle)
+  function dropStyle(e) { delete computedCache.map[e.__id]; e._rj = null; e._hm = null; e._pc = null; e._abKeep = false; }
   // e's computed style goes, the rules that matched it stay (cascade1's
   // _hm): for a change that alters no selector's answer for e
-  function dropComputed(e) { delete computedCache.map[e.__id]; e._rj = null; e._pc = null; }
+  function dropComputed(e) { delete computedCache.map[e.__id]; e._rj = null; e._pc = null; e._abKeep = false; }
   // e styled again; what is under it too unless e's style changed only in
   // what its children do not take from it
   function restyle(e) {
@@ -165,6 +166,16 @@
   // animations are applied again; otherwise as restyle
   function animRestyle(e) {
     var old = computedCache.map[e.__id], ab = e._ab;
+    // (already to be made from the kept style: a frame and an animation's
+    // end in one tick; restyled whole, Motion's 120 boxes each went
+    // through the cascade when their tween ended)
+    if (e === waapiEl || (!old && ab && e._abKeep && ab.gen === styleGen)) return true;
+    // (its inline style just set, to be patched, patchedStyle: kept;
+    // Motion sets each box's start value, then animates it)
+    if (!old && e._pc) {
+      eachElement(e, dropStyle);
+      return false;
+    }
     // (its first animation: the style it has is the one without)
     if (old && !ab && !shadowCount && !e._anims && !(old.animation && old.animation !== 'none') && !(old['animation-name'] && old['animation-name'] !== 'none')) {
       var pel = e.parentNode && e.parentNode.nodeType === 1 ? e.parentNode : null, ps = pel ? computedCache.map[pel.__id] : null;
@@ -174,6 +185,12 @@
     delete computedCache.map[e.__id];
     e._rj = null; e._pc = null;
     e._abKeep = true;
+    // (nothing under it takes a style from it: no element, no shadow tree)
+    if (!e._sr) {
+      var kid = false;
+      for (var ki = 0; ki < e._c.length && !kid; ki++) kid = e._c[ki]._attrs !== undefined;
+      if (!kid) return true;
+    }
     if (sameBelow(e, old, computedOf(e))) return true;
     eachElement(e, dropStyle);
     return false;
@@ -1784,11 +1801,10 @@
         this._sync();
         return;
       }
-      // (a property that was set, set to another value: attrChanged may
-      // patch the element's style, patchedStyle)
-      var had = this._p[n] !== undefined;
+      // (one property set: attrChanged may patch the element's style,
+      // patchedStyle; a removed one takes the cascade's value, all styled)
       this._set(n, v, prio);
-      this._sync(had ? n : undefined);
+      this._sync(n);
     }
     _set(n, v, prio) {
       // (a shorthand's longhand it gave no value: not set, as a browser
@@ -7425,7 +7441,15 @@
   var documentTimeline = { get currentTime() { return now(); }, duration: null, phase: 'active' };
   // el's Element.animate effects over its computed style c, in the order
   // they were made; running ones keep frames coming
+  // (the element whose style applyWaapi makes: an animation ending there
+  // asks for it again, animRestyle, which it is being made now)
+  var waapiEl = null;
   function applyWaapi(el, c, parent) {
+    var was = waapiEl;
+    waapiEl = el;
+    try { applyWaapi1(el, c, parent); } finally { waapiEl = was; }
+  }
+  function applyWaapi1(el, c, parent) {
     var list = el._waapi.slice(), again = false;
     for (var i = 0; i < list.length; i++) {
       var a = list[i], e = a._effect;
@@ -7465,6 +7489,8 @@
   }
   // keyframes at progress (0..1, eased) onto c: the computed styles of the
   // two keyframes around it, interpolated
+  // (the properties the frames set, while computedOf notes them: frameKeys)
+  var frameKeys = null;
   function applyFrames(el, c, parent, frames, progress, easing) {
     var from = null, to = null;
     for (var f = 0; f < frames.length; f++) { if (frames[f].off <= progress) from = frames[f]; if (frames[f].off >= progress && !to) to = frames[f]; }
@@ -7477,19 +7503,35 @@
     var ca = frameStyle(el, parent, A), cb = A === B ? ca : frameStyle(el, parent, B);
     for (var pk in props) {
       if (pk.slice(0, 2) === '--') continue;
+      if (frameKeys) frameKeys[pk] = 1;
       c[pk] = interpolateValue(pk, A.decls[pk] !== undefined || !from ? ca[pk] : c[pk], B.decls[pk] !== undefined || !to ? cb[pk] : c[pk], local);
     }
+  }
+  // c is the style `base` with only `keys` changed (renderNode then takes
+  // base's own properties and looks at those only: 120 boxes animated,
+  // each walked its 250 properties a frame)
+  function diffFrom(c, base, keys) {
+    Object.defineProperty(c, '_dfrom', { value: { base: base, keys: keys }, enumerable: false, configurable: true, writable: true });
   }
   // An element whose inline style changed only in properties that nothing
   // else is computed from (PATCHED), under the same parent style and the
   // same rules: the style it had with those properties computed again, or
   // null when that cannot be told (computeStyle then). A transform or an
   // opacity set on 500 elements every frame cost a whole cascade each.
-  var PATCHED = { transform: 1, opacity: 1, 'z-index': 1, translate: 1, rotate: 1, scale: 1 };
+  // (sizes and offsets too: Motion's width tween, a drag's left and top;
+  // a percentage is not patched)
+  var PATCHED = { transform: 1, opacity: 1, 'z-index': 1, translate: 1, rotate: 1, scale: 1, width: 1, height: 1, 'min-width': 1, 'min-height': 1, 'max-width': 1, 'max-height': 1, left: 1, top: 1, right: 1, bottom: 1, 'margin-top': 1, 'margin-right': 1, 'margin-bottom': 1, 'margin-left': 1, 'padding-top': 1, 'padding-right': 1, 'padding-bottom': 1, 'padding-left': 1, 'background-color': 1 };
   function patchedStyle(el, parent) {
     var pc = el._pc, st = el._style, old = pc.cs;
     if (pc.gen !== styleGen || pc.parent !== parent || !parent || !st || shadowCount) return null;
-    if ((el._waapi && el._waapi.length) || el._anims) return null;
+    if (el._anims) return null;
+    // (an element with Web Animations: the style it had without them is
+    // the one patched, computedOf applies them again)
+    var ab = el._ab;
+    if (ab) {
+      if (old === ab.out && ab.gen === styleGen && ab.parent === parent) old = ab.base;
+      else if (old !== ab.base) return null;
+    }
     var tr = old.transition, tp = old['transition-property'], td = old['transition-duration'];
     if ((tr && tr !== 'none' && /[1-9]/.test(tr)) || (td && /[1-9]/.test(td)) || (old.animation && old.animation !== 'none') || (old['animation-name'] && old['animation-name'] !== 'none')) return null;
     if (old.display === 'table-cell' || old.transform && typeof old.transform === 'string' && old._boxDep) return null;
@@ -7512,6 +7554,7 @@
     for (var k in old) out[k] = old[k];
     var ctx = { em: old._fontPx, rem: rootFontPx(), vw: viewport.w / 100, vh: viewport.h / 100 };
     for (var n2 in vals) out[n2] = computeValue(n2, vals[n2], ctx, parent, out);
+    diffFrom(out, old, vals);
     if (old._cc) Object.defineProperty(out, '_cc', { value: old._cc, enumerable: false, configurable: true, writable: true });
     Object.defineProperty(out, '_sid', { value: ++styleUid, enumerable: false });
     return out;
@@ -7540,8 +7583,13 @@
     var cssAnim = (c.animation && c.animation !== 'none') || (c['animation-name'] && c['animation-name'] !== 'none'), waapi = el._waapi && el._waapi.length;
     if (cssAnim || waapi) {
       if (!(keep && ab && ab.gen === styleGen && ab.parent === parent)) { ab = el._ab = { gen: styleGen, parent: parent, base: c, out: null }; c = copyStyle(c); }
-      if (cssAnim) applyAnimations(el, c, parent);
-      if (waapi) applyWaapi(el, c, parent);
+      var fk = frameKeys;
+      frameKeys = {};
+      try {
+        if (cssAnim) applyAnimations(el, c, parent);
+        if (waapi) applyWaapi(el, c, parent);
+        diffFrom(c, ab.base, frameKeys);
+      } finally { frameKeys = fk; }
       ab.out = c;
       ab.t = animNow();
     } else el._ab = null;
@@ -8377,6 +8425,23 @@
     return { i: n.__id, t: 'span', s: { display: 'inline' }, c: parts };
   }
   var SIDES4 = ['top', 'right', 'bottom', 'left'];
+  // renderNode's own properties of cs from those of the style it was made
+  // from (diffFrom): false when a changed one is one the loop there does
+  // more with (a border's colour, an inset shadow)
+  function ownFromBase(s, cs, parentStyle, df) {
+    var keys = df.keys, b = df.base._own;
+    for (var k in keys) if (k === 'color' || k === 'box-shadow' || k.slice(0, 7) === 'border-' || k.charAt(0) === '_') return false;
+    for (var bk in b) s[bk] = b[bk];
+    for (var k2 in keys) {
+      var v = cs[k2];
+      delete s[k2];
+      if (v === undefined) continue;
+      if (INHERITED[k2] && parentStyle && parentStyle[k2] === v) continue;
+      if (!INHERITED[k2] && INITIAL[k2] === v) continue;
+      s[k2] = typeof v === 'string' && v.charCodeAt(0) === 99 && v.slice(0, 5) === 'calc(' ? flatCalc(v) : v;
+    }
+    return true;
+  }
   function renderNode(n, parentStyle, asJson) {
     if (n.nodeType === 3) {
       if (!n._data) return null;
@@ -8398,8 +8463,14 @@
     // what of cs differs from the parent's (inherited) and the initial
     // values: found once for a style and the parent style it is under
     // (shared styles: a table's rows and cells), copied for this element
-    var s = {}, base = cs._own && cs._ownPs === parentStyle ? cs._own : null;
+    var s = {}, base = cs._own && cs._ownPs === parentStyle ? cs._own : null, df = cs._dfrom;
     if (base) { for (var bk in base) s[bk] = base[bk]; }
+    else if (df && df.base._own && df.base._ownPs === parentStyle && ownFromBase(s, cs, parentStyle, df)) {
+      var own0 = {};
+      for (var ok0 in s) own0[ok0] = s[ok0];
+      Object.defineProperty(cs, '_own', { value: own0, enumerable: false, configurable: true, writable: true });
+      Object.defineProperty(cs, '_ownPs', { value: parentStyle, enumerable: false, configurable: true, writable: true });
+    }
     else {
       for (var k in cs) {
         if (k.charAt(0) === '_') continue;
@@ -11284,10 +11355,20 @@
   G.__styleCheck = function () {
     var was = reflowing; reflowing = true;
     try {
-      var cut = function (t) { return t.slice(t.indexOf(',"w":')); };
-      var a = cut(render(false));
+      // (a patched style has its properties in another order, patchedStyle:
+      // members by name)
+      var norm = function (v) {
+        if (Array.isArray(v)) return v.map(norm);
+        if (!v || typeof v !== 'object') return v;
+        var o = {}, ks = Object.keys(v).sort();
+        for (var i = 0; i < ks.length; i++) if (ks[i] !== 'v') o[ks[i]] = norm(v[ks[i]]);
+        return o;
+      };
+      var a = render(false);
       changed();
-      var b = cut(render(false));
+      var b = render(false);
+      if (a === b) return '';
+      a = JSON.stringify(norm(JSON.parse(a))); b = JSON.stringify(norm(JSON.parse(b)));
       if (a === b) return '';
       var i = 0;
       while (i < a.length && a.charCodeAt(i) === b.charCodeAt(i)) i++;

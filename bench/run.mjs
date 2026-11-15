@@ -104,9 +104,10 @@ server.close();
 
 fs.writeFileSync(path.join(OUT, "report.json"), JSON.stringify(results, null, 1) + "\n");
 const f = (v) => (typeof v === "number" ? (v < 10 ? v.toFixed(1) : String(Math.round(v))) : "–");
-let md = "# RangerDOM vs the browser\n\n| Case | Step | Browser until drawn | RangerDOM until drawn | render | layout | display list | Same |\n|---|---|---:|---:|---:|---:|---:|:-:|\n";
+let md = "# RangerDOM vs the browser\n\n| Case | Step | Browser until drawn | RangerDOM until drawn | render | layout | display list | Browser frames · gap | RangerDOM frames · gap | Same |\n|---|---|---:|---:|---:|---:|---:|---:|---:|:-:|\n";
+const fg = (x) => (x && typeof x.frames === "number" ? `${x.frames} · ${f(x.gap)}` : "–");
 for (const r of results) {
-  for (const x of r.rows || []) md += `| ${r.case} | ${x.name} | ${f(x.native.drawn)} | ${f(x.rd.drawn)} | ${f(x.rd.render)} | ${f(x.rd.layout)} | ${f(x.rd.paint)} | ${x.skipped ? "skipped" : x.same ? "yes" : "no"} |\n`;
+  for (const x of r.rows || []) md += `| ${r.case} | ${x.name} | ${f(x.native.drawn)} | ${f(x.rd.drawn)} | ${f(x.rd.render)} | ${f(x.rd.layout)} | ${f(x.rd.paint)} | ${fg(x.native)} | ${fg(x.rd)} | ${x.skipped ? "skipped" : x.same ? "yes" : "no"} |\n`;
 }
 md += "\n| Case | Pixels differ % | Errors |\n|---|---:|---|\n";
 for (const r of results) md += `| ${r.case} | ${f(r.pixelDiff)} | ${(r.errors || []).concat(r.pageErrors || []).slice(0, 3).join("; ").replace(/\|/g, "\\|").slice(0, 300)} |\n`;
