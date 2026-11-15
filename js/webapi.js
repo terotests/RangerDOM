@@ -8386,7 +8386,7 @@
       var kids0 = kids;
       kids = anonTables(cs.display, kids, kd, o.i, true);
       if (kids !== kids0) { kel = null; kdj = null; }
-      if (cs['border-collapse'] === 'collapse' && /^(inline-)?table$/.test(cs.display)) { kids = collapseTable(o, kids, true, cs.color, kel); kdj = null; }
+      if (cs['border-collapse'] === 'collapse' && /^(inline-)?table$/.test(cs.display)) { pjDelta = deltaOn && !deltaOff; kids = collapseTable(o, kids, true, cs.color, kel); pjDelta = false; kdj = collapseDj; collapseDj = null; }
       var own = JSON.stringify(o);
       var kj = kids.join(',');
       if (deltaOn) {
@@ -8573,27 +8573,62 @@
     o.c = p.kids.map(function (k, i) { return partsOf(k, p.kel[i]); });
     return o;
   }
+  // (pjDelta: a delta render's text of the same part is left in pjLast. A
+  // row with its borders settled is a numbered part of its own: one that
+  // came out as the host has it is only named, so a change in one row of a
+  // table with collapsed borders sends that row and not the table. A
+  // table's 1000 rows went whole for one row's class.)
+  var pjDelta = false, pjLast = '', collapseDj = null;
+  function rowDelta(p, out) {
+    if (!p) return out;
+    var f = p.fin;
+    if (!f || f.de !== deltaEpoch || f.json !== out) f = p.fin = { json: out, n: ++deltaSerial, sent: 0, de: deltaEpoch, dj: null };
+    deltaOf(f);
+    return lastDelta;
+  }
   function partsJson(o) {
     var p = o._p;
     if (o._raw === undefined) {
-      if (!o.c || !o.c.length || typeof o.c[0] !== 'object') return JSON.stringify(o);
+      if (o._cmOut !== undefined) { pjLast = pjDelta ? rowDelta(p, o._cmOut) : o._cmOut; return o._cmOut; }
+      if (!o.c || !o.c.length || typeof o.c[0] !== 'object') { var j0 = JSON.stringify(o); pjLast = j0; return j0; }
       var cs0 = o.c; delete o.c;
       // (a row or group's own members are stripped of borders the same way
       // each time its parts are the same)
       var own = p ? p.ownJson || (p.ownJson = JSON.stringify(o)) : JSON.stringify(o);
-      return own.slice(0, -1) + ',"c":[' + cs0.map(partsJson).join(',') + ']}';
+      if (!pjDelta) { var nj = own.slice(0, -1) + ',"c":[' + cs0.map(partsJson).join(',') + ']}'; if (o._cmRec) o._cmRec.out = nj; return nj; }
+      if (o.s && o.s.display === 'table-row') {
+        pjDelta = false;
+        var rj = own.slice(0, -1) + ',"c":[' + cs0.map(partsJson).join(',') + ']}';
+        pjDelta = true;
+        if (o._cmRec) o._cmRec.out = rj;
+        pjLast = rowDelta(p, rj);
+        return rj;
+      }
+      // (a row group is numbered too: the host takes the parts under a
+      // numbered one only)
+      var js = [], ds = [], dm = marks.length;
+      for (var i = 0; i < cs0.length; i++) { js.push(partsJson(cs0[i])); ds.push(pjLast); }
+      var gj = own.slice(0, -1) + ',"c":[' + js.join(',') + ']}';
+      if (!p) { unmark(dm); pjLast = gj; return gj; }
+      var f = p.fin;
+      if (!f || f.de !== deltaEpoch || f.json !== gj) f = p.fin = { json: gj, n: ++deltaSerial, sent: 0, de: deltaEpoch, dj: null };
+      if (f.sent === deltaEpoch) { unmark(dm); pjLast = '{"r":' + f.n + '}'; }
+      else { f.dj = '{"n":' + f.n + ',' + own.slice(1, -1) + ',"c":[' + ds.join(',') + ']}'; deltaOf(f); pjLast = lastDelta; }
+      return gj;
     }
-    if (p && o._key !== undefined && p.clKey === o._key) return p.clOut;
+    if (p && o._key !== undefined && p.clKey === o._key) { pjLast = p.clOut; return p.clOut; }
     var extra = o.c; if (extra) delete o.c;
     var own2 = JSON.stringify(o);
     var raw = o._raw + (extra && extra.length ? (o._raw ? ',' : '') + extra.map(function (k) { return JSON.stringify(k); }).join(',') : '');
     var out = raw ? own2.slice(0, -1) + ',"c":[' + raw + ']}' : own2;
     if (p && o._key !== undefined) { p.clKey = o._key; p.clOut = out; }
+    pjLast = out;
     return out;
   }
   function collapseTable(tbl, kids, json, tcolor, kel) {
     var objs = kids.map(function (k, i) { return typeof k === 'string' ? partsOf(k, kel && kel[i]) : k; });
     var rows = [], cols = [];
+    collapseDj = null;
     var colOf = function (c, grp) { var n = Math.max(1, parseInt(c.a && c.a.span, 10) || 1); for (var q = 0; q < n; q++) cols.push({ col: c, grp: grp }); };
     objs.forEach(function (k) {
       var d = k.s && k.s.display;
@@ -8604,8 +8639,9 @@
     });
     if (!rows.length) return kids;
     // the grid: which cell is at each slot
-    var grid = [], cells = [];
+    var grid = [], cells = [], anySpan = false;
     rows.forEach(function (r, ri) {
+      r.n = 0; r.m = null; r.ok = false;
       grid[ri] = grid[ri] || [];
       var ci = 0;
       (r.row.c || []).forEach(function (c) {
@@ -8613,7 +8649,8 @@
         while (grid[ri][ci]) ci++;
         var cs = Math.max(1, parseInt(c.a && c.a.colspan, 10) || 1), rs = Math.max(1, parseInt(c.a && c.a.rowspan, 10) || 1);
         rs = Math.min(rs, rows.length - ri);
-        var cell = { o: c, r: ri, c: ci, rs: rs, cs: cs, rowo: r };
+        var cell = { o: c, r: ri, c: ci, rs: rs, cs: cs, rowo: r, k: r.n++ };
+        if (rs > 1) anySpan = true;
         cells.push(cell);
         for (var y = 0; y < rs; y++) { grid[ri + y] = grid[ri + y] || []; for (var x = 0; x < cs; x++) grid[ri + y][ci + x] = cell; }
         ci += cs;
@@ -8697,7 +8734,39 @@
     // (a table with a caption draws no border: the table's box holds the
     // caption too, so its outer cells take the outer borders whole)
     var capt = objs.some(function (k) { return k.s && k.s.display === 'table-caption'; });
-    var won = cells.map(function (cell) { return ['left', 'right', 'top', 'bottom'].map(function (sd) { return edge(cell, sd); }); });
+    // A row's borders follow from the row, the rows above and below it,
+    // their groups and the table: while those are the renders they were
+    // (their parts, _p), the borders its cells won and the row's JSON are
+    // as last time (cm, kept with the row's parts). One row's class changed
+    // in a table of 1000 settled four edges of every cell again. Not in a
+    // table with columns or a cell that spans rows.
+    var memoOn = !!json && !cols.length && !anySpan, tsig = '';
+    if (memoOn) {
+      tsig = (capt ? 'c' : '') + ncols + '|' + tc + '|' + tcolor;
+      var ts0 = tbl.s || {};
+      for (var tq = 0; tq < 4; tq++) tsig += '|' + ts0['border-' + SIDES4[tq] + '-style'] + ' ' + ts0['border-' + SIDES4[tq] + '-width'] + ' ' + ts0['border-' + SIDES4[tq] + '-color'];
+      // (a group by its own style, and whether a neighbour is in the same
+      // one: the group is rendered again whenever a row of it is)
+      var NOP = {}, partOf = function (ro) { return ro ? ro.row._p || NOP : null; };
+      var gsOf = function (g) { if (!g) return ''; if (g._gs === undefined) Object.defineProperty(g, '_gs', { value: JSON.stringify(g.s || null), enumerable: false }); return g._gs; };
+      var grpOf = function (ro, of) { return !ro ? '-' : of && ro.grp === of.grp ? '=' : gsOf(ro.grp); };
+      for (var mr = 0; mr < rows.length; mr++) {
+        var ro0 = rows[mr], rp = ro0.row._p;
+        if (!rp) continue;
+        var pv = partOf(rows[mr - 1]), nx0 = partOf(rows[mr + 1]), g0 = grpOf(ro0, null), g1 = grpOf(rows[mr - 1], ro0), g2 = grpOf(rows[mr + 1], ro0);
+        if (pv === NOP || nx0 === NOP) continue;
+        var cm = rp.cm;
+        if (cm && cm.tsig === tsig && cm.prev === pv && cm.next === nx0 && cm.grp === g0 && cm.pg === g1 && cm.ng === g2 && cm.won.length === ro0.n) { ro0.m = cm; ro0.ok = true; }
+        else ro0.m = rp.cm = { tsig: tsig, prev: pv, next: nx0, grp: g0, pg: g1, ng: g2, won: [], out: undefined };
+      }
+    }
+    var won = cells.map(function (cell) {
+      var ro = cell.rowo;
+      if (ro.ok) return ro.m.won[cell.k];
+      var w4 = [edge(cell, 'left'), edge(cell, 'right'), edge(cell, 'top'), edge(cell, 'bottom')];
+      if (ro.m) ro.m.won[cell.k] = w4;
+      return w4;
+    });
     var SD = ['left', 'right', 'top', 'bottom'];
     var outerOf = function (cell, sd) { return (sd === 'left' && cell.c === 0) || (sd === 'right' && cell.c + cell.cs === ncols) || (sd === 'top' && cell.r === 0) || (sd === 'bottom' && cell.r + cell.rs === rows.length); };
     cells.forEach(function (cell, ix) {
@@ -8718,7 +8787,10 @@
       });
     });
     var anyMixed = mixed.left || mixed.right || mixed.top || mixed.bottom;
+    // (a row settled as last time goes out as it did, partsJson)
+    var useOut = function (ro) { return ro.ok && !anyMixed && ro.m.out !== undefined; };
     cells.forEach(function (cell, ix) {
+      if (useOut(cell.rowo)) return;
       // (a cell from its render's parts whose borders won as last time:
       // its JSON as last time, partsJson)
       var p = cell.o._p, key = null;
@@ -8733,7 +8805,12 @@
     });
     // rows, groups and columns draw no borders of their own
     var strip = function (o) { if (!o || !o.s) return; o.s = Object.assign({}, o.s); ['left', 'right', 'top', 'bottom'].forEach(function (sd) { delete o.s['border-' + sd + '-style']; delete o.s['border-' + sd + '-width']; }); };
-    rows.forEach(function (r) { strip(r.row); strip(r.grp); });
+    var stripped = [];
+    rows.forEach(function (r) {
+      if (useOut(r)) Object.defineProperty(r.row, '_cmOut', { value: r.m.out, enumerable: false });
+      else { strip(r.row); if (r.m) { r.m.out = undefined; if (!anyMixed) Object.defineProperty(r.row, '_cmRec', { value: r.m, enumerable: false }); } }
+      if (r.grp && stripped.indexOf(r.grp) < 0) { strip(r.grp); stripped.push(r.grp); }
+    });
     cols.forEach(function (c) { strip(c.col); strip(c.grp); });
     tbl.s = Object.assign({}, tbl.s);
     ['left', 'right', 'top', 'bottom'].forEach(function (sd) {
@@ -8763,7 +8840,11 @@
       if (!s.position || s.position === 'static') s.position = 'relative';
       cell.o.c = (cell.o.c || []).concat(strips);
     });
-    return json ? objs.map(partsJson) : objs;
+    if (!json) return objs;
+    var outs = [], djs = pjDelta ? [] : null;
+    for (var oi = 0; oi < objs.length; oi++) { outs.push(partsJson(objs[oi])); if (djs) djs.push(pjLast); }
+    collapseDj = djs;
+    return outs;
   }
   function anonTables(pd, kids, kd, id, json) {
     if (pd === 'table-row') return anonCells(kids, kd, id, json);

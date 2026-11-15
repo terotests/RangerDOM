@@ -45,9 +45,27 @@ const base = `http://127.0.0.1:${server.address().port}/`;
 
 const all = JSON.parse(fs.readFileSync(path.join(SITE, "cases", "index.json"), "utf8")).map((c) => c.name);
 const names = opts.only ? opts.only.split(",") : all;
-const browser = await chromium.launch({ args: ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] });
+const launch = () => chromium.launch({ args: ["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] });
+let browser = await launch();
 const results = [];
+// (a page that never comes back, a script that does not end, held the whole
+// run until the job's own limit: a case gets CASE_MS, then its browser is
+// killed, the case is reported as hung and the next one starts in a new one)
+const CASE_MS = 8 * 60000;
 for (const name of names) {
+  console.log(`${name} ...`);
+  let hung = null;
+  const done = await Promise.race([oneCase(name).then(() => true, (e) => { if (hung !== -1) { console.log(`${name}: ${String(e).split("\n")[0]}`); results.push({ case: name, error: String(e).split("\n")[0], rows: [], pixelDiff: null, pageErrors: [] }); } return true; }), new Promise((ok) => { hung = setTimeout(() => ok(false), CASE_MS); })]);
+  clearTimeout(hung);
+  if (!done) {
+    hung = -1;
+    console.log(`${name}: no answer in ${CASE_MS / 60000} min, browser killed`);
+    results.push({ case: name, error: "hung", rows: [], pixelDiff: null, pageErrors: [] });
+    try { const pr = browser.process(); if (pr) pr.kill("SIGKILL"); } catch (_) {}
+    browser = await launch();
+  }
+}
+async function oneCase(name) {
   const page = await browser.newPage({ viewport: { width: 2600, height: 1400 } });
   const pageErrors = [];
   page.on("pageerror", (e) => pageErrors.push(String(e)));
@@ -81,7 +99,7 @@ for (const name of names) {
   console.log(`${name}: ${rows.filter((x) => x.same).length}/${rows.filter((x) => !x.skipped).length} same${rows.some((x) => x.skipped) ? ` (${rows.filter((x) => x.skipped).length} skipped)` : ""}, pixels differ ${pct.toFixed(1)} %, ${r.errors ? r.errors.length : 0} errors${r.error ? " (" + r.error + ")" : ""}`);
   await page.close();
 }
-await browser.close();
+await Promise.race([browser.close(), new Promise((ok) => setTimeout(ok, 30000))]);
 server.close();
 
 fs.writeFileSync(path.join(OUT, "report.json"), JSON.stringify(results, null, 1) + "\n");
@@ -94,3 +112,4 @@ md += "\n| Case | Pixels differ % | Errors |\n|---|---:|---|\n";
 for (const r of results) md += `| ${r.case} | ${f(r.pixelDiff)} | ${(r.errors || []).concat(r.pageErrors || []).slice(0, 3).join("; ").replace(/\|/g, "\\|").slice(0, 300)} |\n`;
 fs.writeFileSync(path.join(OUT, "report.md"), md);
 console.log(`Wrote ${path.relative(process.cwd(), path.join(OUT, "report.md"))}`);
+process.exit(0);
