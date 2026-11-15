@@ -409,6 +409,163 @@ function textRuns(w, max, opacityOf) {
   }
   return out;
 }
+
+// form controls: the flat points and text runs above leave them out (a
+// field's value is no text node), so each visible text field, select,
+// checkbox and radio is looked at here, against where the browser puts
+// what it shows (its own font metrics, measured in the page):
+//   text: the value (or placeholder) leaves ink in the field's content box,
+//     vertically centred as the browser centres it (a field's one line is
+//     centred in its content box)
+//   caret: the focused field with no selection shows a caret at the
+//     selection's offset: a column of ink about the font's height
+//   selection: the focused field's selection is drawn as a band
+//   checked: a checked checkbox or radio is filled, an unchecked one not
+const TEXT_FIELD = /^(text|search|tel|url|email|password|number)$/;
+const DATE_FIELD = /^(date|time|datetime-local|month|week)$/;
+function controlsCheck(w, at, opacityOf) {
+  const d = w.document, out = { fields: 0, bad: [] };
+  const mctx = d.createElement("canvas").getContext("2d");
+  const step = 1 / DPR;
+  const diff = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
+  const name = (el) => el.id ? "#" + el.id : el.getAttribute("name") ? `${el.localName}[name=${el.getAttribute("name")}]` : el.className && typeof el.className === "string" ? `${el.localName}.${el.className.trim().split(/\s+/)[0]}` : el.localName;
+  const bad = (el, what) => { if (out.bad.length < 12) out.bad.push(`${name(el)}: ${what}`); };
+  // the focused element's outline (a :focus or :focus-visible rule's):
+  // the middle of its top and left edges in the outline's colour
+  const fe = d.activeElement;
+  if (fe && fe !== d.body && fe.nodeType === 1) {
+    const cs = w.getComputedStyle(fe), ow = parseFloat(cs.outlineWidth) || 0, oc = rgbaOf(cs.outlineColor);
+    const r = fe.getBoundingClientRect();
+    if (cs.outlineStyle !== "none" && cs.outlineStyle !== "auto" && ow >= 1.5 && oc && oc[3] > 0.6 && r.width > 10 && r.height > 6 && r.left > ow + 4 && r.top > ow + 4 && r.right < W - ow - 4 && r.bottom < H - ow - 4) {
+      const o = (parseFloat(cs.outlineOffset) || 0) + ow / 2;
+      const pts = [[r.left + r.width / 2, r.top - o], [r.left - o, r.top + r.height / 2], [r.left + r.width / 2, r.bottom + o]];
+      if (pts.filter(([x, y]) => diff(at(x, y), oc) > 90).length >= 2) bad(fe, "focused, outline not drawn");
+    }
+  }
+  for (const el of d.querySelectorAll("input, textarea, select")) {
+    const ln = el.localName, type = ln === "input" ? el.type : ln;
+    const box = ln === "input" && (type === "checkbox" || type === "radio");
+    const listbox = ln === "select" && (el.multiple || el.size > 1);
+    const drawn = ln === "input" && /^(color|range|file)$/.test(type);
+    const dateLike = ln === "input" && DATE_FIELD.test(type);
+    const text = ln === "textarea" || (ln === "select" && !listbox) || (ln === "input" && TEXT_FIELD.test(type)) || dateLike;
+    if (!box && !text && !listbox && !drawn) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 8 || r.height < 8 || r.left < 0 || r.top < 0 || r.right > W || r.bottom > H) continue;
+    const cs = w.getComputedStyle(el);
+    if (cs.visibility !== "visible" || opacityOf(el) < 0.5) continue;
+    const hit = d.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    if (hit !== el && !(hit && el.contains(hit))) continue;
+    out.fields++;
+    if (box) {
+      // (a point inside the mark, off the radio's dot and the tick's
+      // centre: the filled box or ring there, white when unchecked)
+      const p = type === "radio" ? at(r.left + r.width / 2, r.top + r.height / 2) : at(r.left + r.width * 0.25, r.top + r.height * 0.25);
+      const white = diff(p, [255, 255, 255]);
+      if (el.checked && white < 60) bad(el, "checked but drawn empty");
+      if (!el.checked && !el.indeterminate && white > 200) bad(el, "unchecked but drawn filled");
+      continue;
+    }
+    if (type === "color") {
+      // the swatch: its middle in the value's colour
+      const c = at(r.left + r.width / 2, r.top + r.height / 2), want = rgbaOf(drawnColor(el.value).slice(0, 3).join(",").replace(/^/, "rgb(") + ")");
+      if (diff(c, want) > 60) bad(el, `swatch rgb(${c.map(Math.round)}) for ${el.value}`);
+      continue;
+    }
+    if (type === "range") {
+      // the thumb (Chromium's: 16 px) at the value's share of the track
+      const mn = el.min === "" ? 0 : +el.min, mx = el.max === "" ? 100 : +el.max, f = mx > mn ? (+el.value - mn) / (mx - mn) : 0;
+      const tx = r.left + 8 + f * (r.width - 16), ty = r.top + r.height / 2;
+      const thumb = [[0, 0], [-3, 0], [3, 0], [0, -4], [0, 4]].filter(([dx, dy]) => diff(at(tx + dx, ty + dy), [255, 255, 255]) > 150).length;
+      if (thumb < 4) bad(el, `no thumb at ${Math.round(f * 100)} % (x ${Math.round(tx)})`);
+      continue;
+    }
+    if (type === "file" || listbox) {
+      // text in it: the button's label, or each option shown
+      const rows = listbox ? [...el.options].map((o) => o.getBoundingClientRect()).filter((q) => q.height > 4 && q.bottom <= r.bottom - 1) : [r];
+      let blank = 0;
+      for (const q of rows) {
+        let ink = false;
+        const x0 = q.left + 2, x1 = Math.min(q.right - 2, q.left + 60);
+        for (let y = q.top + 2; y < q.bottom - 2 && !ink; y += step) for (let x = x0; x < x1; x += step) { const c = at(x, y); if (diff(c, at(x1 + 1 > q.right - 1 ? q.right - 3 : x1 + 1, q.top + 1)) > 150 || Math.max(...c) < 120) { ink = true; break; } }
+        if (!ink) blank++;
+      }
+      if (blank) bad(el, listbox ? `${blank} of ${rows.length} options not drawn` : "no button text");
+      continue;
+    }
+    const px = (k) => parseFloat(cs[k]) || 0;
+    const cl = r.left + px("borderLeftWidth") + px("paddingLeft"), ct = r.top + px("borderTopWidth") + px("paddingTop");
+    const cw = r.width - px("borderLeftWidth") - px("borderRightWidth") - px("paddingLeft") - px("paddingRight");
+    const ch = r.height - px("borderTopWidth") - px("borderBottomWidth") - px("paddingTop") - px("paddingBottom");
+    if (cw < 6 || ch < 4) continue;
+    // (a date's own text is Chromium's, unknown here: one of its length)
+    let shown = ln === "select" ? (el.selectedOptions[0] ? el.selectedOptions[0].text : "") : dateLike ? "11/15/2026" : el.value;
+    let color = cs.color;
+    if (!shown && ln !== "select") { shown = el.placeholder || ""; color = w.getComputedStyle(el, "::placeholder").color; }
+    if (type === "password" && el.value) shown = "•".repeat(el.value.length);
+    const col = rgbaOf(color) || [0, 0, 0, 1];
+    if (col[3] < 0.3) continue;
+    mctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+    const fm = mctx.measureText("Hg"), fa = fm.fontBoundingBoxAscent, fd = fm.fontBoundingBoxDescent, fsz = parseFloat(cs.fontSize) || 13;
+    const lh = cs.lineHeight === "normal" ? fa + fd : parseFloat(cs.lineHeight) || fa + fd;
+    const multi = ln === "textarea";
+    const lineTop = multi ? ct - el.scrollTop : ct + (ch - lh) / 2;
+    const base = lineTop + (lh - (fa + fd)) / 2 + fa;
+    const start = (cs.textAlign === "start" || cs.textAlign === "left" || cs.textAlign === "-webkit-auto") && cs.direction !== "rtl";
+    const focused = d.activeElement === el && ln !== "select" && !dateLike;
+    let ss = null, se = null;
+    try { ss = el.selectionStart; se = el.selectionEnd; } catch (_) {}
+    if (focused && ss === null) ss = se = el.value.length; // (email, number: the caret after typing)
+    const offX = (n) => cl - el.scrollLeft + mctx.measureText((type === "password" ? shown : el.value).slice(0, n).split("\n").pop()).width;
+    const lineOf = (n) => el.value.slice(0, n).split("\n").length - 1;
+    // the field's background: a point of the content box past the text,
+    // else the padding
+    const tw = shown ? mctx.measureText(multi ? shown.split("\n")[0] : shown).width : 0;
+    // (halfway from the text's end to the box's: not a picker icon at the end)
+    const bgAt = start && tw < cw - 8 ? at(cl + tw + (cw - tw) / 2, multi ? ct + 3 : ct + ch / 2) : at(r.left + px("borderLeftWidth") + Math.min(2, px("paddingLeft") / 2), r.top + r.height / 2);
+    const inkMin = 70 * Math.min(1, col[3]);
+    if (shown && !(focused && ss !== se)) {
+      // ink rows: rows with 3 or more ink pixels (a caret is one wide),
+      // not a line across the whole width (a border drawn elsewhere)
+      const x0 = start ? cl : r.left + px("borderLeftWidth"), x1 = start ? Math.min(cl + cw, cl + tw + 1) : r.right - px("borderRightWidth");
+      const y0 = multi ? ct : r.top + px("borderTopWidth"), y1 = multi ? Math.min(r.bottom, ct + lh) : r.bottom - px("borderBottomWidth");
+      let top = null, bottom = null;
+      for (let y = y0 + 1; y < y1 - 1; y += step) {
+        let n = 0, all = 0;
+        for (let x = x0 + 0.5; x < x1; x += step) { all++; if (diff(at(x, y), bgAt) > inkMin) n++; }
+        if (n >= 3 && n < all * 0.85) { if (top === null) top = y; bottom = y; }
+      }
+      if (top === null) bad(el, `${el.value ? "value" : "placeholder"} not drawn`);
+      else if (!multi) {
+        const ink = mctx.measureText(shown);
+        const want = base + (ink.actualBoundingBoxDescent - ink.actualBoundingBoxAscent) / 2, got = (top + bottom) / 2;
+        if (Math.abs(got - want) > Math.max(2.5, fsz * 0.18)) bad(el, `text ${got > want ? "below" : "above"} the centre by ${Math.abs(got - want).toFixed(1)} px`);
+      }
+    }
+    if (!focused || !start) continue;
+    const lt = multi ? ct - el.scrollTop + lineOf(se) * lh : lineTop, fh = fa + fd;
+    const cb = lt + (lh - fh) / 2;
+    if (ss === se && !el.readOnly) {
+      const cx = offX(ss);
+      if (cx < cl - 2 || cx > cl + cw + 2) continue;
+      let found = false;
+      for (let x = cx - 3; x <= cx + 3 && !found; x += step) {
+        let run = 0;
+        for (let y = cb - 2; y < cb + fh + 2; y += step) {
+          if (diff(at(x, y), bgAt) > 90) { if (++run * step >= fh * 0.75) { found = true; break; } } else run = 0;
+        }
+      }
+      if (!found) bad(el, `focused, no caret at offset ${ss} (x ${Math.round(cx)})`);
+    } else {
+      const bx0 = Math.max(cl, offX(ss)), bx1 = Math.min(cl + cw, offX(se));
+      if (bx1 - bx0 < 4 || lineOf(ss) !== lineOf(se)) continue;
+      let n = 0, on = 0;
+      for (let x = bx0 + 1; x < bx1 - 1; x += 2) { n++; if (diff(at(x, cb + 1.5), bgAt) > 40) on++; }
+      if (n && on < n * 0.6) bad(el, `selection ${ss}-${se} not drawn`);
+    }
+  }
+  return out;
+}
 function pictureCheck() {
   const w = iframe.contentWindow;
   if (!gl || !w || !w.document || !w.document.body) return null;
@@ -467,16 +624,19 @@ function pictureCheck() {
     }
     if (!ink) { blank++; if (!firstBlank) firstBlank = [x, y, rw, rh].map(Math.round); }
   }
+  let controls = null;
+  try { controls = controlsCheck(w, at, opacityOf); } catch (e) { controls = { fields: 0, bad: ["check failed: " + e] }; }
   unhide.remove();
   // a few points or runs off is a font's edge or a frame of an animation
-  const ok = off <= Math.max(2, points * 0.03) && blank <= Math.max(1, runs.length * 0.05);
-  return { ok, points, off, worst, runs: runs.length, blank, firstBlank };
+  const ok = off <= Math.max(2, points * 0.03) && blank <= Math.max(1, runs.length * 0.05) && !controls.bad.length;
+  return { ok, points, off, worst, runs: runs.length, blank, firstBlank, controls };
 }
 function pictureText(p) {
   if (!p) return "";
   let t = `picture: ${p.off}/${p.points} flat points differ, ${p.blank}/${p.runs} text runs blank in RangerDOM`;
   if (p.worst) t += `\nworst point (${p.worst.x}, ${p.worst.y}): browser rgb(${p.worst.browser}), RangerDOM rgb(${p.worst.rangerdom})`;
   if (p.firstBlank) t += `\nfirst blank run at (${p.firstBlank[0]}, ${p.firstBlank[1]}) ${p.firstBlank[2]}×${p.firstBlank[3]}`;
+  if (p.controls) t += `\nform controls: ${p.controls.bad.length} of ${p.controls.fields} wrong` + p.controls.bad.map((b) => "\n  " + b).join("");
   return t;
 }
 

@@ -85,6 +85,14 @@ put(path.join(ROOT, "ranger.json"), "ranger.json");
 put(path.join(ROOT, "ranger.lock"), "ranger.lock");
 fs.symlinkSync(path.join(ROOT, "vendor"), path.join(STAGE, "vendor"));
 
+// (the compiler finds gallery/<name> in the Ranger tree before the staged
+// one: the WebAssembly build below stages view/ and json/ there, and a copy
+// left by an earlier build was compiled instead of view/. So they are put
+// there now, as they are, with the EVG their imports name: ../../../lib/evg)
+for (const [from, to] of [[EVG, "lib/evg"], [path.join(ROOT, "view"), "gallery/domview"], [path.join(ROOT, "json"), "gallery/domjson"]]) {
+  fs.rmSync(path.join(RANGER, to), { recursive: true, force: true });
+  fs.cpSync(from, path.join(RANGER, to), { recursive: true, filter: (p) => !p.includes(`${path.sep}target`) });
+}
 console.log("==> rangerdom_pg.js (Ranger -> JavaScript)");
 let log = "";
 try {

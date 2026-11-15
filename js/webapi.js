@@ -3463,11 +3463,19 @@
       dispatch(this, ev);
     }
     reset() {
+      // (the event first: a listener can cancel the reset, HTML 4.10.21.4)
+      if (!dispatch(this, new Event('reset', { bubbles: true, cancelable: true }))) return;
       this.elements.forEach(function (e) {
-        if (e._value !== undefined) e._value = undefined;
+        if (e.localName === 'select') { e.options.forEach(function (o) { o._selected = undefined; }); return; }
         if (e._checked !== undefined) e._checked = undefined;
+        if (e.localName === 'input' && e.type === 'file') e._files = null;
+        var was = e.value;
+        if (e._value !== undefined) e._value = undefined;
+        if (e._ss !== undefined && e.value !== was) { var l = e.value.length; e._ss = e._se = l; e._sd = 'none'; }
+        e._dirty = false;
+        valueChanged(e);
       });
-      dispatch(this, new Event('reset', { bubbles: true, cancelable: true }));
+      changed();
     }
     checkValidity() { return true; }
     reportValidity() { return true; }
@@ -3506,7 +3514,9 @@
 
   // a form control's value: its own (_value) once set, else the attribute
   class HTMLInputElement extends HTMLElement {
-    constructor(q) { super(q); this._value = undefined; this._checked = undefined; this.selectionStart = 0; this.selectionEnd = 0; this.selectionDirection = 'none'; this.indeterminate = false; this.files = null; }
+    constructor(q) { super(q); this._value = undefined; this._checked = undefined; this._ss = 0; this._se = 0; this._sd = 'none'; this.indeterminate = false; this._files = null; }
+    get files() { return this.type === 'file' ? (this._files || (this._files = fileList([]))) : null; }
+    set files(v) { if (this.type === 'file' && v) this._files = v; }
     get type() {
       var t = (this.getAttribute('type') || 'text').toLowerCase();
       return /^(hidden|text|search|tel|url|email|password|date|month|week|time|datetime-local|number|range|color|checkbox|radio|file|submit|image|reset|button)$/.test(t) ? t : 'text';
@@ -3515,20 +3525,33 @@
     get value() {
       var t = this.type;
       if (t === 'checkbox' || t === 'radio') { var a = this.getAttribute('value'); return a === null ? 'on' : a; }
-      if (this._value !== undefined) return this._value;
-      return this.getAttribute('value') || '';
+      if (t === 'file') return this._files && this._files.length ? 'C:\\fakepath\\' + this._files[0].name : '';
+      // (what the user typed is the value as it is; a set one, the
+      // default, and a range's or colour's, whose bounds may change, go
+      // through the type's sanitization)
+      if (this._value !== undefined && !/^(range|color)$/.test(t)) return this._value;
+      return sanitizeValue(this, this._value !== undefined ? this._value : this.getAttribute('value') || '');
     }
     set value(v) {
       v = v === null || v === undefined ? '' : String(v);
       var t = this.type;
       if (t === 'checkbox' || t === 'radio') { this.setAttribute('value', v); return; }
-      if (t !== 'file') v = v.replace(/[\r\n]/g, '');
+      if (t === 'file') { if (v !== '') throw new DOMException('This input element accepts a filename, which may only be programmatically set to the empty string.', 'InvalidStateError'); this._files = null; valueChanged(this); return; }
+      var was = this.value;
+      v = sanitizeValue(this, v);
       this._value = v;
-      this.selectionStart = this.selectionEnd = v.length;
+      // (the caret goes to the end only when the value is another, HTML 4.10.5.4)
+      if (v !== was) { this._ss = this._se = v.length; this._sd = 'none'; }
       valueChanged(this);
     }
     get defaultValue() { return this.getAttribute('value') || ''; }
     set defaultValue(v) { this.setAttribute('value', v); }
+    get selectionStart() { return hasSelectionApi(this) ? this._ss : null; }
+    set selectionStart(v) { selectionGuard(this); this.setSelectionRange(v, Math.max(v, this._se), this._sd); }
+    get selectionEnd() { return hasSelectionApi(this) ? this._se : null; }
+    set selectionEnd(v) { selectionGuard(this); this.setSelectionRange(Math.min(this._ss, v), v, this._sd); }
+    get selectionDirection() { return hasSelectionApi(this) ? this._sd : null; }
+    set selectionDirection(v) { selectionGuard(this); this.setSelectionRange(this._ss, this._se, v); }
     get checked() { return this._checked !== undefined ? this._checked : this.hasAttribute('checked'); }
     set checked(v) {
       // (a state change of this element, as a value's: AG Grid sets every
@@ -3540,28 +3563,28 @@
     }
     get defaultChecked() { return this.hasAttribute('checked'); }
     set defaultChecked(v) { this.toggleAttribute('checked', !!v); }
-    get valueAsNumber() { var n = parseFloat(this.value); return isNaN(n) ? NaN : n; }
-    set valueAsNumber(n) { this.value = String(n); }
+    get valueAsNumber() { return valueAsNumberOf(this); }
+    set valueAsNumber(n) {
+      if (!/^(number|range|date|month|week|time|datetime-local)$/.test(this.type)) throw new DOMException('This input element does not support Number values.', 'InvalidStateError');
+      this.value = formatNumberValue(this, +n);
+    }
+    get valueAsDate() { if (!/^(date|month|week|time)$/.test(this.type)) return null; var n = valueAsNumberOf(this); return isNaN(n) ? null : new Date(n); }
+    set valueAsDate(d) {
+      if (!/^(date|month|week|time)$/.test(this.type)) throw new DOMException('This input element does not support Date values.', 'InvalidStateError');
+      this.value = d === null ? '' : formatNumberValue(this, this.type === 'month' ? (d.getUTCFullYear() - 1970) * 12 + d.getUTCMonth() : d.getTime());
+    }
     get form() { return formOf(this); }
     get labels() { return labelsOf(this); }
     get validity() { return validity; }
     get validationMessage() { return ''; }
     get willValidate() { return true; }
     get list() { var l = this.getAttribute('list'); return l ? (this.ownerDocument || doc).getElementById(l) : null; }
-    select() { this.selectionStart = 0; this.selectionEnd = this.value.length; dispatch(this, new Event('select', { bubbles: true })); }
-    setSelectionRange(s, e, d) { var l = this.value.length; this.selectionStart = Math.min(s, l); this.selectionEnd = Math.min(e === undefined ? s : e, l); this.selectionDirection = d || 'none'; }
-    setRangeText(t, s, e) {
-      var v = this.value;
-      if (s === undefined) { s = this.selectionStart; e = this.selectionEnd; }
-      this._value = v.slice(0, s) + t + v.slice(e);
-      this.selectionStart = this.selectionEnd = s + t.length;
-    }
-    checkValidity() { return true; }
-    reportValidity() { return true; }
-    setCustomValidity() {}
+    select() { if (!hasSelectionApi(this) && !/^(email|number|date|month|week|time|datetime-local|color)$/.test(this.type)) return; this._ss = 0; this._se = this.value.length; this._sd = 'none'; selectionChanged(this); }
+    setSelectionRange(s, e, d) { selectionGuard(this); setSelection(this, s, e, d); }
+    setRangeText(t, s, e, mode) { selectionGuard(this); rangeText(this, t, s, e, mode); }
     showPicker() {}
-    stepUp() {}
-    stepDown() {}
+    stepUp(n) { stepValue(this, n === undefined ? 1 : +n); }
+    stepDown(n) { stepValue(this, -(n === undefined ? 1 : +n)); }
   }
   reflect(HTMLInputElement, ['name', 'placeholder', 'accept', 'alt', 'autocomplete', 'dirName', 'inputMode', 'max', 'min', 'pattern', 'step', 'enterKeyHint']);
   reflectBool(HTMLInputElement, ['disabled', 'readOnly', 'required', 'multiple', 'autofocus']);
@@ -3570,6 +3593,185 @@
     Object.defineProperty(HTMLInputElement.prototype, p, { get: function () { var v = this.getAttribute(a); return v === null ? (p === 'size' ? 20 : -1) : parseInt(v, 10); }, set: function (v) { this.setAttribute(a, v); }, configurable: true });
   });
 
+  // the selection API is there for these types only (HTML 4.10.5.2): an
+  // email, number or date field answers null and throws on a set
+  function hasSelectionApi(el) { return el.localName === 'textarea' || /^(text|search|url|tel|password)$/.test(el.type); }
+  function selectionGuard(el) { if (!hasSelectionApi(el)) throw new DOMException("Failed to execute 'setSelectionRange' on 'HTMLInputElement': The input element's type ('" + el.type + "') does not support selection.", 'InvalidStateError'); }
+  // (a select event is queued, as a task, for each change of the selection
+  // by the API: HTML 4.10.5.2.10)
+  function selectionChanged(el) {
+    if (doc && doc._active === el) changed();
+    if (el._selQueued) return;
+    el._selQueued = true;
+    setTimeout(function () { el._selQueued = false; dispatch(el, new Event('select', { bubbles: true })); }, 0);
+  }
+  function setSelection(el, s, e, d) {
+    var l = el.value.length;
+    s = Math.max(0, Math.min(+s || 0, l));
+    e = e === undefined ? s : Math.max(0, Math.min(+e || 0, l));
+    if (e < s) s = e;
+    el._ss = s; el._se = e; el._sd = d === 'forward' || d === 'backward' ? d : 'none';
+    selectionChanged(el);
+  }
+  function rangeText(el, t, s, e, mode) {
+    var v = el.value, l = v.length;
+    t = String(t);
+    if (s === undefined) { s = el._ss; e = el._se; mode = 'preserve'; }
+    s = Math.min(+s || 0, l); e = Math.min(+e || 0, l);
+    if (s > e) throw new DOMException('The provided start value (' + s + ') is larger than the provided end value (' + e + ').', 'IndexSizeError');
+    el._value = v.slice(0, s) + t + v.slice(e);
+    var ss = el._ss, se = el._se, d = t.length - (e - s), ne = s + t.length;
+    mode = mode || 'preserve';
+    if (mode === 'select') { el._ss = s; el._se = ne; }
+    else if (mode === 'start') { el._ss = el._se = s; }
+    else if (mode === 'end') { el._ss = el._se = ne; }
+    else {
+      var fix = function (x) { return x > e ? x + d : x > s ? s : x; };
+      el._ss = fix(ss); el._se = ss === s && se === e ? ne : fix(se);
+      if (ss === s && se === e) el._ss = s;
+    }
+    el._sd = 'none';
+    valueChanged(el);
+    selectionChanged(el);
+  }
+  // HTML 4.10.5.1: the value sanitization algorithm of each type
+  var TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)(?::([0-5]\d)(?:\.(\d{1,3}))?)?$/;
+  function daysIn(y, m) { return new Date(Date.UTC(y, m, 0)).getUTCDate(); }
+  function dateOk(str) { var m = /^(\d{4,})-(\d\d)-(\d\d)$/.exec(str); return !!m && +m[1] > 0 && +m[2] >= 1 && +m[2] <= 12 && +m[3] >= 1 && +m[3] <= daysIn(+m[1], +m[2]); }
+  function weeksIn(y) { var j1 = new Date(Date.UTC(y, 0, 1)).getUTCDay(), leap = daysIn(y, 2) === 29; return j1 === 4 || (leap && j1 === 3) ? 53 : 52; }
+  function validFloat(str) { return /^-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d+)?$/.test(str); }
+  function rangeBounds(el) {
+    var mn = parseFloat(el.getAttribute('min')), mx = parseFloat(el.getAttribute('max'));
+    if (!validFloat(String(el.getAttribute('min')))) mn = 0;
+    if (!validFloat(String(el.getAttribute('max')))) mx = 100;
+    if (mx < mn) mx = mn;
+    return [mn, mx];
+  }
+  function stepOf(el) {
+    var t = el.type, st = el.getAttribute('step');
+    var dflt = t === 'time' || t === 'datetime-local' ? 60 : 1;
+    if (st !== null && st.toLowerCase() === 'any') return null;
+    var n = parseFloat(st);
+    if (st === null || !validFloat(st.trim()) || !(n > 0)) n = dflt;
+    // (in the units of valueAsNumber)
+    return n * (t === 'date' ? 86400000 : t === 'week' ? 604800000 : t === 'time' || t === 'datetime-local' ? 1000 : 1);
+  }
+  function sanitizeValue(el, v) {
+    var t = el.type;
+    switch (t) {
+      case 'text': case 'search': case 'tel': case 'password': case 'hidden': return t === 'hidden' ? v : v.replace(/[\r\n]/g, '');
+      case 'url': case 'email': return v.replace(/[\r\n]/g, '').replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, '');
+      case 'number': return validFloat(v) && isFinite(parseFloat(v)) ? v : '';
+      case 'range': {
+        var b = rangeBounds(el), x = validFloat(v) ? parseFloat(v) : NaN;
+        if (isNaN(x)) x = b[1] < b[0] ? b[0] : b[0] + (b[1] - b[0]) / 2;
+        x = Math.max(b[0], Math.min(b[1], x));
+        var stp = stepOf(el);
+        if (stp) {
+          var base = validFloat(String(el.getAttribute('min'))) ? b[0] : 0, k = Math.round((x - base) / stp);
+          x = base + k * stp;
+          if (x > b[1]) x = base + Math.floor((b[1] - base) / stp) * stp;
+          if (x < b[0]) x = base + Math.ceil((b[0] - base) / stp) * stp;
+        }
+        return String(Math.round(x * 1e10) / 1e10);
+      }
+      case 'color': {
+        if (/^#[0-9a-fA-F]{6}$/.test(v)) return v.toLowerCase();
+        var c = v.trim() ? colorRGBA(v) : null;
+        return c ? rgbHex(c)[0] : '#000000';
+      }
+      case 'date': return dateOk(v) ? v : '';
+      case 'month': { var mm = /^(\d{4,})-(\d\d)$/.exec(v); return mm && +mm[1] > 0 && +mm[2] >= 1 && +mm[2] <= 12 ? v : ''; }
+      case 'week': { var wm = /^(\d{4,})-W(\d\d)$/.exec(v); return wm && +wm[1] > 0 && +wm[2] >= 1 && +wm[2] <= weeksIn(+wm[1]) ? v : ''; }
+      case 'time': return TIME_RE.test(v) ? v : '';
+      case 'datetime-local': {
+        var dm = /^(\d{4,}-\d\d-\d\d)[T ](.*)$/.exec(v);
+        if (!dm || !dateOk(dm[1]) || !TIME_RE.test(dm[2])) return '';
+        // (the normalized form: a T, no zero seconds or fraction)
+        return dm[1] + 'T' + dm[2].replace(/\.0+$/, '').replace(/^(\d\d:\d\d):00$/, '$1');
+      }
+      default: return v;
+    }
+  }
+  function clockMs(str) { var m = TIME_RE.exec(str); return m ? ((+m[1] * 60 + +m[2]) * 60 + +(m[3] || 0)) * 1000 + (m[4] ? +(m[4] + '00').slice(0, 3) : 0) : NaN; }
+  function valueAsNumberOf(el) {
+    var t = el.type, v = el.value;
+    if (v === '') return NaN;
+    switch (t) {
+      case 'number': case 'range': return parseFloat(v);
+      case 'date': { var d = v.split('-'); return Date.UTC(+d[0], +d[1] - 1, +d[2]); }
+      case 'month': { var m = v.split('-'); return (+m[0] - 1970) * 12 + (+m[1] - 1); }
+      case 'week': {
+        var w = /^(\d+)-W(\d+)$/.exec(v), y = +w[1], j4 = new Date(Date.UTC(y, 0, 4)), dow = (j4.getUTCDay() + 6) % 7;
+        return Date.UTC(y, 0, 4 - dow) + (+w[2] - 1) * 604800000;
+      }
+      case 'time': return clockMs(v);
+      case 'datetime-local': { var p = v.split('T'), dd = p[0].split('-'); return Date.UTC(+dd[0], +dd[1] - 1, +dd[2]) + clockMs(p[1]); }
+      default: return NaN;
+    }
+  }
+  function pad(n, k) { n = String(n); while (n.length < k) n = '0' + n; return n; }
+  function timeText(ms) {
+    var s = Math.floor(ms / 1000) % 60, mi = Math.floor(ms / 60000) % 60, h = Math.floor(ms / 3600000) % 24, f = ms % 1000;
+    return pad(h, 2) + ':' + pad(mi, 2) + (s || f ? ':' + pad(s, 2) + (f ? '.' + pad(f, 3).replace(/0+$/, '') : '') : '');
+  }
+  function formatNumberValue(el, n) {
+    if (!isFinite(n)) return '';
+    var t = el.type;
+    switch (t) {
+      case 'number': case 'range': return String(n);
+      case 'date': { var d = new Date(n); return pad(d.getUTCFullYear(), 4) + '-' + pad(d.getUTCMonth() + 1, 2) + '-' + pad(d.getUTCDate(), 2); }
+      case 'month': { var y = 1970 + Math.floor(n / 12), m = ((Math.floor(n) % 12) + 12) % 12; return pad(y, 4) + '-' + pad(m + 1, 2); }
+      case 'week': {
+        var dt = new Date(n + 3 * 86400000), yy = dt.getUTCFullYear(), j4 = new Date(Date.UTC(yy, 0, 4)), mon = Date.UTC(yy, 0, 4 - (j4.getUTCDay() + 6) % 7);
+        return pad(yy, 4) + '-W' + pad(Math.floor((Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate()) - mon) / 604800000) + 1, 2);
+      }
+      case 'time': return timeText(((n % 86400000) + 86400000) % 86400000);
+      case 'datetime-local': { var dd = new Date(n); return pad(dd.getUTCFullYear(), 4) + '-' + pad(dd.getUTCMonth() + 1, 2) + '-' + pad(dd.getUTCDate(), 2) + 'T' + timeText(((n % 86400000) + 86400000) % 86400000); }
+      default: return String(n);
+    }
+  }
+  // stepUp(n) / stepDown(n), HTML 4.10.5.4
+  function stepValue(el, n) {
+    var t = el.type;
+    if (!/^(number|range|date|month|week|time|datetime-local)$/.test(t)) throw new DOMException("This form element is not steppable.", 'InvalidStateError');
+    var st = stepOf(el);
+    if (st === null) throw new DOMException("This form element does not have an allowed value step.", 'InvalidStateError');
+    var mnA = el.getAttribute('min'), mxA = el.getAttribute('max');
+    var num = function (a) { if (a === null) return NaN; var tmp = { type: t, value: sanitizeValue({ type: t, getAttribute: function () { return null; } }, a) }; return t === 'number' || t === 'range' ? (validFloat(a) ? parseFloat(a) : NaN) : valueAsNumberOf(tmp); };
+    var mn = num(mnA), mx = num(mxA);
+    if (t === 'range') { var b = rangeBounds(el); mn = b[0]; mx = b[1]; }
+    if (!isNaN(mn) && !isNaN(mx) && mn > mx) return;
+    var base = !isNaN(mn) ? mn : !isNaN(num(el.getAttribute('value'))) ? num(el.getAttribute('value')) : 0;
+    var v = valueAsNumberOf(el);
+    if (isNaN(v)) v = 0;
+    var q = (v - base) / st;
+    if (Math.abs(q - Math.round(q)) > 1e-9) v = base + (n > 0 ? Math.ceil(q) : Math.floor(q)) * st;
+    else v = v + n * st;
+    if (!isNaN(mn) && v < mn) v = base + Math.ceil((mn - base) / st) * st;
+    if (!isNaN(mx) && v > mx) v = base + Math.floor((mx - base) / st) * st;
+    v = Math.round(v * 1e10) / 1e10;
+    el.value = formatNumberValue(el, v);
+  }
+  // a date or time value as Chromium shows it in en-US, or the pattern it
+  // shows in an empty field
+  var MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  function dateShown(t, v) {
+    var tm = function (x) { var m = TIME_RE.exec(x); if (!m) return '--:-- --'; var h = +m[1]; return pad(h % 12 || 12, 2) + ':' + m[2] + (m[3] ? ':' + m[3] : '') + ' ' + (h < 12 ? 'AM' : 'PM'); };
+    var dt = function (x) { var p = x.split('-'); return p.length === 3 ? p[1] + '/' + p[2] + '/' + p[0] : 'mm/dd/yyyy'; };
+    if (!v) return t === 'date' ? 'mm/dd/yyyy' : t === 'time' ? '--:-- --' : t === 'datetime-local' ? 'mm/dd/yyyy, --:-- --' : t === 'month' ? '--------- ----' : 'Week --, ----';
+    if (t === 'date') return dt(v);
+    if (t === 'time') return tm(v);
+    if (t === 'datetime-local') { var q = v.split('T'); return dt(q[0]) + ', ' + tm(q[1]); }
+    if (t === 'month') { var mm = v.split('-'); return MONTHS[+mm[1] - 1] + ' ' + mm[0]; }
+    var w = /^(\d+)-W(\d+)$/.exec(v);
+    return w ? 'Week ' + w[2] + ', ' + w[1] : v;
+  }
+  function fileList(files) {
+    var l = files.slice();
+    l.item = function (i) { return l[i] || null; };
+    return l;
+  }
   function uncheckGroup(el) {
     var name = el.getAttribute('name');
     if (!name) return;
@@ -3580,27 +3782,25 @@
   }
 
   class HTMLTextAreaElement extends HTMLElement {
-    constructor(q) { super(q); this._value = undefined; this.selectionStart = 0; this.selectionEnd = 0; this.selectionDirection = 'none'; }
+    constructor(q) { super(q); this._value = undefined; this._ss = 0; this._se = 0; this._sd = 'none'; }
     get type() { return 'textarea'; }
     get value() { return this._value !== undefined ? this._value : this.textContent; }
-    set value(v) { v = v === null || v === undefined ? '' : String(v); this._value = v; this.selectionStart = this.selectionEnd = v.length; valueChanged(this); }
+    set value(v) { v = v === null || v === undefined ? '' : String(v).replace(/\r\n?/g, '\n'); var was = this.value; this._value = v; if (v !== was) { this._ss = this._se = v.length; this._sd = 'none'; } valueChanged(this); }
+    get selectionStart() { return this._ss; }
+    set selectionStart(v) { this.setSelectionRange(v, Math.max(v, this._se), this._sd); }
+    get selectionEnd() { return this._se; }
+    set selectionEnd(v) { this.setSelectionRange(Math.min(this._ss, v), v, this._sd); }
+    get selectionDirection() { return this._sd; }
+    set selectionDirection(v) { this.setSelectionRange(this._ss, this._se, v); }
     get defaultValue() { return this.textContent; }
     set defaultValue(v) { this.textContent = v; }
     get textLength() { return this.value.length; }
     get form() { return formOf(this); }
     get labels() { return labelsOf(this); }
     get validity() { return validity; }
-    select() { this.selectionStart = 0; this.selectionEnd = this.value.length; }
-    setSelectionRange(s, e, d) { var l = this.value.length; this.selectionStart = Math.min(s, l); this.selectionEnd = Math.min(e === undefined ? s : e, l); this.selectionDirection = d || 'none'; }
-    setRangeText(t, s, e) {
-      var v = this.value;
-      if (s === undefined) { s = this.selectionStart; e = this.selectionEnd; }
-      this._value = v.slice(0, s) + t + v.slice(e);
-      this.selectionStart = this.selectionEnd = s + t.length;
-    }
-    checkValidity() { return true; }
-    reportValidity() { return true; }
-    setCustomValidity() {}
+    select() { this._ss = 0; this._se = this.value.length; this._sd = 'none'; selectionChanged(this); }
+    setSelectionRange(s, e, d) { setSelection(this, s, e, d); }
+    setRangeText(t, s, e, mode) { rangeText(this, t, s, e, mode); }
   }
   reflect(HTMLTextAreaElement, ['name', 'placeholder', 'wrap', 'autocomplete', 'dirName', 'inputMode', 'enterKeyHint']);
   reflectBool(HTMLTextAreaElement, ['disabled', 'readOnly', 'required', 'autofocus']);
@@ -3890,8 +4090,9 @@
     get timeline() { return documentTimeline; }
     getAnimations() { var out = []; eachElement(this, function (e) { if (e._waapi) e._waapi.forEach(function (a) { if (animationRelevant(a)) out.push(a); }); }); return out; }
     execCommand(cmd, ui, value) {
+      cmd = String(cmd).toLowerCase();
       if (cmd === 'copy') return true;
-      if (cmd === 'insertText') { var a = this._active; if (a && a._value !== undefined || (a && /^(input|textarea)$/.test(a.localName))) { a.setRangeText(String(value)); dispatch(a, new InputEvent('input', { bubbles: true, data: String(value), inputType: 'insertText' })); return true; } }
+      if (/^(inserttext|insertlinebreak|insertparagraph|delete|forwarddelete|selectall)$/.test(cmd)) return editCommand(this._active, cmd, value === undefined || value === null ? '' : String(value));
       return false;
     }
     queryCommandSupported() { return false; }
@@ -4173,11 +4374,15 @@
     var old = doc._active && doc._active.isConnected ? doc._active : null;
     if (old === el) return;
     if (old) {
+      // (a value the user changed since the field took the focus is
+      // committed as it loses it: change, before blur, HTML 4.10.5.5)
+      if (old._dirty) { old._dirty = false; dispatch(old, new Event('change', { bubbles: true })); }
       doc._active = null;
       dispatch(old, new FocusEvent('blur', { relatedTarget: el, view: G }));
       dispatch(old, new FocusEvent('focusout', { bubbles: true, relatedTarget: el, view: G }));
     }
     doc._active = el;
+    if (el) el._dirty = false;
     pointerStateChanged(old, el, true);
     if (el) {
       dispatch(el, new FocusEvent('focus', { relatedTarget: old, view: G }));
@@ -5415,7 +5620,7 @@
           arg = t.slice(j + 1, cl);
           j = cl + 1;
         }
-        if (dbl || /^(before|after|first-line|first-letter|placeholder|selection|marker|backdrop|file-selector-button|-webkit-|-moz-)/.test(name)) {
+        if (dbl || /^(before|after|first-line|first-letter|placeholder|selection|marker|backdrop|file-selector-button)$|^-webkit-|^-moz-/.test(name)) {
           // (a pseudo-element or pseudo-class nobody knows makes the
           // whole selector invalid, CSS Selectors 3.9)
           if (!KNOWN_PE.test(name)) return null;
@@ -5653,7 +5858,7 @@
       case 'disabled': return isDisabled(el);
       case 'enabled': return /^(button|input|select|textarea|optgroup|option|fieldset)$/.test(el.localName) && !isDisabled(el);
       case 'read-only': return !matchPseudo(el, { n: 'read-write' }, scope);
-      case 'read-write': return (/^(input|textarea)$/.test(el.localName) && !el.hasAttribute('readonly') && !isDisabled(el)) || el.isContentEditable;
+      case 'read-write': return ((el.localName === 'textarea' || (el.localName === 'input' && /^(text|search|url|tel|email|password|date|month|week|time|datetime-local|number)$/.test(el.type))) && !el.hasAttribute('readonly') && !isDisabled(el)) || !!el.isContentEditable;
       case 'required': return /^(input|select|textarea)$/.test(el.localName) && el.hasAttribute('required');
       case 'optional': return /^(input|select|textarea)$/.test(el.localName) && !el.hasAttribute('required');
       case 'placeholder-shown': return /^(input|textarea)$/.test(el.localName) && el.hasAttribute('placeholder') && !el.value;
@@ -6505,7 +6710,7 @@
     'b,strong{font-weight:700}i,em,cite,var,dfn,address{font-style:italic}u,ins{text-decoration:underline}s,del,strike{text-decoration:line-through}small{font-size:smaller}sub{vertical-align:sub;font-size:smaller}sup{vertical-align:super;font-size:smaller}code,kbd,samp,pre,tt{font-family:monospace}pre{white-space:pre}',
     'a:any-link{color:rgb(0,0,238);text-decoration:underline;cursor:pointer}hr{border-top:1px inset rgb(128,128,128);margin-top:.5em;margin-bottom:.5em}',
     'input,select,textarea,button{display:inline-block;font-size:13.333px;font-family:Arial;letter-spacing:normal;word-spacing:normal;line-height:normal;text-transform:none;text-indent:0;text-shadow:none;text-align:start;color:rgb(0,0,0)}',
-    'input,textarea,select{background-color:rgb(255,255,255);border:2px inset rgb(118,118,118)}input{padding:1px 2px}textarea{padding:2px;white-space:pre-wrap}button,input[type=button],input[type=submit],input[type=reset]{padding:1px 6px;border:2px outset rgb(118,118,118);background-color:rgb(239,239,239);text-align:center;cursor:default}input[type=hidden]{display:none}input[type=checkbox]{margin:3px 3px 3px 4px}input[type=radio]{margin:3px 3px 0 5px}button:disabled,input[type=button]:disabled,input[type=submit]:disabled,input[type=reset]:disabled{color:rgba(16,16,16,0.3);border-color:rgba(118,118,118,0.3);background-color:rgba(239,239,239,0.3)}button,select,input[type=button],input[type=submit],input[type=reset],input[type=color],input[type=checkbox],input[type=radio]{box-sizing:border-box}',
+    'input,textarea,select{background-color:rgb(255,255,255);border:2px inset rgb(118,118,118)}input{padding:1px 2px}textarea{padding:2px;white-space:pre-wrap}button,input[type=button],input[type=submit],input[type=reset]{padding:1px 6px;border:2px outset rgb(118,118,118);background-color:rgb(239,239,239);text-align:center;cursor:default}input[type=hidden]{display:none}input[type=color]{width:50px;height:27px;padding:1px 2px;border:1px solid rgb(118,118,118);border-radius:2px;background-color:rgb(239,239,239)}input[type=range]{width:129px;height:16px;margin:2px;padding:0;border:0;background-color:transparent}input[type=file]{padding:0;border:0;background-color:transparent}input[type=checkbox]{margin:3px 3px 3px 4px}input[type=radio]{margin:3px 3px 0 5px}button:disabled,input[type=button]:disabled,input[type=submit]:disabled,input[type=reset]:disabled{color:rgba(16,16,16,0.3);border-color:rgba(118,118,118,0.3);background-color:rgba(239,239,239,0.3)}button,select,input[type=button],input[type=submit],input[type=reset],input[type=color],input[type=checkbox],input[type=radio]{box-sizing:border-box}',
     'img,svg,video,canvas,iframe,embed,object{display:inline-block}svg:not(:root){overflow:hidden}iframe{border:2px inset rgb(118,118,118)}fieldset{margin-left:2px;margin-right:2px;padding:.35em .75em .625em;border:2px groove rgb(192,192,192)}legend{padding-left:2px;padding-right:2px}',
     '[dir=rtl]{direction:rtl}[dir=ltr]{direction:ltr}',
     '[popover]:not(:popover-open):not(dialog[open]){display:none}[popover]{position:fixed;inset:0;width:fit-content;height:fit-content;margin:auto;border:solid;padding:.25em;overflow:auto;color:black;background-color:white}dialog:modal{position:fixed;top:0;bottom:0;max-width:calc(100% - 6px - 2em);max-height:calc(100% - 6px - 2em);overflow:auto}',
@@ -8896,9 +9101,19 @@
       if (n.disabled) a.disabled = true;
       // the text before the caret, and before each end of the selection,
       // where the host draws them (prefixes: the host counts its own units)
-      if (doc && doc._active === n && isTextControl(n)) {
-        var ss = Math.min(n.selectionStart, a.value.length), se = Math.min(n.selectionEnd, a.value.length);
-        a.caret = a.value.slice(0, n.selectionDirection === 'backward' ? ss : se);
+      // what Chromium shows for the types it draws itself (en-US): a
+      // date's own format, a range's thumb, a file's button text, a
+      // list box's options
+      if (n.localName === 'input') {
+        var ity = n.type;
+        if (ity === 'range') { var rgb0 = rangeBounds(n); a.rf = rgb0[1] > rgb0[0] ? (parseFloat(n.value) - rgb0[0]) / (rgb0[1] - rgb0[0]) : 0; }
+        else if (/^(date|time|datetime-local|month|week)$/.test(ity)) { a.value = dateShown(ity, n.value); a.picker = ity === 'time' ? 'clock' : 'calendar'; if (!n.value) { a.placeholder = a.value; a.value = ''; } }
+        else if (ity === 'file') { var fl0 = n._files || []; a.value = fl0.length ? (fl0.length === 1 ? fl0[0].name : fl0.length + ' files') : 'No file chosen'; }
+      }
+      if (n.localName === 'select' && (n.multiple || n.size > 1)) a.opts = n.options.map(function (o) { return [o.text, o.selected ? 1 : 0]; });
+      if (doc && doc._active === n && isTextControl(n) && !/^(date|time|datetime-local|month|week)$/.test(n.type) && !(n.readOnly && n._ss === n._se)) {
+        var ss = Math.min(n._ss, a.value.length), se = Math.min(n._se, a.value.length);
+        a.caret = a.value.slice(0, n._sd === 'backward' ? ss : se);
         if (ss < se) a.sel = [a.value.slice(0, ss), a.value.slice(0, se)];
       }
     }
@@ -10692,9 +10907,9 @@
   }
   // anchor and focus as a range with its direction
   function selectRange(el, anchor, focus) {
-    el.selectionStart = Math.min(anchor, focus);
-    el.selectionEnd = Math.max(anchor, focus);
-    el.selectionDirection = focus < anchor ? 'backward' : anchor === focus ? 'none' : 'forward';
+    el._ss = Math.min(anchor, focus);
+    el._se = Math.max(anchor, focus);
+    el._sd = focus < anchor ? 'backward' : anchor === focus ? 'none' : 'forward';
   }
   function typeText(el, text, kind) {
     kind = kind || 'insertText';
@@ -10703,12 +10918,14 @@
       var before = new InputEvent('beforeinput', { bubbles: true, cancelable: true, composed: true, data: text, inputType: kind });
       if (!dispatch(el, before)) return;
       var v = el.value;
-      var s = Math.min(el.selectionStart, v.length), e = Math.min(el.selectionEnd, v.length);
+      var s = Math.min(el._ss, v.length), e = Math.min(el._se, v.length);
       if (el.localName === 'input') text = text.replace(/[\r\n]/g, '');
       var max = el.maxLength;
       if (max >= 0 && v.length - (e - s) + text.length > max) text = text.slice(0, Math.max(0, max - (v.length - (e - s))));
       el._value = v.slice(0, s) + text + v.slice(e);
-      el.selectionStart = el.selectionEnd = s + text.length;
+      el._ss = el._se = s + text.length;
+      el._sd = 'none';
+      el._dirty = true;
       valueChanged(el);
       dispatch(el, new InputEvent('input', { bubbles: true, composed: true, data: text, inputType: kind }));
       return;
@@ -10717,6 +10934,71 @@
       el.appendChild(el.ownerDocument.createTextNode(text));
       dispatch(el, new InputEvent('input', { bubbles: true, composed: true, data: text, inputType: kind }));
     }
+  }
+  // document.execCommand's editing in the focused field or editing host,
+  // as the browser's own typing (the value set as the browser sets it, not
+  // through the value setter, which React's value tracker wraps)
+  function editCommand(el, cmd, text) {
+    if (!el) return false;
+    if (el.localName === 'textarea' || (el.localName === 'input' && /^(text|search|tel|url|email|password|number)$/.test(el.type))) {
+      if (el.readOnly || el.disabled) return false;
+      var v = el.value, s = Math.min(el._ss, v.length), e = Math.min(el._se, v.length), kind = 'insertText';
+      if (cmd === 'selectall') { el._ss = 0; el._se = v.length; el._sd = 'none'; selectionChanged(el); return true; }
+      if (cmd === 'delete' || cmd === 'forwarddelete') {
+        if (s === e) { if (cmd === 'delete' && s > 0) s--; else if (cmd === 'forwarddelete' && e < v.length) e++; }
+        if (s === e) return true;
+        text = '';
+        kind = cmd === 'delete' ? 'deleteContentBackward' : 'deleteContentForward';
+      } else if (cmd !== 'inserttext') { if (el.localName !== 'textarea') return false; text = '\n'; kind = cmd === 'insertlinebreak' ? 'insertLineBreak' : 'insertParagraph'; }
+      if (el.localName === 'input') text = text.replace(/[\r\n]/g, '');
+      if (el.type === 'number') text = text.replace(/[^0-9eE+\-.]/g, '');
+      var max = el.maxLength;
+      if (max >= 0 && v.length - (e - s) + text.length > max) text = text.slice(0, Math.max(0, max - (v.length - (e - s))));
+      if (!text && s === e) return true;
+      el._value = v.slice(0, s) + text + v.slice(e);
+      el._ss = el._se = s + text.length;
+      el._sd = 'none';
+      el._dirty = true;
+      valueChanged(el);
+      // (Chromium gives no data for a line break typed as text)
+      dispatch(el, new InputEvent('input', { bubbles: true, composed: true, data: kind === 'insertText' && text.indexOf('\n') < 0 ? text : null, inputType: kind }));
+      return true;
+    }
+    if (el.isContentEditable) {
+      if (cmd === 'selectall') { selection.selectAllChildren(el); return true; }
+      var r = selection._ranges[0];
+      if (!r || !el.contains(r.startContainer)) { r = new Range(el.ownerDocument || doc); r.selectNodeContents(el); r.collapse(false); }
+      if (!r.collapsed && r.deleteContents) r.deleteContents();
+      if (cmd === 'delete' || cmd === 'forwarddelete') {
+        var tn = r.startContainer;
+        if (tn.nodeType === 3) {
+          var o = r.startOffset;
+          if (cmd === 'delete' && o > 0) { tn.data = tn.data.slice(0, o - 1) + tn.data.slice(o); o--; }
+          else if (cmd === 'forwarddelete' && o < tn.data.length) tn.data = tn.data.slice(0, o) + tn.data.slice(o + 1);
+          selection.collapse(tn, o);
+        }
+        dispatch(el, new InputEvent('input', { bubbles: true, composed: true, inputType: cmd === 'delete' ? 'deleteContentBackward' : 'deleteContentForward' }));
+        return true;
+      }
+      if (cmd !== 'inserttext') {
+        var br = (el.ownerDocument || doc).createElement('br');
+        r.insertNode ? r.insertNode(br) : el.appendChild(br);
+        selection.collapse(br.parentNode, Array.prototype.indexOf.call(br.parentNode.childNodes, br) + 1);
+        dispatch(el, new InputEvent('input', { bubbles: true, composed: true, inputType: cmd === 'insertlinebreak' ? 'insertLineBreak' : 'insertParagraph' }));
+        return true;
+      }
+      var at = r.startContainer, off = r.startOffset, node;
+      if (at.nodeType === 3) { at.data = at.data.slice(0, off) + text + at.data.slice(off); node = at; off += text.length; }
+      else {
+        var before = at.childNodes[off - 1];
+        if (before && before.nodeType === 3) { node = before; off = before.data.length + text.length; before.data += text; }
+        else { node = (el.ownerDocument || doc).createTextNode(text); at.insertBefore(node, at.childNodes[off] || null); off = text.length; }
+      }
+      selection.collapse(node, off);
+      dispatch(el, new InputEvent('input', { bubbles: true, composed: true, data: text, inputType: 'insertText' }));
+      return true;
+    }
+    return false;
   }
   function keyDefault(el, m) {
     var k = m.key;
@@ -10729,7 +11011,7 @@
       return;
     }
     if (isTextControl(el)) {
-      var v = el.value, s = el.selectionStart, e = el.selectionEnd;
+      var v = el.value, s = el._ss, e = el._se;
       if (k === 'Backspace' || k === 'Delete') {
         if (el.readOnly || el.disabled) return;
         if (s === e) { if (k === 'Backspace' && s > 0) s--; else if (k === 'Delete' && e < v.length) e++; }
@@ -10737,19 +11019,20 @@
         var kind = k === 'Backspace' ? 'deleteContentBackward' : 'deleteContentForward';
         if (!dispatch(el, new InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType: kind }))) return;
         el._value = v.slice(0, s) + v.slice(e);
-        el.selectionStart = el.selectionEnd = s;
-        changed();
+        el._ss = el._se = s;
+        el._dirty = true;
+        valueChanged(el);
         dispatch(el, new InputEvent('input', { bubbles: true, composed: true, inputType: kind }));
         return;
       }
       if (k === 'ArrowLeft' || k === 'ArrowRight' || k === 'Home' || k === 'End') {
-        var back = el.selectionDirection === 'backward';
+        var back = el._sd === 'backward';
         var focusAt = back ? s : e, anchorAt = back ? e : s;
         var to = k === 'Home' ? 0 : k === 'End' ? v.length : k === 'ArrowLeft' ? (m.shift || s === e ? focusAt - 1 : s) : (m.shift || s === e ? focusAt + 1 : e);
         to = Math.max(0, Math.min(v.length, to));
         // Shift extends the selection from its anchor; else the caret moves
         if (m.shift) selectRange(el, anchorAt, to);
-        else { el.selectionStart = el.selectionEnd = to; el.selectionDirection = 'none'; }
+        else { el._ss = el._se = to; el._sd = 'none'; }
         changed();
         return;
       }
@@ -10760,7 +11043,7 @@
         return;
       }
       if (m.ctrl || m.meta) {
-        if (k === 'a') { el.selectionStart = 0; el.selectionEnd = v.length; changed(); }
+        if (k === 'a') { el._ss = 0; el._se = v.length; changed(); }
       }
       return;
     }
@@ -11383,7 +11666,6 @@
     C.prototype.checkValidity = function () {
       var ok = true, list = this.localName === 'form' ? this.elements : this.querySelectorAll('input,select,textarea,button');
       for (var i = 0; i < list.length; i++) if (list[i].localName !== 'fieldset' && !checkOne(list[i])) ok = false;
-      if (!ok && this.localName === 'form') dispatch(this, new Event('invalid', { cancelable: true }));
       return ok;
     };
     C.prototype.reportValidity = C.prototype.checkValidity;
