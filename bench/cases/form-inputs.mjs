@@ -1,0 +1,60 @@
+// SPDX-License-Identifier: MIT
+const css = [
+  "body{margin:0;font:14px Arial;color:#222;background:#fff}",
+  "form{display:grid;grid-template-columns:repeat(2,560px);gap:6px 24px;padding:12px 16px}",
+  ".row{display:flex;align-items:center;gap:8px;height:30px}",
+  ".row label{width:120px;flex:none;color:#555}",
+  ".tf{font:inherit;width:300px;height:26px;padding:0 6px;border:1px solid #8a8a8a;border-radius:3px;background:#fff;box-sizing:border-box;color:#111}",
+  ".tf::placeholder{color:#8a8a8a}",
+  ".tf:focus{outline:2px solid rgb(30,110,230);outline-offset:0}",
+  ".tf:invalid{border-color:rgb(220,0,0);background:rgb(255,240,240)}",
+  ".tf:disabled{background:#eee;color:#999}",
+  ".tf[readonly]{background:#f6f6f6}",
+  "#t-tall{height:40px}#t-pad{height:auto;padding:10px 8px}#t-lh{line-height:30px;height:34px}",
+  ".row.big{height:64px}textarea.tf{height:56px;padding:4px 6px;resize:none}",
+  "select.tf{padding:0 4px}select[multiple].tf{height:60px}",
+  "#ce{width:300px;min-height:24px;padding:3px 6px;border:1px solid #8a8a8a;border-radius:3px}",
+  "#ce:focus{outline:2px solid rgb(30,110,230)}",
+  "input[type=checkbox]:checked+span,input[type=radio]:checked+span{font-weight:bold;color:rgb(0,110,0)}",
+  "#out{grid-column:1 / span 2;font:12px monospace;color:#444;white-space:pre-wrap;height:40px;overflow:hidden}",
+].join("\n");
+
+const row = (label, control, big) => `<div class="row${big ? " big" : ""}"><label>${label}</label>${control}</div>`;
+const body = '<form id="f" novalidate>' + [
+  row("text", '<input id="t-text" class="tf" type="text" placeholder="Type here">'),
+  row("text (value)", '<input id="t-val" class="tf" type="text" value="Default value">'),
+  row("password", '<input id="t-pass" class="tf" type="password" placeholder="Password">'),
+  row("email", '<input id="t-email" class="tf" type="email" placeholder="name@example.com">'),
+  row("number", '<input id="t-num" class="tf" type="number" min="0" max="50" step="2" value="10">'),
+  row("search", '<input id="t-search" class="tf" type="search" placeholder="Search">'),
+  row("tel", '<input id="t-tel" class="tf" type="tel" placeholder="+358 40 123 4567">'),
+  row("url", '<input id="t-url" class="tf" type="url" placeholder="https://">'),
+  row("required", '<input id="t-req" class="tf" type="text" required placeholder="Required">'),
+  row("disabled", '<input id="t-dis" class="tf" type="text" value="Disabled" disabled>'),
+  row("readonly", '<input id="t-ro" class="tf" type="text" value="Read only" readonly>'),
+  row("40px tall", '<input id="t-tall" class="tf" type="text" value="Tall field">'),
+  row("padding 10px", '<input id="t-pad" class="tf" type="text" value="Padded field">', true),
+  row("line-height 30px", '<input id="t-lh" class="tf" type="text" value="Line height">'),
+  row("textarea", '<textarea id="t-area" class="tf" placeholder="Several lines"></textarea>', true),
+  row("date", '<input id="t-date" class="tf" type="date" value="2026-11-15" min="2026-01-01">'),
+  row("time", '<input id="t-time" class="tf" type="time" value="13:45">'),
+  row("datetime-local", '<input id="t-dtl" class="tf" type="datetime-local" value="2026-11-15T13:45">'),
+  row("month", '<input id="t-month" class="tf" type="month" value="2026-11">'),
+  row("week", '<input id="t-week" class="tf" type="week" value="2026-W46">'),
+  row("color", '<input id="t-color" type="color" value="#3366cc">'),
+  row("range", '<input id="t-range" type="range" min="0" max="100" step="10" value="40" style="width:300px">'),
+  row("checkbox", '<input id="t-cb" type="checkbox"><span>Accept</span> <input id="t-cb2" type="checkbox" checked><span>Checked</span>'),
+  row("radio", '<input id="t-r1" type="radio" name="plan" value="a" checked><span>A</span> <input id="t-r2" type="radio" name="plan" value="b"><span>B</span> <input id="t-r3" type="radio" name="plan" value="c"><span>C</span>'),
+  row("select", '<select id="t-sel" class="tf"><option value="a">Alpha</option><option value="b" selected>Beta</option><option value="c">Gamma</option></select>'),
+  row("select multiple", '<select id="t-multi" class="tf" multiple><option value="1">One</option><option value="2">Two</option><option value="3">Three</option><option value="4">Four</option></select>', true),
+  row("file", '<input id="t-file" type="file">'),
+  row("contenteditable", '<div id="ce" contenteditable="true">Edit me</div>'),
+].join("") + '<div id="out"></div></form>';
+
+export default {
+  area: "Form controls (plain HTML)",
+  lib: "HTML input types",
+  about: "Every input type (text, password, email, number, search, tel, url, date, time, datetime-local, month, week, color, range, checkbox, radio, file), textarea, select (single and multiple) and contenteditable. Steps focus, type (document.execCommand insertText, as test tools type), move the caret, select, blur and refocus, and check placeholder, disabled/readonly, :invalid, stepUp/stepDown, valueAsNumber, reset and checkValidity. The probe has each field's value, selection, focus and pseudo-class state; the picture check looks at each field: its text drawn and vertically where the browser puts it, the focused field's caret at its offset, the selection's band, checkbox/radio marks.",
+  page: (ctx) => ({ css, body, scripts: [ctx.file("pages/form-inputs.js")] }),
+};
+

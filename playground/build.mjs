@@ -85,6 +85,14 @@ put(path.join(ROOT, "ranger.json"), "ranger.json");
 put(path.join(ROOT, "ranger.lock"), "ranger.lock");
 fs.symlinkSync(path.join(ROOT, "vendor"), path.join(STAGE, "vendor"));
 
+// (the compiler finds gallery/<name> in the Ranger tree before the staged
+// one: the WebAssembly build below stages view/ and json/ there, and a copy
+// left by an earlier build was compiled instead of view/. So they are put
+// there now, as they are.)
+for (const [from, g] of [["view", "domview"], ["json", "domjson"]]) {
+  fs.rmSync(path.join(RANGER, "gallery", g), { recursive: true, force: true });
+  fs.cpSync(path.join(ROOT, from), path.join(RANGER, "gallery", g), { recursive: true, filter: (p) => !p.includes(`${path.sep}target`) });
+}
 console.log("==> rangerdom_pg.js (Ranger -> JavaScript)");
 let log = "";
 try {

@@ -3837,6 +3837,36 @@ impl DomView {
         e.borrow_mut().children = kids.clone();
         out
     }
+    /// the page's focused text field gets its caret, or its selection's
+    /// bands (decorate), in the laid out page `b` (built from `page` with
+    /// `index`): for a host that draws the page as EVG laid it out
+    #[doc(hidden)]
+    pub fn decorateFocused(eng: &Rc<RefCell<EVGTextEngine>>, b: &Rc<RefCell<EVGElement>>, page: &Rc<RefCell<JsonValue>>, index: i64) {
+        let root: Rc<RefCell<JsonValue>> = page.borrow().get("root");
+        let f: Rc<RefCell<JsonValue>> = DomView::focusedField(&root);
+        if f.borrow().kind == 5 {
+            let fid: String = format!("mfd-xd-{}-{}", index, f.borrow().get("i").borrow().text());
+            let e: Rc<RefCell<EVGElement>> = DomView::elementById(b, fid.clone());
+            if e.borrow().id == fid {
+                DomView::decorate(eng, &e, &f);
+            }
+        }
+    }
+    /// the element `id` under `e`, or `e`
+    #[doc(hidden)]
+    pub fn elementById(e: &Rc<RefCell<EVGElement>>, id: String) -> Rc<RefCell<EVGElement>> {
+        if e.borrow().id == id {
+            return e.clone();
+        }
+        let __it_c = e.borrow().children.clone();
+        for c in __it_c.iter().cloned() {
+            let f: Rc<RefCell<EVGElement>> = DomView::elementById(&c, id.clone());
+            if f.borrow().id == id {
+                return f;
+            }
+        }
+        e.clone()
+    }
     /// the page's focused text field (its "a" has the caret), or a value that
     /// is not an object; the window draws its caret and selection over it
     pub fn focusedField(n: &Rc<RefCell<JsonValue>>) -> Rc<RefCell<JsonValue>> {
@@ -7900,6 +7930,142 @@ impl DomView {
                 EVGElement::set_attribute(&mark, "width", "13px".to_string());
                 EVGElement::set_attribute(&mark, "height", "13px".to_string());
                 EVGElement::add_child(&e, Rc::clone(&mark));
+                self.outlineBox(&e, &s, &inh, &display);
+                return e;
+            }
+            let ity: String = a.borrow().getText("type");
+            if t == "input" && ity == "color" {
+                // a swatch of its colour in a button, as Chromium draws it
+                let sw: Rc<RefCell<EVGElement>> = EVGElement::create_div();
+                EVGElement::set_attribute(&sw, "width", "100%".to_string());
+                EVGElement::set_attribute(&sw, "height", "100%".to_string());
+                EVGElement::set_attribute(&sw, "box-sizing", "border-box".to_string());
+                EVGElement::set_attribute(&sw, "border-width", "1px".to_string());
+                EVGElement::set_attribute(&sw, "border-color", "rgb(119, 119, 119)".to_string());
+                let mut swc: String = a.borrow().getText("value");
+                if swc.is_empty() {
+                    swc = "#000000".to_string();
+                }
+                EVGElement::set_attribute(&sw, "background-color", swc.clone());
+                EVGElement::add_child(&e, Rc::clone(&sw));
+                e.borrow_mut().role = "button".to_string();
+                self.outlineBox(&e, &s, &inh, &display);
+                return e;
+            }
+            if t == "input" && ity == "range" {
+                // a track filled up to the thumb, the thumb, the rest: three
+                // items of a row, the thumb at the value's share of the
+                // room the thumb leaves
+                let mut rf: f64 = a.borrow().getText("rf").parse::<f64>().ok().unwrap_or(0.5);
+                if rf < 0.0 {
+                    rf = 0.0;
+                }
+                if rf > 1.0 {
+                    rf = 1.0;
+                }
+                let mut rd: String = "flex".to_string();
+                if display == "inline-block" || display.is_empty() {
+                    rd = "inline-flex".to_string();
+                }
+                EVGElement::set_attribute(&e, "display", rd.clone());
+                EVGElement::set_attribute(&e, "flex-direction", "row".to_string());
+                EVGElement::set_attribute(&e, "flex-wrap", "nowrap".to_string());
+                EVGElement::set_attribute(&e, "align-items", "center".to_string());
+                let mut accent: String = "#0075ff".to_string();
+                if a.borrow().getBool("disabled", false) {
+                    accent = "#cbcbcb".to_string();
+                }
+                let fill: Rc<RefCell<EVGElement>> = EVGElement::create_div();
+                EVGElement::set_attribute(&fill, "height", "4px".to_string());
+                EVGElement::set_attribute(&fill, "flex-basis", "0px".to_string());
+                EVGElement::set_attribute(&fill, "flex-grow", DomView::fmt(rf));
+                EVGElement::set_attribute(&fill, "margin-right", "-2px".to_string());
+                EVGElement::set_attribute(&fill, "border-radius", "2px".to_string());
+                EVGElement::set_attribute(&fill, "background-color", accent.clone());
+                let thumb: Rc<RefCell<EVGElement>> = EVGElement::create_div();
+                EVGElement::set_attribute(&thumb, "width", "16px".to_string());
+                EVGElement::set_attribute(&thumb, "height", "16px".to_string());
+                EVGElement::set_attribute(&thumb, "flex-shrink", "0".to_string());
+                EVGElement::set_attribute(&thumb, "border-radius", "8px".to_string());
+                EVGElement::set_attribute(&thumb, "background-color", accent.clone());
+                let rest: Rc<RefCell<EVGElement>> = EVGElement::create_div();
+                EVGElement::set_attribute(&rest, "height", "4px".to_string());
+                EVGElement::set_attribute(&rest, "flex-basis", "0px".to_string());
+                EVGElement::set_attribute(&rest, "flex-grow", DomView::fmt(1.0 - rf));
+                EVGElement::set_attribute(&rest, "margin-left", "-2px".to_string());
+                EVGElement::set_attribute(&rest, "box-sizing", "border-box".to_string());
+                EVGElement::set_attribute(&rest, "border-width", "1px".to_string());
+                EVGElement::set_attribute(&rest, "border-color", "rgb(178, 178, 178)".to_string());
+                EVGElement::set_attribute(&rest, "border-radius", "2px".to_string());
+                EVGElement::set_attribute(&rest, "background-color", "rgb(239, 239, 239)".to_string());
+                EVGElement::add_child(&e, Rc::clone(&fill));
+                EVGElement::add_child(&e, Rc::clone(&thumb));
+                EVGElement::add_child(&e, Rc::clone(&rest));
+                e.borrow_mut().role = "slider".to_string();
+                self.outlineBox(&e, &s, &inh, &display);
+                return e;
+            }
+            if t == "input" && ity == "file" {
+                // a button, then what was chosen
+                let mut fdp: String = "flex".to_string();
+                if display == "inline-block" || display.is_empty() {
+                    fdp = "inline-flex".to_string();
+                }
+                EVGElement::set_attribute(&e, "display", fdp.clone());
+                EVGElement::set_attribute(&e, "flex-direction", "row".to_string());
+                EVGElement::set_attribute(&e, "flex-wrap", "nowrap".to_string());
+                EVGElement::set_attribute(&e, "align-items", "center".to_string());
+                let fb: Rc<RefCell<EVGElement>> = EVGElement::create_div();
+                EVGElement::set_attribute(&fb, "padding-top", "1px".to_string());
+                EVGElement::set_attribute(&fb, "padding-bottom", "1px".to_string());
+                EVGElement::set_attribute(&fb, "padding-left", "6px".to_string());
+                EVGElement::set_attribute(&fb, "padding-right", "6px".to_string());
+                EVGElement::set_attribute(&fb, "margin-right", "4px".to_string());
+                EVGElement::set_attribute(&fb, "border-width", "1px".to_string());
+                EVGElement::set_attribute(&fb, "border-color", "rgb(118, 118, 118)".to_string());
+                EVGElement::set_attribute(&fb, "border-radius", "2px".to_string());
+                EVGElement::set_attribute(&fb, "background-color", "rgb(239, 239, 239)".to_string());
+                EVGElement::set_attribute(&fb, "flex-shrink", "0".to_string());
+                EVGElement::set_attribute(&fb, "width", "fit-content".to_string());
+                let mut bl: String = "Choose File".to_string();
+                if a.borrow().has("multiple") {
+                    bl = "Choose Files".to_string();
+                }
+                EVGElement::add_child(&fb, self.textEl(bl.clone(), &tinh, String::new()));
+                EVGElement::add_child(&e, Rc::clone(&fb));
+                let ft: Rc<RefCell<EVGElement>> = self.textEl(val.clone(), &tinh, String::new());
+                EVGElement::set_attribute(&ft, "white-space", "pre".to_string());
+                EVGElement::add_child(&e, ft.clone());
+                e.borrow_mut().role = "button".to_string();
+                self.outlineBox(&e, &s, &inh, &display);
+                return e;
+            }
+            let opts: Rc<RefCell<JsonValue>> = a.borrow().get("opts");
+            if t == "select" && opts.borrow().kind == 4 {
+                // a list box: its options, one a line, the selected ones on
+                // Chromium's grey (an unfocused list box's)
+                EVGElement::set_attribute(&e, "overflow", "hidden".to_string());
+                let __it_o = opts.borrow().items.clone();
+                for o in __it_o.iter().cloned() {
+                    let ln: Rc<RefCell<EVGElement>> = EVGElement::create_div();
+                    let on: bool = o.borrow().items.len() > 1 && o.borrow().items[1].clone().borrow().text() == "1";
+                    if on {
+                        EVGElement::set_attribute(&ln, "background-color", "rgb(206, 206, 206)".to_string());
+                    }
+                    let mut ot: String = String::new();
+                    if !o.borrow().items.is_empty() {
+                        ot = o.borrow().items[0].clone().borrow().text();
+                    }
+                    if ot.is_empty() {
+                        ot = " ".to_string();
+                    }
+                    let ote: Rc<RefCell<EVGElement>> = self.textEl(ot.clone(), &inh, String::new());
+                    EVGElement::set_attribute(&ote, "white-space", "pre".to_string());
+                    EVGElement::add_child(&ln, ote.clone());
+                    EVGElement::add_child(&e, Rc::clone(&ln));
+                }
+                e.borrow_mut().role = "listbox".to_string();
+                self.outlineBox(&e, &s, &inh, &display);
                 return e;
             }
             if t == "textarea" && (s.borrow().getText("height").as_bytes().len() as i64) == 0 {
@@ -7915,8 +8081,9 @@ impl DomView {
             }
             if DomView::textField(n) {
                 // its text scrolls inside it (the window shifts it, decorate):
-                // an input's on one line, a textarea's wrapped
-                EVGElement::set_attribute(&e, "overflow", "hidden".to_string());
+                // an input's on one line, a textarea's wrapped (the text
+                // element clips it, below: the field's own box does not, so
+                // that its outline, outside it, is drawn)
                 let mut ws: String = "pre-wrap".to_string();
                 if t == "input" {
                     ws = "pre".to_string();
@@ -7961,12 +8128,70 @@ impl DomView {
             if val.is_empty() && DomView::textField(n) {
                 val = " ".to_string();
             }
+            // a one-line control's text is centred in its content box, as
+            // Chromium centres its inner editor (a field taller than its
+            // line, Bootstrap's, AG Grid's filter): a flex row, centred
+            if t != "textarea" && (display == "inline-block" || display == "block" || display.is_empty()) {
+                let mut fd: String = "flex".to_string();
+                if display == "inline-block" || display.is_empty() {
+                    fd = "inline-flex".to_string();
+                }
+                EVGElement::set_attribute(&e, "display", fd.clone());
+                EVGElement::set_attribute(&e, "flex-direction", "row".to_string());
+                EVGElement::set_attribute(&e, "flex-wrap", "nowrap".to_string());
+                EVGElement::set_attribute(&e, "align-items", "center".to_string());
+                let fta: String = DomView::alignOf(&inh);
+                if fta == "center" {
+                    EVGElement::set_attribute(&e, "justify-content", "center".to_string());
+                } else if fta == "right" || fta == "end" {
+                    EVGElement::set_attribute(&e, "justify-content", "flex-end".to_string());
+                } else {
+                    EVGElement::set_attribute(&e, "justify-content", "flex-start".to_string());
+                }
+            }
             e.borrow_mut().role = "textbox".to_string();
             e.borrow_mut().a11y_value = a.borrow().getText("value");
             if e.borrow().a11y_label.is_empty() {
                 e.borrow_mut().a11y_label = a.borrow().getText("placeholder");
             }
-            EVGElement::add_child(&e, self.textEl(val.clone(), &tinh, String::new()));
+            let fte: Rc<RefCell<EVGElement>> = self.textEl(val.clone(), &tinh, String::new());
+            if DomView::textField(n) {
+                EVGElement::set_attribute(&fte, "overflow", "hidden".to_string());
+                if t == "textarea" {
+                    EVGElement::set_attribute(&fte, "height", "100%".to_string());
+                } else {
+                    EVGElement::set_attribute(&fte, "flex-shrink", "1".to_string());
+                    EVGElement::set_attribute(&fte, "min-width", "0px".to_string());
+                }
+            }
+            EVGElement::add_child(&e, fte.clone());
+            // a select's arrow, a date's calendar or a time's clock, at the
+            // end of the field, as Chromium draws them
+            let pk: String = a.borrow().getText("picker");
+            if t == "select" || !pk.is_empty() {
+                let icon: Rc<RefCell<EVGElement>> = EVGElement::create_div();
+                icon.borrow_mut().tag_name = "svg".to_string();
+                let mut ic: String = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"12\" height=\"12\" viewBox=\"0 0 12 12\"><path d=\"M2 4 L6 8 L10 4\" fill=\"none\" stroke=\"#111111\" stroke-width=\"1.5\"/></svg>".to_string();
+                if pk == "calendar" {
+                    ic = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"12\" height=\"12\" viewBox=\"0 0 12 12\"><rect x=\"1.5\" y=\"2.5\" width=\"9\" height=\"8\" fill=\"none\" stroke=\"#111111\" stroke-width=\"1.2\"/><rect x=\"1.5\" y=\"2.5\" width=\"9\" height=\"2.5\" fill=\"#111111\"/></svg>".to_string();
+                }
+                if pk == "clock" {
+                    ic = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"12\" height=\"12\" viewBox=\"0 0 12 12\"><circle cx=\"6\" cy=\"6\" r=\"4.8\" fill=\"none\" stroke=\"#111111\" stroke-width=\"1.2\"/><path d=\"M6 3.2 L6 6 L8 7.2\" fill=\"none\" stroke=\"#111111\" stroke-width=\"1.2\"/></svg>".to_string();
+                }
+                EVGElement::set_attribute(&icon, "svg", ic.clone());
+                EVGElement::set_attribute(&icon, "viewBox", "0 0 12 12".to_string());
+                EVGElement::set_attribute(&icon, "width", "12px".to_string());
+                EVGElement::set_attribute(&icon, "height", "12px".to_string());
+                EVGElement::set_attribute(&icon, "flex-shrink", "0".to_string());
+                EVGElement::set_attribute(&icon, "margin-left", "auto".to_string());
+                EVGElement::set_attribute(&fte, "overflow", "hidden".to_string());
+                EVGElement::set_attribute(&fte, "flex-shrink", "1".to_string());
+                EVGElement::set_attribute(&fte, "min-width", "0px".to_string());
+                EVGElement::add_child(&e, Rc::clone(&icon));
+            }
+            // (its outline, a :focus rule's: the control returns before the
+            // other elements' outlines are added)
+            self.outlineBox(&e, &s, &inh, &display);
             return e;
         }
         // (a drawn canvas has its picture and its text as children,

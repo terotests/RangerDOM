@@ -76,6 +76,9 @@ class Playground {
         lay.setPageSize(w h)
         lay.layout(root)
         DomView.settle(b)
+        ; the focused field's caret or selection
+        def eng:EVGTextEngine (lay.getTextEngine())
+        DomView.decorateFocused(eng b page 0)
         def boxes:string (DomView.boxes(b 0))
         realm.layout(("{\"boxes\":" + boxes + "}"))
         return boxes
