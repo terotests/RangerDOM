@@ -8711,8 +8711,11 @@
     if (!p) return JSON.parse(str);
     var o = Object.assign({}, p.o);
     Object.defineProperty(o, '_p', { value: p, enumerable: false, writable: true });
-    if (p.raw !== undefined) { Object.defineProperty(o, '_raw', { value: p.raw, enumerable: false, writable: true }); return o; }
-    o.c = p.kids.map(function (k, i) { return partsOf(k, p.kel[i]); });
+    // (a cell: its children are p.raw, JSON text)
+    if (p.raw !== undefined) return o;
+    // (cw: a row's cells as collapseTable left them untouched, the row
+    // having gone out as it did before)
+    o.c = p.cw || p.kids.map(function (k, i) { return partsOf(k, p.kel[i]); });
     return o;
   }
   // (pjDelta: a delta render's text of the same part is left in pjLast. A
@@ -8729,8 +8732,8 @@
     return lastDelta;
   }
   function partsJson(o) {
-    var p = o._p;
-    if (o._raw === undefined) {
+    var p = o._p, rw = p ? p.raw : undefined;
+    if (rw === undefined) {
       if (o._cmOut !== undefined) { pjLast = pjDelta ? rowDelta(p, o._cmOut) : o._cmOut; return o._cmOut; }
       if (!o.c || !o.c.length || typeof o.c[0] !== 'object') { var j0 = JSON.stringify(o); pjLast = j0; return j0; }
       var cs0 = o.c; delete o.c;
@@ -8761,7 +8764,7 @@
     if (p && o._key !== undefined && p.clKey === o._key) { pjLast = p.clOut; return p.clOut; }
     var extra = o.c; if (extra) delete o.c;
     var own2 = JSON.stringify(o);
-    var raw = o._raw + (extra && extra.length ? (o._raw ? ',' : '') + extra.map(function (k) { return JSON.stringify(k); }).join(',') : '');
+    var raw = rw + (extra && extra.length ? (rw ? ',' : '') + extra.map(function (k) { return JSON.stringify(k); }).join(',') : '');
     var out = raw ? own2.slice(0, -1) + ',"c":[' + raw + ']}' : own2;
     if (p && o._key !== undefined) { p.clKey = o._key; p.clOut = out; }
     pjLast = out;
@@ -8911,23 +8914,31 @@
     });
     var SD = ['left', 'right', 'top', 'bottom'];
     var outerOf = function (cell, sd) { return (sd === 'left' && cell.c === 0) || (sd === 'right' && cell.c + cell.cs === ncols) || (sd === 'top' && cell.r === 0) || (sd === 'bottom' && cell.r + cell.rs === rows.length); };
-    cells.forEach(function (cell, ix) {
-      SD.forEach(function (sd, si) {
-        var b = won[ix][si];
-        if (outerOf(cell, sd) && b && b.st !== 'hidden' && b.w && (!outer[sd] || b.w > outer[sd].w)) outer[sd] = b;
-      });
-    });
+    // (the cells along the table's sides only: one of 4 000 cells inside
+    // asked nothing here)
+    var nrows = rows.length, atSide = function (cell) { return cell.c === 0 || cell.c + cell.cs === ncols || cell.r === 0 || cell.r + cell.rs === nrows; };
+    for (var ox = 0; ox < cells.length; ox++) {
+      var oc = cells[ox];
+      if (!atSide(oc)) continue;
+      for (var os = 0; os < 4; os++) {
+        var ob = won[ox][os], osd = SD[os];
+        if (outerOf(oc, osd) && ob && ob.st !== 'hidden' && ob.w && (!outer[osd] || ob.w > outer[osd].w)) outer[osd] = ob;
+      }
+    }
     // (outer edges that differ along a side: the table's border keeps the
     // widest for layout, unpainted, and each outer cell paints its own
     // outer half with a positioned strip over it)
     var mixed = {};
-    if (!capt) cells.forEach(function (cell, ix) {
-      SD.forEach(function (sd, si) {
-        if (!outerOf(cell, sd) || !outer[sd]) return;
-        var b = won[ix][si];
-        if (!b || b.st !== outer[sd].st || b.w !== outer[sd].w || b.c !== outer[sd].c) mixed[sd] = true;
-      });
-    });
+    if (!capt) for (var mx = 0; mx < cells.length; mx++) {
+      var mc = cells[mx];
+      if (!atSide(mc)) continue;
+      for (var ms = 0; ms < 4; ms++) {
+        var msd = SD[ms];
+        if (!outerOf(mc, msd) || !outer[msd]) continue;
+        var mb = won[mx][ms];
+        if (!mb || mb.st !== outer[msd].st || mb.w !== outer[msd].w || mb.c !== outer[msd].c) mixed[msd] = true;
+      }
+    }
     var anyMixed = mixed.left || mixed.right || mixed.top || mixed.bottom;
     // (a row settled as last time goes out as it did, partsJson)
     var useOut = function (ro) { return ro.ok && !anyMixed && ro.m.out !== undefined; };
@@ -8949,6 +8960,8 @@
     var strip = function (o) { if (!o || !o.s) return; o.s = Object.assign({}, o.s); ['left', 'right', 'top', 'bottom'].forEach(function (sd) { delete o.s['border-' + sd + '-style']; delete o.s['border-' + sd + '-width']; }); };
     var stripped = [];
     rows.forEach(function (r) {
+      var rp1 = r.row._p;
+      if (rp1) rp1.cw = useOut(r) ? r.row.c : null;
       if (useOut(r)) Object.defineProperty(r.row, '_cmOut', { value: r.m.out, enumerable: false });
       else { strip(r.row); if (r.m) { r.m.out = undefined; if (!anyMixed) Object.defineProperty(r.row, '_cmRec', { value: r.m, enumerable: false }); } }
       if (r.grp && stripped.indexOf(r.grp) < 0) { strip(r.grp); stripped.push(r.grp); }
