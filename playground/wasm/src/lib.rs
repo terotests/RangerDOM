@@ -17,6 +17,108 @@ use rangerdom_json::{JsonParser, JsonValue};
 use rangerdom_view::{DomSvgDocs, DomView};
 use rangerevg::{EVGDisplayList, EVGElement, EVGLayout, EVGUnit};
 
+// ---------------------------------------------------------------- text widths
+// In the browser the page's text is measured by the browser (main.js
+// `rangerdom.pg_measure`: a 2D canvas, the font the painter draws with), so
+// a line breaks where Chromium breaks it whatever face the page's families
+// resolve to there. DomView gives such a host the page's own family list
+// (`fm: "measure"`); the vertical metrics stay the table's Arial, which
+// DomView's line boxes assume. Natively (the example tools) the table
+// measures.
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "rangerdom")]
+extern "C" {
+    fn pg_measure(fp: *const u8, fl: usize, tp: *const u8, tl: usize, size: f64, bold: i32) -> f64;
+}
+
+#[cfg(target_arch = "wasm32")]
+mod measure {
+    use super::*;
+    use rangerevg::{EVGTextMeasurer, EVGTextMeasurerTrait, EVGTextMetrics, RgAnyRef};
+
+    pub struct BrowserMeasurer {
+        inner: EVGTextMeasurer,
+        widths: HashMap<String, f64>,
+    }
+    impl RgAnyRef for BrowserMeasurer {
+        fn rg_as_any(&self) -> &dyn std::any::Any { self }
+    }
+    impl BrowserMeasurer {
+        pub fn new() -> Self { BrowserMeasurer { inner: EVGTextMeasurer::new(), widths: HashMap::new() } }
+        /// a family DomView named (a CSS list ending in "mfd", maybe with
+        /// EVG's "-Bold"): the list and whether it is bold; None for a face
+        /// of the table's own (Arial, Ahem, the monospace)
+        fn split(family: &str) -> Option<(String, bool)> {
+            let (f, bold) = match family.strip_suffix("-Bold") { Some(f) => (f, true), None => (family, false) };
+            f.strip_suffix(", mfd").map(|l| (l.to_string(), bold))
+        }
+        fn width(&mut self, text: &str, family: &str, size: f64) -> f64 {
+            let Some((list, bold)) = Self::split(family) else { return self.inner.measure_text_width(text.to_string(), family.to_string(), size) };
+            if text.is_empty() { return 0.0 }
+            let key = format!("{}|{}|{}|{}", list, size, bold as u8, text);
+            if let Some(w) = self.widths.get(&key) { return *w }
+            let w = unsafe { pg_measure(list.as_ptr(), list.len(), text.as_ptr(), text.len(), size, bold as i32) };
+            if self.widths.len() > 60_000 { self.widths.clear() }
+            self.widths.insert(key, w);
+            w
+        }
+        /// the table's Arial for the vertical numbers
+        fn table_face(family: &str) -> String {
+            match Self::split(family) { Some((_, true)) => "Arial-Bold".to_string(), Some(_) => "Arial".to_string(), None => family.to_string() }
+        }
+    }
+    impl EVGTextMeasurerTrait for BrowserMeasurer {
+        fn rgf_adv_table(&self) -> &Vec<f64> { &self.inner.adv_table }
+        fn rgf_adv_table_mut(&mut self) -> &mut Vec<f64> { &mut self.inner.adv_table }
+        fn rgf_mono_table(&self) -> &Vec<f64> { &self.inner.mono_table }
+        fn rgf_mono_table_mut(&mut self) -> &mut Vec<f64> { &mut self.inner.mono_table }
+        fn rgf_latin_table(&self) -> &Vec<f64> { &self.inner.latin_table }
+        fn rgf_latin_table_mut(&mut self) -> &mut Vec<f64> { &mut self.inner.latin_table }
+        fn rgf_punct_table(&self) -> &Vec<f64> { &self.inner.punct_table }
+        fn rgf_punct_table_mut(&mut self) -> &mut Vec<f64> { &mut self.inner.punct_table }
+        fn rgf_tables_ready(&self) -> bool { self.inner.tables_ready }
+        fn rgf_tables_ready_mut(&mut self) -> &mut bool { &mut self.inner.tables_ready }
+        fn rgf_mono_family(&self) -> String { self.inner.mono_family.clone() }
+        fn rgf_mono_family_mut(&mut self) -> &mut String { &mut self.inner.mono_family }
+        fn rgf_mono_known(&self) -> bool { self.inner.mono_known }
+        fn rgf_mono_known_mut(&mut self) -> &mut bool { &mut self.inner.mono_known }
+        fn rgf_mono_cached(&self) -> bool { self.inner.mono_cached }
+        fn rgf_mono_cached_mut(&mut self) -> &mut bool { &mut self.inner.mono_cached }
+        fn rgf_bold_cached(&self) -> bool { self.inner.bold_cached }
+        fn rgf_bold_cached_mut(&mut self) -> &mut bool { &mut self.inner.bold_cached }
+        fn rgf_bold_table(&self) -> &Vec<f64> { &self.inner.bold_table }
+        fn rgf_bold_table_mut(&mut self) -> &mut Vec<f64> { &mut self.inner.bold_table }
+        fn rgf_bold_latin_table(&self) -> &Vec<f64> { &self.inner.bold_latin_table }
+        fn rgf_bold_latin_table_mut(&mut self) -> &mut Vec<f64> { &mut self.inner.bold_latin_table }
+        fn rgf_bold_punct_table(&self) -> &Vec<f64> { &self.inner.bold_punct_table }
+        fn rgf_bold_punct_table_mut(&mut self) -> &mut Vec<f64> { &mut self.inner.bold_punct_table }
+        fn is_font_accurate(&self) -> bool { self.inner.is_font_accurate() }
+        fn has_face(&self, font_family: String) -> bool { Self::split(&font_family).is_some() || self.inner.has_face(font_family) }
+        fn measure_key(&self) -> String { format!("browser|{}", EVGTextMeasurerTrait::measure_key(&self.inner)) }
+        fn measure_text(&mut self, text: String, font_family: String, font_size: f64) -> Rc<RefCell<EVGTextMetrics>> {
+            let m = EVGTextMeasurerTrait::measure_text(&mut self.inner, String::new(), Self::table_face(&font_family), font_size);
+            let w = self.width(&text, &font_family, font_size);
+            m.borrow_mut().width = w;
+            m
+        }
+        fn measure_text_width(&mut self, text: String, font_family: String, font_size: f64) -> f64 { self.width(&text, &font_family, font_size) }
+        fn get_line_height(&self, font_family: String, font_size: f64) -> f64 { EVGTextMeasurerTrait::get_line_height(&self.inner, Self::table_face(&font_family), font_size) }
+        fn mono_for(&mut self, font_family: String) -> bool { if Self::split(&font_family).is_some() { false } else { EVGTextMeasurerTrait::mono_for(&mut self.inner, font_family) } }
+        fn prepare_tables(&mut self) { EVGTextMeasurerTrait::prepare_tables(&mut self.inner) }
+        fn measure_char(&mut self, ch: i64, font_family: String, font_size: f64) -> f64 {
+            match char::from_u32(ch as u32) { Some(c) if Self::split(&font_family).is_some() => self.width(&c.to_string(), &font_family, font_size), _ => EVGTextMeasurerTrait::measure_char(&mut self.inner, ch, font_family, font_size) }
+        }
+        fn wrap_text(&mut self, text: String, font_family: String, font_size: f64, max_width: f64) -> Vec<String> {
+            EVGTextMeasurerTrait::wrap_text(&mut self.inner, text, Self::table_face(&font_family), font_size, max_width)
+        }
+    }
+    /// the browser measures from now on (EVG's default measurer)
+    pub fn install() {
+        let m: Rc<RefCell<dyn EVGTextMeasurerTrait>> = Rc::new(RefCell::new(BrowserMeasurer::new()));
+        rangerevg::EVGDefaultMeasurer::install(m);
+    }
+}
+
 const PRELUDE: &str = include_str!("../js/prelude.js");
 const WEBAPI: &str = include_str!("../js/webapi.js");
 const HOST: &str = include_str!("../js/host.js");
@@ -144,6 +246,11 @@ impl Playground {
             self.exec("__deltaCheck(true)");
         }
         // its text is drawn by the browser (evg-webgl): the browser's faces
+        // (the browser measures the text in WASM; the native tools measure
+        // with the table)
+        #[cfg(target_arch = "wasm32")]
+        { measure::install(); self.exec("__browserFonts('measure')"); }
+        #[cfg(not(target_arch = "wasm32"))]
         self.exec("__browserFonts(true)");
     }
     /// the page's scripts in a browser's order, DOMContentLoaded and load

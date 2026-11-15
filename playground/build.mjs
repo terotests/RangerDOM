@@ -199,7 +199,11 @@ if (withWasm && fs.existsSync(WASM)) {
     },
     proc_exit(code) { throw new Error("rangerdom wasm exited (" + code + ")"); },
   };
-  const { instance } = await WebAssembly.instantiate(fs.readFileSync(WASM), { wasi_snapshot_preview1: wasi });
+  const { instance } = await WebAssembly.instantiate(fs.readFileSync(WASM), {
+    wasi_snapshot_preview1: wasi,
+    // (only compiles here: nothing is laid out, nothing measured)
+    rangerdom: { pg_measure() { return 0; } },
+  });
   const x = instance.exports;
   memory = x.memory;
   if (x._initialize) x._initialize();
