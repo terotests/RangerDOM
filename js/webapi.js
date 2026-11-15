@@ -310,6 +310,8 @@
     if (shadowCount && (p.nodeType === 11 && p.host || inShadowScope(p))) { changed(); scheduleSlots(p._sr && (c || gone) ? assignedSlotOf(c || gone) : null); return; }
     // not in the page (a fragment, a parsed document): nothing shown
     if (!doc || (p !== doc && (p.ownerDocument !== doc || !p.isConnected))) { generation++; return; }
+    // (a style sheet's text is its rules)
+    if (p.localName === 'style') { changed(); return; }
     var reach = p !== doc && p !== doc.documentElement ? selectorReach() : 0;
     if (!reach) { changed(); return; }
     generation++;
@@ -391,6 +393,8 @@
         else if (st && edge) restyle(k);
       }
       hasReached(p.nodeType === 1 ? p.parentNode : null);
+      // (p itself can be the compound with the :has())
+      if (p.nodeType === 1) hasAbove(p);
     }
     treeFlushing = false;
   }
@@ -480,6 +484,72 @@
   function hasReached(el) {
     if (!reachCache.has || computedCache.gen !== styleGen) return;
     for (var a = el; a && a.nodeType === 1; a = a.parentNode) restyle(a);
+    hasAbove(el);
+  }
+  // :has() above a selector's subject (PrimeReact's
+  // `.p-checkbox:has(.p-checkbox-input:hover) .p-checkbox-box`): what
+  // changed at or under el can change the style of anything under an
+  // element that such a compound can match (hasAnchors: by its tag, id or
+  // classes), so the topmost one of those above is styled again with all
+  // under it. Before, one such selector made every change of an attribute
+  // or of the tree style the whole page again.
+  function hasAbove(el) {
+    if (reachCache.has !== 2 || computedCache.gen !== styleGen) return;
+    var hk = reachCache.hasKeys, sk = hk.sibOn ? hk.sib : null, top = null;
+    for (var a = el; a && a.nodeType === 1; a = a.parentNode) {
+      if (hasKeyHit(a, hk)) top = a;
+      // (`.step:has(~ .on) .line`: the compound is a sibling of what
+      // changed, or of something above it, so the parent's subtree)
+      else if (sk) for (var k = 0; k < a._c.length; k++) if (a._c[k].nodeType === 1 && hasKeyHit(a._c[k], sk)) { top = a; break; }
+    }
+    if (top) { dropStyle(top); eachElement(top, dropStyle); }
+  }
+  function hasKeyHit(a, hk) {
+    if (hk.tag[a.localName] === 1 || (a.id && hk.id[String(a.id).toLowerCase()] === 1)) return true;
+    var cl = a.getAttribute('class');
+    if (cl) { var cs = cl.split(/\s+/); for (var j = 0; j < cs.length; j++) if (hk.cls[cs[j].toLowerCase()] === 1) return true; }
+    return false;
+  }
+  // The compounds that have :has() above their selector's subject, as
+  // keys (looseCompound). null when one has no tag, id or class, or a + or
+  // ~ follows it (what it reaches is not under it): the page then.
+  function hasAnchors(t, sib) {
+    var out = [], src = String(t).split('{')[0], sels = [], d = 0, from = 0, i;
+    for (i = 0; i < src.length; i++) {
+      var c = src.charAt(i);
+      if (c === '(' || c === '[') d++;
+      else if (c === ')' || c === ']') d--;
+      else if (c === ',' && d === 0) { sels.push(src.slice(from, i)); from = i + 1; }
+    }
+    sels.push(src.slice(from));
+    for (var si = 0; si < sels.length; si++) {
+      var sl = sels[si].trim(), comps = [], combs = [], cur = '';
+      d = 0;
+      for (i = 0; i < sl.length; i++) {
+        var ch = sl.charAt(i);
+        if (ch === '(' || ch === '[') d++;
+        else if (ch === ')' || ch === ']') d--;
+        if (d === 0 && /[\s>+~]/.test(ch)) {
+          var comb = ' ';
+          while (i < sl.length && /[\s>+~]/.test(sl.charAt(i))) { if (!/\s/.test(sl.charAt(i))) comb = sl.charAt(i); i++; }
+          i--;
+          comps.push(cur); combs.push(comb); cur = '';
+          continue;
+        }
+        cur += ch;
+      }
+      comps.push(cur);
+      for (var k = 0; k < comps.length - (sib ? 0 : 1); k++) {
+        if (!/:has\(/i.test(comps[k])) continue;
+        // (sib, `:has(~ x)`: the compound's parent's subtree is styled
+        // again, and what follows a + or ~ is in it)
+        for (var q = k; q < combs.length && !sib; q++) if (combs[q] === '+' || combs[q] === '~') return null;
+        var key = looseCompound(comps[k]);
+        if (!key.tag && !key.id && !key.cls.length) return null;
+        out.push(key);
+      }
+    }
+    return out;
   }
   var HOVER = /:(hover|active)\b/;
   // focus: :focus and :focus-visible, focusWithin: :focus-within
@@ -563,6 +633,8 @@
         if (style && e.isConnected) restyle(e);
       }
     });
+    // (:hover or :focus in a :has() above a subject)
+    if (reachCache.has === 2) [a, b].forEach(function (e) { if (e && e.nodeType === 1) hasAbove(e.parentNode); });
     if (!apart.length) return;
     // (a focused element's :focus-visible goes with its :focus)
     var fs = focus ? ['p:focus', 'p:focus-visible', 'p:focus-within'] : ['p:hover', 'p:active'];
@@ -576,6 +648,7 @@
   function selectorReach() {
     if (reachCache.gen === styleGen) return reachCache.reach;
     var reach = 1, struct = 0, hover = 0, focus = 0, within = 0, has = 0, counted = 0, sib = [];
+    var hasKeys = { cls: {}, id: {}, tag: {}, sibOn: false, sib: { cls: {}, id: {}, tag: {} } };
     var sheets = [ua()].concat(cascadeSheets(doc));
     for (var i = 0; i < sheets.length && reach; i++) {
       var sr = sheetReach(sheets[i]);
@@ -585,10 +658,15 @@
       if (sr.hover > hover) hover = sr.hover;
       if (sr.focus > focus) focus = sr.focus;
       if (sr.focusWithin > within) within = sr.focusWithin;
-      if (sr.has) has = 1;
+      if (sr.has > has) has = sr.has;
+      if (sr.has === 2) {
+        var hks = sr.hasKeys;
+        ['cls', 'id', 'tag'].forEach(function (hn) { for (var hv in hks[hn]) hasKeys[hn][hv] = 1; for (var hw in hks.sib[hn]) hasKeys.sib[hn][hw] = 1; });
+        if (hks.sibOn) hasKeys.sibOn = true;
+      }
       if (sr.counted) counted = 1;
     }
-    reachCache = { gen: styleGen, reach: reach, struct: struct, hover: hover, focus: focus, focusWithin: within, has: has, counted: counted, sib: sib };
+    reachCache = { gen: styleGen, reach: reach, struct: struct, hover: hover, focus: focus, focusWithin: within, has: has, counted: counted, sib: sib, hasKeys: hasKeys };
     return reach;
   }
   // one sheet's part of selectorReach, read from its rules once (until
@@ -599,6 +677,7 @@
     var rules = sheet._rules || [];
     if (sheet._reach && sheet._reachOf === rules) return sheet._reach;
     var reach = 1, struct = 0, hover = 0, focus = 0, within = 0, has = 0, counted = 0, sib = [], last = null;
+    var hasKeys = { cls: {}, id: {}, tag: {}, sibOn: false, sib: { cls: {}, id: {}, tag: {} } };
     for (var j = 0; j < rules.length; j++) {
       var t = rules[j].text;
       // (the selectors of one list follow each other with the list's text)
@@ -612,8 +691,20 @@
       // reaches the changed element's ancestors too (hasReached); one
       // relative to siblings (:has(+ x)) or above the subject: the page
       if (/:has\(/i.test(t)) {
-        if (/:has\(\s*[+~]/i.test(t) || pseudoPlace(t, /:has\(/i) === 2) { reach = 0; break; }
-        has = 1;
+        var sibHas = /:has\(\s*[+~]/i.test(t);
+        if (sibHas || pseudoPlace(t, /:has\(/i) === 2) {
+          // (above the subject: what is under the compound it is in; with
+          // a + or ~ first in it: what is under the compound's parent)
+          var an = hasAnchors(t, sibHas), into = sibHas ? hasKeys.sib : hasKeys;
+          if (!an) { reach = 0; break; }
+          if (sibHas) hasKeys.sibOn = true;
+          for (var ai = 0; ai < an.length; ai++) {
+            if (an[ai].cls.length) for (var ac = 0; ac < an[ai].cls.length; ac++) into.cls[an[ai].cls[ac]] = 1;
+            else if (an[ai].id) into.id[an[ai].id] = 1;
+            else into.tag[an[ai].tag] = 1;
+          }
+          has = 2;
+        } else if (!has) has = 1;
       }
       if (/[+~]/.test(t)) { var sl = siblingLefts(t); if (sl.length) { reach = 2; sib = sib.concat(sl); } }
       if (struct < 2 && STRUCT.test(t)) struct = Math.max(struct, pseudoPlace(t, STRUCT));
@@ -623,7 +714,7 @@
       if (within < 2 && FOCUS_WITHIN.test(t)) within = Math.max(within, pseudoPlace(t, FOCUS_WITHIN));
     }
     sheet._reachOf = rules;
-    sheet._reach = { reach: reach, struct: struct, hover: hover, focus: focus, focusWithin: within, has: has, counted: counted, sib: sib };
+    sheet._reach = { reach: reach, struct: struct, hover: hover, focus: focus, focusWithin: within, has: has, counted: counted, sib: sib, hasKeys: hasKeys };
     return sheet._reach;
   }
   // Invalidation sets (as Blink's): what a change of one feature of an
@@ -1309,6 +1400,10 @@
       return out;
     }
     set textContent(v) {
+      // a style sheet given the text it has (PrimeReact's useStyle, at
+      // every render of every component): the rules stay, and so does every
+      // style of the page
+      if (this.localName === 'style' && this._c.length === 1 && this._c[0].nodeType === 3 && this._c[0]._data === (v === null || v === undefined ? '' : String(v))) return;
       // only texts replaced by a text: the styles stay (styleGen)
       var styled = false;
       for (var i = 0; i < this._c.length; i++) if (!isText(this._c[i])) styled = true;
@@ -2535,7 +2630,11 @@
     // (HTML 4.2.6: the element's disabled is its sheet's)
     get disabled() { var sh = this.sheet; return sh ? sh.disabled : false; }
     set disabled(v) { var sh = this.sheet; if (sh) sh.disabled = v; }
-    _connected() { changed(); }
+    // (one with no text yet has no rules: PrimeReact puts each component's
+    // <style> in empty and gives it its text after, and an empty one for
+    // its focus trap when a dialog opens: the whole page was styled again)
+    _connected() { if (this._c.length) changed(); }
+    _disconnected() { if (this._c.length) changed(); }
   }
   reflect(HTMLStyleElement, ['media', 'type']);
   class HTMLLinkElement extends HTMLElement {
