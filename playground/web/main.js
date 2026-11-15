@@ -67,10 +67,72 @@ let errors = [];
 const acc = { render: 0, layout: 0, paint: 0, gl: 0, frames: 0, gap: 0, gaps: [], last: 0, counting: true };
 function resetAcc() { acc.render = acc.layout = acc.paint = acc.gl = acc.frames = acc.gap = 0; acc.gaps = []; acc.last = performance.now(); acc.counting = true; }
 
+// SVG pictures of background-image (Bootstrap's form icons, its select's
+// arrow, the close button): EVG names each by pngPart's hash of its URL
+// (DomView bg-picture), the painter takes them from this map. Each is
+// drawn once into a canvas at the device's pixels; the page is painted
+// again when one has come in.
+const pictures = new Map(); // name -> canvas (null while it loads)
+const loadedPictures = new Map();
+let lastList = null;
+function pictureName(url) {
+  const b = new TextEncoder().encode(url);
+  let h = 5381;
+  for (const x of b) h = (h * 33 + x) % 2147483647;
+  return `dompng-${b.length}-${h}`;
+}
+// (as DomView::bgSvgUrl: the first url(), quoted or not)
+function bgSvgUrl(v) {
+  const at = v.indexOf("url(");
+  if (at < 0) return "";
+  let u = v.slice(at + 4).trim(), close = ")";
+  if (u[0] === '"' || u[0] === "'") { close = u[0] + ")"; u = u.slice(1); }
+  const end = u.indexOf(close);
+  if (end < 0) return "";
+  u = u.slice(0, end);
+  return /^data:image\/svg\+xml/i.test(u.slice(0, 32)) ? u : "";
+}
+function scanPictures(json) {
+  if (!json || json.indexOf("data:image/svg") < 0) return;
+  for (const m of json.matchAll(/"background-image":"((?:[^"\\]|\\.)*)"/g)) {
+    let v;
+    try { v = JSON.parse('"' + m[1] + '"'); } catch (_) { continue; }
+    const u = bgSvgUrl(v);
+    if (!u) continue;
+    const name = pictureName(u);
+    if (pictures.has(name)) continue;
+    pictures.set(name, null);
+    const img = new Image();
+    img.onload = () => {
+      // (the viewBox's ratio when the picture has no size of its own)
+      let w = img.naturalWidth || 300, h = img.naturalHeight || 150;
+      let txt = "";
+      try { txt = decodeURIComponent(u.slice(u.indexOf(",") + 1)); } catch (_) {}
+      const vb = /viewBox=['"]\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)/.exec(txt);
+      if (vb && !/<svg[^>]*\swidth=/.test(txt)) { w = +vb[1]; h = +vb[2]; }
+      const k = Math.min(8, Math.max(1, 64 / Math.max(w, h))) * DPR;
+      const c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round(w * k));
+      c.height = Math.max(1, Math.round(h * k));
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      pictures.set(name, c);
+      loadedPictures.set(name, c);
+      if (lastList && gl) paintGl(lastList);
+    };
+    img.src = u;
+  }
+}
+function paintGl(list) {
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(1, 1, 1, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  renderDisplayList(gl, { width: W, height: H, list }, { dpr: DPR, images: loadedPictures });
+}
+
 // the page as it is now: render tree, EVG layout (boxes back), display list, WebGL
 function draw() {
   let t = performance.now();
-  pg.render();
+  scanPictures(pg.render());
   let t2 = performance.now();
   acc.render += t2 - t;
   pg.layout();
@@ -79,12 +141,8 @@ function draw() {
   const list = JSON.parse(pg.paint());
   t2 = performance.now();
   acc.paint += t2 - t;
-  if (gl) {
-    gl.viewport(0, 0, canvas.width, canvas.height);
-    gl.clearColor(1, 1, 1, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    renderDisplayList(gl, { width: W, height: H, list }, { dpr: DPR });
-  }
+  lastList = list;
+  if (gl) paintGl(list);
   const end = performance.now();
   acc.gl += end - t2;
   if (acc.counting) {
@@ -145,6 +203,11 @@ function realmValue(src) { return pg.eval(src); }
 window.__rdEval = (src) => (pg ? pg.eval(src) : "");
 window.__rdPaint = () => (pg ? pg.paint() : "");
 async function rdRun(call, ms) {
+  // (the page's clock starts the step where it is: while the browser ran
+  // its side, nothing ticked here, and the first tick gave the page's
+  // timers and transitions that whole time at once, a 0.15 s fade ended
+  // before it was drawn)
+  clock = performance.now();
   realmValue("window.__pgDone = ''; (" + call + ").then(function (r) { __pgDone = JSON.stringify(r) || 'null'; }, function (e) { __pgDone = JSON.stringify({ error: String(e) }); })");
   let out = "";
   await pump(() => (out = realmValue("__pgDone")) !== "", ms);
