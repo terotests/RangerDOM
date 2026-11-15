@@ -82,7 +82,10 @@
     // an element not in the page (React sets a new element's attributes
     // before it inserts it): nothing shown changes; what it kept goes
     if (!el.isConnected && doc && el.ownerDocument === doc) {
-      if (computedCache.gen === styleGen) { dropStyle(el); eachElement(el, dropStyle); }
+      // (el._es: el or something under it was styled at some time, see
+      // computedOf. A grid builds each row out of the page, attribute by
+      // attribute: nothing there is kept, and each change walked the row.)
+      if (computedCache.gen === styleGen && (el._es || shadowCount)) { dropStyle(el); eachElement(el, dropStyle); }
       return;
     }
     var reach = el.isConnected && doc && el.ownerDocument === doc && el !== doc.documentElement ? selectorReach() : 0;
@@ -139,6 +142,9 @@
     for (var p = el.parentNode; p && p.nodeType === 1; p = p.parentNode) if (p.localName === 'form' || p.localName === 'fieldset') attrChanged(p);
   }
   var VALIDATION_ATTRS = { required: 1, pattern: 1, min: 1, max: 1, step: 1, type: 1, multiple: 1, disabled: 1, readonly: 1, value: 1, checked: 1 };
+  // e keeps a style or the rules that matched it: noted on it and on what
+  // it is in (_es), so a subtree never styled is known by its root
+  function styledNow(e) { for (; e && !e._es; e = e.parentNode) e._es = true; }
   function dropStyle(e) { delete computedCache.map[e.__id]; e._rj = null; e._hm = null; e._pc = null; }
   // e's computed style goes, the rules that matched it stay (cascade1's
   // _hm): for a change that alters no selector's answer for e
@@ -202,6 +208,8 @@
   // (detach: gone, the element taken out, and at, where it was)
   function treeChanged(p, c, gone, at) {
     ancEpoch++; sigEpoch++;
+    // (a styled element put under ones never styled: they hold one now)
+    if (c && c._es) for (var es = p; es && !es._es; es = es.parentNode) es._es = true;
     if (shadowCount && (p.nodeType === 11 && p.host || inShadowScope(p))) { changed(); scheduleSlots(p._sr && (c || gone) ? assignedSlotOf(c || gone) : null); return; }
     // not in the page (a fragment, a parsed document): nothing shown
     if (!doc || (p !== doc && (p.ownerDocument !== doc || !p.isConnected))) { generation++; return; }
@@ -211,7 +219,7 @@
     textStamp++;
     for (var q = p; q; q = q.parentNode) q._rv = textStamp;
     if (computedCache.gen !== styleGen) return;
-    if (c && c.nodeType === 1) { dropStyle(c); eachElement(c, dropStyle); }
+    if (c && c.nodeType === 1 && (c._es || shadowCount)) { dropStyle(c); eachElement(c, dropStyle); }
     // what the change does to p's other children is found once for all the
     // changes to p before the next style is read (flushTree): a loop that
     // puts in or takes out 1 000 rows went through all the rows each time
@@ -6541,7 +6549,7 @@
     shadowCtx = svCtx;
     if (kept === undefined) {
       if (shadowCount && !pe) innerHits(el, pe, hits);
-      if (!hm || hm.gen !== styleGen) hm = el._hm = { gen: styleGen, m: {} };
+      if (!hm || hm.gen !== styleGen) { hm = el._hm = { gen: styleGen, m: {} }; if (!el._es) styledNow(el); }
       hm.m[hmk] = hits.slice();
     }
     // (a pseudo-element no rule names: none, nothing built)
@@ -7271,6 +7279,9 @@
     else if (el._anims) el._anims = null;
     if (el._waapi && el._waapi.length) applyWaapi(el, c, parent);
     computedCache.map[el.__id] = c;
+    // (styled: its ancestors are noted with it, so one never styled has
+    // nothing styled under it; treeChanged keeps that true for a move)
+    if (!el._es) styledNow(el);
     if (c.display === 'table-cell') { var cb = columnBackground(el, c); if (cb) { c = cb; computedCache.map[el.__id] = c; } }
     return c;
   }
