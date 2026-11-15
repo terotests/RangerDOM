@@ -163,6 +163,17 @@ impl Playground {
         // (CEr's register machine: its default is still the stack machine)
         let mut engine = Engine::new();
         engine.vm.regs = true;
+        // Date's local time zone: the browser's (pg_set_time_zone), kept
+        // over pg_reset
+        TIME_ZONE.with(|z| { let z = z.borrow(); if !z.is_empty() { engine.set_time_zone(&z); } });
+        // the native tools: TZ, as Node and Chromium take it
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(z) = std::env::var("TZ") {
+            let name = z.trim_start_matches(':');
+            if !name.is_empty() {
+                engine.set_time_zone(name);
+            }
+        }
         let synced = Rc::new(std::cell::RefCell::new(Synced { w: 800.0, h: 600.0, last: None, json: String::new(), boxes: String::new(), tree: None, kept: Kept::new() }));
         engine.vm.set_host_sync(Box::new(SyncLayout { s: synced.clone() }));
         Playground { engine: engine, scripts: Vec::new(), units: Vec::new(), errors: Vec::new(), w: 800.0, h: 600.0, page_json: String::new(), last_gen: String::new(), root: None, lay: None, synced: synced }
@@ -1052,6 +1063,18 @@ pub extern "C" fn pg_alloc(len: usize) -> *mut u8 {
 #[no_mangle]
 pub extern "C" fn pg_out_ptr() -> *const u8 {
     OUT.with(|o| o.borrow().as_ptr())
+}
+thread_local! {
+    static TIME_ZONE: std::cell::RefCell<String> = std::cell::RefCell::new(String::new());
+}
+/// Date's local time zone, an IANA name (the browser's
+/// `Intl.DateTimeFormat().resolvedOptions().timeZone`), for this engine and
+/// the ones pg_reset makes; 1 when CEr knows the zone, else 0 (and UTC)
+#[no_mangle]
+pub extern "C" fn pg_set_time_zone(zp: *mut u8, zl: usize) -> u32 {
+    let z = text(zp, zl);
+    TIME_ZONE.with(|t| *t.borrow_mut() = z.clone());
+    PG.with(|p| if p.borrow_mut().engine.set_time_zone(&z) { 1 } else { 0 })
 }
 #[no_mangle]
 pub extern "C" fn pg_reset() {
