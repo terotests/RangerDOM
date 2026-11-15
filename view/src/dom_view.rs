@@ -764,6 +764,8 @@ pub struct DomView {
     pub memoBad: i64,
     /// inheritedNames(), made once
     inhNames: Vec<String>,
+    /// an element that stands for "none yet"
+    noEl: Rc<RefCell<EVGElement>>,
     /// memoKey's last text and what it was made of
     mkNums: Vec<f64>,
     mkWm: String,
@@ -814,6 +816,7 @@ impl DomView {
             dirNow: String::new(),
             memoBad: 0,
             inhNames: DomView::inheritedNames(),
+            noEl: EVGElement::create_div(),
             mkNums: Vec::new(),
             mkWm: String::new(),
             mkDir: String::new(),
@@ -10072,7 +10075,9 @@ impl DomView {
                     mkey = format!("{}|{}|{}", msig, self.memoKey(), inh_sigs.get(&ist).cloned().unwrap());
                     kept = memo.borrow_mut().take(kid.borrow().stamp, &mkey);
                 }
-                let mut ke: Rc<RefCell<EVGElement>> = EVGElement::create_div();
+                // (no element made here to be let go at once: a kept
+                // child has its own, a new one gets its own below)
+                let mut ke: Rc<RefCell<EVGElement>> = Rc::clone(&self.noEl);
                 if kept.is_some() {
                     ke = kept.clone().unwrap();
                     self.bandOnly = false;
