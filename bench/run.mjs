@@ -8,6 +8,7 @@
 //
 //   node bench/run.mjs [--site=playground/dist] [--only=a,b] [--out=bench/out]
 //                      [--budget=ms: the playground's ?budget]
+//                      [--units=0: scripts compiled in the page, not read from the build's units]
 //                      [--query=k=v&k2=v2: more of its parameters, e.g. sync=0]
 //
 // Needs a built playground (node playground/build.mjs) and Playwright.
@@ -19,9 +20,9 @@ import { createRequire } from "node:module";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
-const opts = { site: path.join(ROOT, "playground", "dist"), only: "", out: path.join(HERE, "out"), budget: "" };
+const opts = { site: path.join(ROOT, "playground", "dist"), only: "", out: path.join(HERE, "out"), budget: "", units: "" };
 for (const a of process.argv.slice(2)) {
-  const m = a.match(/^--(site|only|out|budget|query)=(.*)$/);
+  const m = a.match(/^--(site|only|out|budget|units|query)=(.*)$/);
   if (!m) throw new Error("unknown argument " + a);
   opts[m[1]] = m[2];
 }
@@ -51,7 +52,7 @@ for (const name of names) {
   const pageErrors = [];
   page.on("pageerror", (e) => pageErrors.push(String(e)));
   const t0 = Date.now();
-  await page.goto(`${base}?case=${encodeURIComponent(name)}&auto=1${opts.budget ? "&budget=" + opts.budget : ""}${opts.query ? "&" + opts.query : ""}`);
+  await page.goto(`${base}?case=${encodeURIComponent(name)}&auto=1${opts.budget ? "&budget=" + opts.budget : ""}${opts.units ? "&units=" + opts.units : ""}${opts.query ? "&" + opts.query : ""}`);
   let r;
   try {
     await page.waitForFunction(() => window.__pgResult, null, { timeout: 180000, polling: 250 });

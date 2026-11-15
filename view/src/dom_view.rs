@@ -199,11 +199,27 @@ pub struct DomMemo {
     prevMt: HashMap<String,Rc<RefCell<EVGUnit>>>,
     prevMb: HashMap<String,Rc<RefCell<EVGUnit>>>,
     prevAuto: HashMap<String,String>,
+    /// and its left and right ones: a line takes the space between two of
+    /// its boxes off the second one's margin (DomView.flush), which a kept
+    /// box would otherwise lose once more each frame
+    curMl: HashMap<String,Rc<RefCell<EVGUnit>>>,
+    curMr: HashMap<String,Rc<RefCell<EVGUnit>>>,
+    curAutoX: HashMap<String,String>,
+    prevMl: HashMap<String,Rc<RefCell<EVGUnit>>>,
+    prevMr: HashMap<String,Rc<RefCell<EVGUnit>>>,
+    prevAutoX: HashMap<String,String>,
     /// the elements taken this frame, and each element's margins as the
     /// frame left them (marginSig): a kept element keeps its layout
     /// (EVGElement.keepLayout) only when they are what they were when it
     /// was laid out last
     taken: Vec<String>,
+    /// the node (stamp) each kept element was built or taken under, and
+    /// the nodes being built now, innermost last: what is kept under an
+    /// element taken whole stays kept with it (carry), so when that element
+    /// is built again its unchanged children are still taken
+    curUp: HashMap<String,String>,
+    prevUp: HashMap<String,String>,
+    open: Vec<String>,
     curSig: HashMap<String,String>,
     prevSig: HashMap<String,String>,
     /// off: kept elements are laid out again (the layout is not kept)
@@ -229,7 +245,16 @@ impl DomMemo {
             prevMt: HashMap::new(),
             prevMb: HashMap::new(),
             prevAuto: HashMap::new(),
+            curMl: HashMap::new(),
+            curMr: HashMap::new(),
+            curAutoX: HashMap::new(),
+            prevMl: HashMap::new(),
+            prevMr: HashMap::new(),
+            prevAutoX: HashMap::new(),
             taken: Vec::new(),
+            curUp: HashMap::new(),
+            prevUp: HashMap::new(),
+            open: Vec::new(),
             curSig: HashMap::new(),
             prevSig: HashMap::new(),
             keepLayout: true,
@@ -255,9 +280,91 @@ impl DomMemo {
         self.curMb = u.clone();
         let a: HashMap<String,String> = HashMap::new();
         self.curAuto = a.clone();
+        self.prevMl = self.curMl.clone();
+        self.prevMr = self.curMr.clone();
+        self.prevAutoX = self.curAutoX.clone();
+        self.curMl = u.clone();
+        self.curMr = u.clone();
+        self.curAutoX = a.clone();
         self.prevSig = self.curSig.clone();
         self.curSig = a.clone();
+        self.prevUp = self.curUp.clone();
+        self.curUp = a.clone();
+        self.open = Vec::new();
         self.taken = Vec::new();
+    }
+    /// a node's element is being built (begin) / is built (end)
+    #[doc(hidden)]
+    pub fn begin(&mut self, stamp: i64) {
+        let sk: String = stamp.to_string();
+        self.under(&sk);
+        self.open.push(sk);
+    }
+    #[doc(hidden)]
+    pub fn end(&mut self) {
+        if !self.open.is_empty() {
+            self.open.pop();
+        }
+    }
+    fn under(&mut self, sk: &str) {
+        if !self.open.is_empty() {
+            let up: String = self.open[self.open.len() - 1].clone();
+            self.curUp.insert(sk.to_string(), up);
+        }
+    }
+    /// what the last frame kept under an element this frame took whole is
+    /// kept on: its node is in the page as it was, inside that element
+    fn carry(&mut self) {
+        let mut took: HashMap<String,String> = HashMap::new();
+        let tk: Vec<String> = self.taken.clone();
+        for sk in tk.iter().cloned() {
+            took.insert(sk.clone(), "1".to_string());
+        }
+        let mut alive: Vec<String> = Vec::new();
+        let pk: Vec<String> = self.prevUp.keys().cloned().collect::<Vec<String>>();
+        for sk in pk.iter().cloned() {
+            if self.curUp.contains_key(&sk) {
+                continue;
+            }
+            let mut at: String = sk.clone();
+            let mut ok: bool = false;
+            let mut steps: i64 = 0;
+            while steps < 500 && self.prevUp.contains_key(&at) {
+                let up: String = self.prevUp.get(&at).cloned().unwrap();
+                if took.contains_key(&up) {
+                    ok = true;
+                    steps = 500;
+                } else {
+                    if self.curUp.contains_key(&up) {
+                        steps = 500;
+                    }
+                }
+                at = up.clone();
+                steps += 1;
+            }
+            if ok {
+                alive.push(sk.clone());
+            }
+        }
+        for sk in alive.iter().cloned() {
+            self.curUp.insert(sk.clone(), self.prevUp.get(&sk).cloned().unwrap());
+            if !self.prevKeys.contains_key(&sk) {
+                continue;
+            }
+            self.curKeys.insert(sk.clone(), self.prevKeys.get(&sk).cloned().unwrap());
+            self.curEls.insert(sk.clone(), self.prevEls.get(&sk).cloned().unwrap());
+            self.curLate.insert(sk.clone(), self.prevLate.get(&sk).cloned().unwrap());
+            if self.prevMt.contains_key(&sk) && self.prevMb.contains_key(&sk) && self.prevAuto.contains_key(&sk) {
+                self.curMt.insert(sk.clone(), self.prevMt.get(&sk).cloned().unwrap());
+                self.curMb.insert(sk.clone(), self.prevMb.get(&sk).cloned().unwrap());
+                self.curAuto.insert(sk.clone(), self.prevAuto.get(&sk).cloned().unwrap());
+            }
+            if self.prevMl.contains_key(&sk) && self.prevMr.contains_key(&sk) && self.prevAutoX.contains_key(&sk) {
+                self.curMl.insert(sk.clone(), self.prevMl.get(&sk).cloned().unwrap());
+                self.curMr.insert(sk.clone(), self.prevMr.get(&sk).cloned().unwrap());
+                self.curAutoX.insert(sk.clone(), self.prevAutoX.get(&sk).cloned().unwrap());
+            }
+        }
     }
     #[doc(hidden)]
     pub fn unitSig(u: Option<Rc<RefCell<EVGUnit>>>) -> String {
@@ -285,11 +392,16 @@ impl DomMemo {
     /// notes its margins for the next
     #[doc(hidden)]
     pub fn settle(&mut self) {
-        let ks: Vec<String> = self.curEls.keys().cloned().collect::<Vec<String>>();
-        for sk in ks.iter().cloned() {
-            let el: Rc<RefCell<EVGElement>> = self.curEls.get(&sk).cloned().unwrap();
-            let sig: String = DomMemo::marginSig(&el);
-            self.curSig.insert(sk.clone(), sig.clone());
+        self.carry();
+        // (the margins are noted only for kept layouts: with keepLayout off
+        // nothing reads them, and writing them was a tenth of a layout)
+        if self.keepLayout {
+            let ks: Vec<String> = self.curEls.keys().cloned().collect::<Vec<String>>();
+            for sk in ks.iter().cloned() {
+                let el: Rc<RefCell<EVGElement>> = self.curEls.get(&sk).cloned().unwrap();
+                let sig: String = DomMemo::marginSig(&el);
+                self.curSig.insert(sk.clone(), sig.clone());
+            }
         }
         let tk: Vec<String> = self.taken.clone();
         for sk in tk.iter().cloned() {
@@ -339,7 +451,21 @@ impl DomMemo {
             self.curMb.insert(sk.clone(), mb);
             self.curAuto.insert(sk.clone(), au);
         }
+        if self.prevMl.contains_key(&sk) && self.prevMr.contains_key(&sk) && self.prevAutoX.contains_key(&sk) {
+            let ml: Rc<RefCell<EVGUnit>> = self.prevMl.get(&sk).cloned().unwrap();
+            let mr: Rc<RefCell<EVGUnit>> = self.prevMr.get(&sk).cloned().unwrap();
+            let ax: String = self.prevAutoX.get(&sk).cloned().unwrap();
+            let bx2: Rc<RefCell<EVGBox>> = el.borrow().r#box.clone().unwrap();
+            bx2.borrow_mut().margin_left = Some(Rc::clone(&ml));
+            bx2.borrow_mut().margin_right = Some(Rc::clone(&mr));
+            el.borrow_mut().margin_auto_left = ax.starts_with("1");
+            el.borrow_mut().margin_auto_right = ax.ends_with("1");
+            self.curMl.insert(sk.clone(), ml);
+            self.curMr.insert(sk.clone(), mr);
+            self.curAutoX.insert(sk.clone(), ax);
+        }
         self.taken.push(sk.clone());
+        self.under(&sk);
         Some(el)
     }
     /// the paint-late boxes the element's build counted
@@ -356,6 +482,7 @@ impl DomMemo {
         self.curKeys.insert(sk.clone(), key.to_string());
         self.curEls.insert(sk.clone(), Rc::clone(el));
         self.curLate.insert(sk.clone(), late);
+        self.under(&sk);
         let bx: Rc<RefCell<EVGBox>> = el.borrow().r#box.clone().unwrap();
         let mt: Option<Rc<RefCell<EVGUnit>>> = bx.borrow().margin_top.clone();
         let mb: Option<Rc<RefCell<EVGUnit>>> = bx.borrow().margin_bottom.clone();
@@ -365,6 +492,15 @@ impl DomMemo {
             let at: String = if el.borrow().margin_auto_top { "1".to_string() } else { "0".to_string() };
             let ab: String = if el.borrow().margin_auto_bottom { "1".to_string() } else { "0".to_string() };
             self.curAuto.insert(sk.clone(), format!("{}{}", at, ab));
+        }
+        let ml: Option<Rc<RefCell<EVGUnit>>> = bx.borrow().margin_left.clone();
+        let mr: Option<Rc<RefCell<EVGUnit>>> = bx.borrow().margin_right.clone();
+        if ml.is_some() && mr.is_some() {
+            self.curMl.insert(sk.clone(), ml.unwrap());
+            self.curMr.insert(sk.clone(), mr.unwrap());
+            let al: String = if el.borrow().margin_auto_left { "1".to_string() } else { "0".to_string() };
+            let ar: String = if el.borrow().margin_auto_right { "1".to_string() } else { "0".to_string() };
+            self.curAutoX.insert(sk.clone(), format!("{}{}", al, ar));
         }
     }
 }
@@ -9700,14 +9836,18 @@ impl DomView {
                 } else {
                     let bad0: i64 = self.memoBad;
                     let late0: i64 = self.lateCount;
+                    if mon {
+                        if kid.borrow().stamp <= 0 {
+                            memo.borrow_mut().next += 1;
+                            kid.borrow_mut().stamp = memo.borrow().next;
+                        }
+                        memo.borrow_mut().begin(kid.borrow().stamp);
+                    }
                     ke = self.element(&kid, kinh.clone());
                     if mon {
+                        memo.borrow_mut().end();
                         memo.borrow_mut().misses += 1;
                         if self.memoBad == bad0 {
-                            if kid.borrow().stamp <= 0 {
-                                memo.borrow_mut().next += 1;
-                                kid.borrow_mut().stamp = memo.borrow().next;
-                            }
                             memo.borrow_mut().keep(kid.borrow().stamp, &mkey, &ke, self.lateCount - late0);
                         }
                     }

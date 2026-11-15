@@ -136,10 +136,7 @@ impl JsonValue {
     }
     /// object: set (replace) a member
     pub fn put(&mut self, key: &str, value: Rc<RefCell<JsonValue>>) {
-        let at: i64 = self.keys.iter()
-            .position( |__r| __r.clone() == key.clone() )
-            .map(|__i| __i as i64)
-            .unwrap_or(-1);
+        let at: i64 = self.keyAt(key);
         if at >= 0 {
             self.items[at as usize] = value;
             return;
@@ -160,16 +157,27 @@ impl JsonValue {
     pub fn add(&mut self, value: Rc<RefCell<JsonValue>>) {
         self.items.push(value);
     }
+    /// where an object's member is in keys, -1 when it has none (no key
+    /// is copied to be compared: a page's styles are read a hundred times
+    /// per element)
+    pub fn keyAt(&self, key: &str) -> i64 {
+        let n: i64 = self.keys.len() as i64;
+        let mut i: i64 = 0;
+        while i < n {
+            if self.keys[i as usize] == key {
+                return i;
+            }
+            i += 1;
+        }
+        -1
+    }
     pub fn has(&self, key: &str) -> bool {
-        (self.keys.iter().position( |__r| __r.clone() == key.clone() ).map(|__i| __i as i64).unwrap_or(-1)) >= 0
+        self.keyAt(key) >= 0
     }
     /// object member, or a null value
     pub fn get(&self, key: &str) -> Rc<RefCell<JsonValue>> {
         if self.kind == 5 {
-            let at: i64 = self.keys.iter()
-                .position( |__r| __r.clone() == key.clone() )
-                .map(|__i| __i as i64)
-                .unwrap_or(-1);
+            let at: i64 = self.keyAt(key);
             if at >= 0 {
                 return self.items[at as usize].clone();
             }
@@ -204,10 +212,7 @@ impl JsonValue {
     pub fn getText(&self, key: &str) -> String {
         // (a missing member: no null value made for it, as get makes)
         if self.kind == 5 {
-            let at: i64 = self.keys.iter()
-                .position( |__r| __r.clone() == key.clone() )
-                .map(|__i| __i as i64)
-                .unwrap_or(-1);
+            let at: i64 = self.keyAt(key);
             if at >= 0 {
                 return self.items[at as usize].borrow().text();
             }

@@ -105,15 +105,23 @@ async function pump(done, ms) {
   const end = performance.now() + ms;
   for (;;) {
     tick();
-    if (pg.dirty()) draw();
+    const drew = pg.dirty();
+    if (drew) draw();
     drain();
     if (done()) break;
     if (performance.now() > end) { errors.push(`timed out after ${ms} ms`); break; }
     const due = pg.dueIn();
-    if (due === 0) await sleep(0); else await frame();
+    // (what was drawn is shown before the page's next frame runs)
+    if (due === 0 && !drew) await sleep(0); else await frame();
   }
-  for (let k = 0; k < 8; k++) {
-    pg.tick(0);
+  // (a page's animation frames run one per tick: the frames it has asked
+  // for are given their 17 ms each here, without the wait, and the page is
+  // drawn when none is due; what the layout then tells the page may ask
+  // for more)
+  for (let k = 0; k < 24; k++) {
+    pg.tick(k === 0 ? 0 : 17);
+    const due = pg.dueIn();
+    if (due >= 0 && due <= 17 && k < 20) continue;
     if (!pg.dirty()) break;
     draw();
   }
@@ -140,6 +148,11 @@ async function rdLoad(name) {
   pg.reset();
   for (const src of [...html.matchAll(/<script src="([^"]+)"/g)].map((m) => m[1])) {
     pg.addScript(new URL(src, base).href, await (await fetch(base + src)).text());
+    if (pg.addUnit) {
+      // compiled by the build (CEr's code cache), as a browser keeps its own
+      const u = await fetch(base + src + ".unit").catch(() => null);
+      if (u && u.ok) pg.addUnit(new URL(src, base).href, await u.text());
+    }
   }
   errors = [];
   resetAcc();

@@ -7,7 +7,10 @@
 //
 //   __tick(ms)        the host's clock moved ms on: the timers that are due
 //                     run, in the order of their due times (setInterval
-//                     repeats), at most 500 of them; answers how many ran
+//                     repeats), at most 500 of them; answers how many ran.
+//                     One tick is at most one animation frame: the frame
+//                     callbacks (__frame) run once in it, however far the
+//                     clock moved, so the host can draw between two frames
 //   __dueIn()         ms until the next timer, -1 without timers
 //   __drain()         the outbox as JSON text, emptied: {tag: "open", url,
 //                     target}, {tag: "fetch", id, url}, {tag: "console",
@@ -55,6 +58,9 @@ function __add(fn, ms, args, every) {
   __timers.push({ id: id, fn: fn, args: args, due: __clock + ms, every: every ? Math.max(1, ms) : 0 });
   return id;
 }
+// requestAnimationFrame's timer (webapi.js): due at the next tick that is
+// 16 ms on, and not twice in one tick
+function __frame(fn) { var id = __add(fn, 16, [], false); __timers[__timers.length - 1].frame = true; return id; }
 function setTimeout(fn, ms) { return __add(fn, ms, Array.prototype.slice.call(arguments, 2), false); }
 function setInterval(fn, ms) { return __add(fn, ms, Array.prototype.slice.call(arguments, 2), true); }
 function clearTimeout(id) {
@@ -67,14 +73,15 @@ window.queueMicrotask = function (fn) { Promise.resolve().then(fn); };
 
 function __tick(ms) {
   var until = __clock + Math.max(0, Number(ms) || 0);
-  var n = 0;
+  var n = 0, frameRan = false;
   while (n < 500) {
     var best = -1;
     for (var i = 0; i < __timers.length; i++) {
-      if (__timers[i].due <= until && (best < 0 || __timers[i].due < __timers[best].due)) best = i;
+      if (__timers[i].due <= until && !(frameRan && __timers[i].frame) && (best < 0 || __timers[i].due < __timers[best].due)) best = i;
     }
     if (best < 0) break;
     var t = __timers[best];
+    if (t.frame) frameRan = true;
     if (t.due > __clock) __clock = t.due;
     if (t.every) t.due += t.every; else __timers.splice(best, 1);
     try {
