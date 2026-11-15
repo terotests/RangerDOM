@@ -9046,9 +9046,45 @@
       else if (d === 'table-column-group') { var any = false; (k.c || []).forEach(function (c) { if (c.s && c.s.display === 'table-column') { colOf(c, k); any = true; } }); if (!any) colOf(k, k); }
     });
     if (!rows.length) return kids;
+    // A table with no columns and no cell that spans rows (lazy): a row's
+    // cells are at the columns its own cells give (ci, kept with the row's
+    // parts), and only the rows whose borders are settled again, and the
+    // ones next to them, have their cells put in the grid (need). A table
+    // of 1 000 rows went through its 4 000 cells five times for one
+    // row's change.
+    var lazy = !!json && !cols.length;
+    for (var li = 0; li < rows.length && lazy; li++) {
+      var lr = rows[li], lp = lr.row._p, inf = lp && lp.ci;
+      if (!inf) {
+        inf = { n: 0, w: 0, span: false, at: [], c: [], cs: [] };
+        var lc = lr.row.c || [];
+        for (var lk = 0; lk < lc.length; lk++) {
+          var lo = lc[lk];
+          if (!lo.s || lo.s.display !== 'table-cell') continue;
+          var lcs = Math.max(1, parseInt(lo.a && lo.a.colspan, 10) || 1);
+          if ((parseInt(lo.a && lo.a.rowspan, 10) || 1) > 1) inf.span = true;
+          inf.at.push(lk); inf.c.push(inf.w); inf.cs.push(lcs); inf.w += lcs; inf.n++;
+        }
+        if (lp) lp.ci = inf;
+      }
+      if (inf.span) lazy = false;
+      lr.info = inf;
+    }
     // the grid: which cell is at each slot
     var grid = [], cells = [], anySpan = false;
-    rows.forEach(function (r, ri) {
+    var need = function (ri) {
+      var r = rows[ri];
+      if (!r || r.cells) return r ? r.cells : null;
+      var ni = r.info, rc = r.row.c, out = [], g = [];
+      for (var k = 0; k < ni.n; k++) {
+        var cell = { o: rc[ni.at[k]], r: ri, c: ni.c[k], rs: 1, cs: ni.cs[k], rowo: r, k: k };
+        out.push(cell);
+        for (var x = 0; x < cell.cs; x++) g[cell.c + x] = cell;
+      }
+      grid[ri] = g; r.cells = out;
+      return out;
+    };
+    if (!lazy) rows.forEach(function (r, ri) {
       r.n = 0; r.m = null; r.ok = false;
       grid[ri] = grid[ri] || [];
       var ci = 0;
@@ -9065,6 +9101,7 @@
       });
     });
     var ncols = 0; grid.forEach(function (g) { if (g.length > ncols) ncols = g.length; });
+    if (lazy) for (var lz = 0; lz < rows.length; lz++) { var lzr = rows[lz]; lzr.n = lzr.info.n; lzr.m = null; lzr.ok = false; lzr.cells = null; if (lzr.info.w > ncols) ncols = lzr.info.w; }
     var colorOf = function (o, inh) { return (o && o.s && o.s.color) || inh; };
     var side = function (o, sd, rank, inh) {
       var s = (o && o.s) || null;
@@ -9168,15 +9205,18 @@
         else ro0.m = rp.cm = { tsig: tsig, prev: pv, next: nx0, grp: g0, pg: g1, ng: g2, won: [], out: undefined };
       }
     }
-    var won = cells.map(function (cell) {
+    var won = null;
+    var SD = ['left', 'right', 'top', 'bottom'];
+    var outerOf = function (cell, sd) { return (sd === 'left' && cell.c === 0) || (sd === 'right' && cell.c + cell.cs === ncols) || (sd === 'top' && cell.r === 0) || (sd === 'bottom' && cell.r + cell.rs === rows.length); };
+    var mixed = {};
+    if (!lazy) {
+    won = cells.map(function (cell) {
       var ro = cell.rowo;
       if (ro.ok) return ro.m.won[cell.k];
       var w4 = [edge(cell, 'left'), edge(cell, 'right'), edge(cell, 'top'), edge(cell, 'bottom')];
       if (ro.m) ro.m.won[cell.k] = w4;
       return w4;
     });
-    var SD = ['left', 'right', 'top', 'bottom'];
-    var outerOf = function (cell, sd) { return (sd === 'left' && cell.c === 0) || (sd === 'right' && cell.c + cell.cs === ncols) || (sd === 'top' && cell.r === 0) || (sd === 'bottom' && cell.r + cell.rs === rows.length); };
     // (the cells along the table's sides only: one of 4 000 cells inside
     // asked nothing here)
     var nrows = rows.length, atSide = function (cell) { return cell.c === 0 || cell.c + cell.cs === ncols || cell.r === 0 || cell.r + cell.rs === nrows; };
@@ -9191,7 +9231,6 @@
     // (outer edges that differ along a side: the table's border keeps the
     // widest for layout, unpainted, and each outer cell paints its own
     // outer half with a positioned strip over it)
-    var mixed = {};
     if (!capt) for (var mx = 0; mx < cells.length; mx++) {
       var mc = cells[mx];
       if (!atSide(mc)) continue;
@@ -9202,23 +9241,67 @@
         if (!mb || mb.st !== outer[msd].st || mb.w !== outer[msd].w || mb.c !== outer[msd].c) mixed[msd] = true;
       }
     }
+    } else {
+      var nrl = rows.length;
+      for (var wr = 0; wr < nrl; wr++) {
+        var wro = rows[wr];
+        if (wro.ok) { wro.won = wro.m.won; continue; }
+        need(wr - 1); need(wr + 1);
+        var wcs = need(wr), ww = [];
+        for (var wk = 0; wk < wcs.length; wk++) ww.push([edge(wcs[wk], 'left'), edge(wcs[wk], 'right'), edge(wcs[wk], 'top'), edge(wcs[wk], 'bottom')]);
+        wro.won = ww;
+        if (wro.m) wro.m.won = ww;
+      }
+      // (the cells along the table's sides, in the order of the cells:
+      // all of the first and the last row, the first and the last cell of
+      // the others)
+      var eachSide = function (fn) {
+        for (var ri = 0; ri < nrl; ri++) {
+          var r = rows[ri], ei = r.info, n = ei.n, top = ri === 0, bot = ri === nrl - 1;
+          for (var k = 0; k < n; k++) {
+            if (!top && !bot && k > 0 && k < n - 1) { k = n - 2; continue; }
+            var c0 = ei.c[k], w4 = r.won[k];
+            if (c0 === 0) fn(0, w4[0]);
+            if (c0 + ei.cs[k] === ncols) fn(1, w4[1]);
+            if (top) fn(2, w4[2]);
+            if (bot) fn(3, w4[3]);
+          }
+        }
+      };
+      eachSide(function (si, ob) { var osd = SD[si]; if (ob && ob.st !== 'hidden' && ob.w && (!outer[osd] || ob.w > outer[osd].w)) outer[osd] = ob; });
+      if (!capt) eachSide(function (si, mb) {
+        var msd = SD[si];
+        if (!outer[msd]) return;
+        if (!mb || mb.st !== outer[msd].st || mb.w !== outer[msd].w || mb.c !== outer[msd].c) mixed[msd] = true;
+      });
+    }
     var anyMixed = mixed.left || mixed.right || mixed.top || mixed.bottom;
     // (a row settled as last time goes out as it did, partsJson)
     var useOut = function (ro) { return ro.ok && !anyMixed && ro.m.out !== undefined; };
-    cells.forEach(function (cell, ix) {
-      if (useOut(cell.rowo)) return;
+    var settle = function (cell, cw) {
       // (a cell from its render's parts whose borders won as last time:
       // its JSON as last time, partsJson)
       var p = cell.o._p, key = null;
       if (p && !anyMixed) {
         key = '';
-        for (var si = 0; si < 4; si++) { var b0 = won[ix][si]; key += (b0 ? b0.st + ' ' + b0.w + ' ' + b0.c : '-') + (capt && outerOf(cell, SD[si]) ? '!' : '') + '|'; }
+        for (var si = 0; si < 4; si++) { var b0 = cw[si]; key += (b0 ? b0.st + ' ' + b0.w + ' ' + b0.c : '-') + (capt && outerOf(cell, SD[si]) ? '!' : '') + '|'; }
         Object.defineProperty(cell.o, '_key', { value: key, enumerable: false, writable: true });
         if (p.clKey === key) return;
       }
       var s = cell.o.s = Object.assign({}, cell.o.s);
-      SD.forEach(function (sd, si) { put(s, sd, won[ix][si], !(capt && outerOf(cell, sd))); });
-    });
+      SD.forEach(function (sd, si) { put(s, sd, cw[si], !(capt && outerOf(cell, sd))); });
+    };
+    if (!lazy) cells.forEach(function (cell, ix) { if (!useOut(cell.rowo)) settle(cell, won[ix]); });
+    else {
+      for (var ar = 0; ar < rows.length; ar++) {
+        var aro = rows[ar];
+        if (useOut(aro)) continue;
+        var acs = need(ar);
+        for (var ak = 0; ak < acs.length; ak++) settle(acs[ak], aro.won[ak]);
+      }
+      // (differing outer edges: every cell is asked below)
+      if (anyMixed) { cells = []; won = []; for (var fr = 0; fr < rows.length; fr++) { var fcs = need(fr); for (var fk = 0; fk < fcs.length; fk++) { cells.push(fcs[fk]); won.push(rows[fr].won[fk]); } } }
+    }
     // rows, groups and columns draw no borders of their own
     var strip = function (o) { if (!o || !o.s) return; o.s = Object.assign({}, o.s); ['left', 'right', 'top', 'bottom'].forEach(function (sd) { delete o.s['border-' + sd + '-style']; delete o.s['border-' + sd + '-width']; }); };
     var stripped = [];
