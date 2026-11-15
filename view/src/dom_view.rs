@@ -686,6 +686,15 @@ pub struct DomSvgDocs {
     /// (DomView.putPage), put back when the build ends (undo)
     undoObjs: Vec<Rc<RefCell<JsonValue>>>,
     undoWas: Vec<Rc<RefCell<JsonValue>>>,
+    /// pictures the host fetched (http, https): their natural sizes by
+    /// URL, set by the host (DomPage.setImageSize). A picture of such a
+    /// URL is drawn with the URL as its name (EVGElement.src, bg-picture),
+    /// and the host gives the bitmap under that name
+    pub sizes: HashMap<String,Vec<f64>>,
+    /// the fetched pictures a build met whose size the host has not given
+    /// (wanted from this frame, in the order met)
+    pub wanted: Vec<String>,
+    wantedSet: HashMap<String,bool>,
 }
 
 impl DomSvgDocs {
@@ -698,7 +707,24 @@ impl DomSvgDocs {
             memo: Rc::new(RefCell::new(DomMemo::new())),
             undoObjs: Vec::new(),
             undoWas: Vec::new(),
+            sizes: HashMap::new(),
+            wanted: Vec::new(),
+            wantedSet: HashMap::new(),
         }
+    }
+    /// a fetched picture's size: [w, h] as the host gave it, else none,
+    /// and the URL is noted as wanted
+    pub fn sizeOf(&mut self, src: &str) -> Vec<f64> {
+        let known: Option<Vec<f64>> = self.sizes.get(src).cloned();
+        if known.is_some() {
+            return known.unwrap();
+        }
+        if !self.wantedSet.contains_key(src) {
+            self.wantedSet.insert(src.to_string(), true);
+            self.wanted.push(src.to_string());
+        }
+        let none: Vec<f64> = Vec::new();
+        none
     }
     /// the page as it was before the build: a patched page shares its
     /// unchanged nodes with the next frame, which must read what web/dom
@@ -723,6 +749,8 @@ impl DomSvgDocs {
         Rc::clone(&self.memo).borrow_mut().frame();
         self.sceneIds = Vec::new();
         self.scenes = Vec::new();
+        self.wanted = Vec::new();
+        self.wantedSet = HashMap::new();
         self.prev = self.cur.clone();
         let none: HashMap<String,Rc<RefCell<SvgDocument>>> = HashMap::new();
         self.cur = none.clone();
@@ -1075,6 +1103,49 @@ impl DomView {
         }
         head = head.to_lowercase();
         (head.starts_with("data:image/png;base64,") || (head.starts_with("data:image/gif;base64,") || head.starts_with("data:image/jpeg;base64,")))
+    }
+    /// a picture the host fetches: an http or https URL
+    pub fn remoteUrl(src: &str) -> bool {
+        let mut head: String = src.to_string();
+        if head.as_bytes().len() > 8 {
+            head = head[(0) as usize..(8) as usize].to_string();
+        }
+        head = head.to_lowercase();
+        head.starts_with("http://") || head.starts_with("https://")
+    }
+    /// the name a picture is drawn by: a fetched one's URL, else its
+    /// bytes' (pngPart)
+    pub fn pictureName(url: &str) -> String {
+        if DomView::remoteUrl(url) {
+            return url.to_string();
+        }
+        DomView::pngPart(url)
+    }
+    /// a background's first url(), as written
+    pub fn bgAnyUrl(v: &str) -> String {
+        let at: i64 = DomText::index_of(&v, "url(");
+        if at < 0 {
+            return String::new();
+        }
+        let rest: String = v[(at + 4) as usize..(v.as_bytes().len() as i64) as usize].to_string();
+        let end: i64 = DomText::index_of(&rest, ")");
+        if end < 0 {
+            return String::new();
+        }
+        let mut u: String = rest[(0) as usize..(end) as usize].to_string().trim().to_string();
+        if (u.starts_with("\"") || u.starts_with("'")) && u.as_bytes().len() >= 2 {
+            u = u[(1) as usize..((u.as_bytes().len() as i64) - 1) as usize].to_string();
+        }
+        u
+    }
+    /// a picture's natural size: from a data: URL's bytes, else (a fetched
+    /// one) the size the host gave
+    fn imageSizeOf(&self, src: &str) -> Vec<f64> {
+        let nat: Vec<f64> = DomView::imageSize(src);
+        if (nat.len() as i64) == 2 || !DomView::remoteUrl(src) {
+            return nat;
+        }
+        self.svgs.borrow_mut().sizeOf(src)
     }
     /// an image's source: a PNG data: URL is in "png" (webapi.js leaves
     /// only its head in src)
@@ -6068,12 +6139,19 @@ impl DomView {
         if bg_url.is_empty() {
             bg_url = DomView::bgSvgUrl(&s.borrow().getText("background-image"));
         }
+        // (a fetched picture the host gave the size of)
+        if bg_url.is_empty() {
+            let bg_any: String = DomView::bgAnyUrl(&s.borrow().getText("background-image"));
+            if DomView::remoteUrl(&bg_any) {
+                bg_url = bg_any.clone();
+            }
+        }
         let mut bg_em: f64 = DomView::pxOf(&s.borrow().getText("font-size"));
         if bg_em <= 0.0 {
             bg_em = self.emPx;
         }
         if !bg_url.is_empty() {
-            let mut nat: Vec<f64> = DomView::imageSize(&bg_url);
+            let mut nat: Vec<f64> = self.imageSizeOf(&bg_url);
             // (an SVG with a viewBox and no size: the viewBox's ratio, which
             // a background's size of one length keeps; Bootstrap's chevron)
             if DomView::svgUrl(&bg_url) {
@@ -6113,7 +6191,7 @@ impl DomView {
                 EVGElement::set_attribute(
                     &e,
                     "bg-picture",
-                    format!("{}|{}|{}|{}|{}|{}{}", DomView::pngPart(&bg_url), DomView::fmt(nat[0]), DomView::fmt(nat[1]), rep, DomView::bgPosition(&DomView::firstLayer(&s.borrow().getText("background-position")), bg_em), size, fixed)
+                    format!("{}|{}|{}|{}|{}|{}{}", DomView::pictureName(&bg_url), DomView::fmt(nat[0]), DomView::fmt(nat[1]), rep, DomView::bgPosition(&DomView::firstLayer(&s.borrow().getText("background-position")), bg_em), size, fixed)
                 );
             }
         }
@@ -6699,7 +6777,7 @@ impl DomView {
                 let mut r_w: f64 = l_h;
                 let mut r_h: f64 = l_w;
                 let oa: Rc<RefCell<JsonValue>> = n.borrow().get("a");
-                let onat: Vec<f64> = DomView::imageSize(&DomView::imgSrc(&n));
+                let onat: Vec<f64> = self.imageSizeOf(&DomView::imgSrc(&n));
                 if (onat.len() as i64) == 2 {
                     if onat[0] > 0.0 && onat[1] > 0.0 {
                         r_w = onat[0];
@@ -7946,6 +8024,9 @@ impl DomView {
                 // a picture given as a data: URL: the hosts get its bytes
                 // (pngs) under the same name a canvas's bitmap has
                 e.borrow_mut().src = DomView::pngPart(&a.borrow().getText("src"));
+            } else if t == "img" && DomView::remoteUrl(&a.borrow().getText("src")) && self.svgs.borrow().sizes.contains_key(&a.borrow().getText("src")) {
+                // a fetched picture the host has: drawn by its URL
+                e.borrow_mut().src = a.borrow().getText("src");
             }
             // (an SVG picture as a data: URL: its document drawn into the
             // box, scaled as its viewBox, else its width and height, say)
@@ -8062,7 +8143,7 @@ impl DomView {
                 }
             }
             let alt: String = a.borrow().getText("alt");
-            let mut nat: Vec<f64> = DomView::imageSize(&DomView::imgSrc(&n));
+            let mut nat: Vec<f64> = self.imageSizeOf(&DomView::imgSrc(&n));
             // (in a vertical frame the attributes and the picture's own
             // size are turned as the style is)
             let mut attr_w: String = a.borrow().getText("width");
