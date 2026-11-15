@@ -1462,7 +1462,8 @@
     for (var i = root._c.length - 1; i >= 0; i--) stack.push(root._c[i]);
     while (stack.length) {
       var n = stack.pop();
-      if (n.nodeType !== 1) continue;
+      // (an element: only they have _attrs; nodeType is a getter)
+      if (n._attrs === undefined) continue;
       if (fn(n) === true) return;
       for (var j = n._c.length - 1; j >= 0; j--) stack.push(n._c[j]);
     }
@@ -1554,7 +1555,8 @@
     for (var i = top.length - 1; i >= 0; i--) stack.push(top[i]);
     while (stack.length) {
       var n = stack.pop();
-      if (n.nodeType !== 1) continue;
+      // (an element: only they have _attrs; nodeType is a getter)
+      if (n._attrs === undefined) continue;
       if (fn(n) === true) return;
       var k = flatKids(n);
       for (var j = k.length - 1; j >= 0; j--) stack.push(k[j]);
@@ -4280,7 +4282,8 @@
     var b = boxes[el.__id];
     if (!b) return DOMRect(0, 0, 0, 0);
     var sx = 0, sy = 0;
-    for (var n = el.parentNode; n && n.nodeType === 1; n = n.parentNode) { sx += n.scrollLeft || 0; sy += n.scrollTop || 0; }
+    // (the offsets as they are: the layout above has clamped them)
+    for (var n = el.parentNode; n && n._attrs !== undefined; n = n.parentNode) { sx += n._sLeft || 0; sy += n._sTop || 0; }
     return DOMRect(b[0] - sx, b[1] - sy, b[2], b[3]);
   }
   // an element's laid-out border box size: under a scale (a zoomed
@@ -4496,14 +4499,38 @@
     var best = null, bestKey = null, order = 0;
     if (!doc) return null;
     var orderOf = {};
-    (shadowCount ? eachFlat : eachElement)(doc, function (e) {
-      orderOf[e.__id] = order++;
-      var r = rectOf(e);
-      if (!(x >= r.left && x < r.right && y >= r.top && y < r.bottom) || !hittable(e)) return;
-      if (!insideTransformed(e, x, y) || clippedAway(e, x, y)) return;
-      var key = paintKey(e, orderOf);
-      if (!best || keyAfter(key, bestKey)) { best = e; bestKey = key; }
-    });
+    if (shadowCount) {
+      eachFlat(doc, function (e) {
+        orderOf[e.__id] = order++;
+        var r = rectOf(e);
+        if (!(x >= r.left && x < r.right && y >= r.top && y < r.bottom) || !hittable(e)) return;
+        if (!insideTransformed(e, x, y) || clippedAway(e, x, y)) return;
+        var key = paintKey(e, orderOf);
+        if (!best || keyAfter(key, bestKey)) { best = e; bestKey = key; }
+      });
+      return best;
+    }
+    // No shadow trees: the same walk carrying the scroll offsets above each
+    // element, which rectOf adds up per element (a wheel event over AG
+    // Grid's 1 000 elements read 30 000 offsets).
+    reflow();
+    var stack = [], sxs = [], sys = [], top = doc._c;
+    for (var i = top.length - 1; i >= 0; i--) { stack.push(top[i]); sxs.push(0); sys.push(0); }
+    while (stack.length) {
+      var n = stack.pop(), sx = sxs.pop(), sy = sys.pop();
+      if (n._attrs === undefined) continue;
+      orderOf[n.__id] = order++;
+      var b = boxes[n.__id];
+      if (b) {
+        var l = b[0] - sx, t = b[1] - sy;
+        if (x >= l && x < l + b[2] && y >= t && y < t + b[3] && hittable(n) && insideTransformed(n, x, y) && !clippedAway(n, x, y)) {
+          var key = paintKey(n, orderOf);
+          if (!best || keyAfter(key, bestKey)) { best = n; bestKey = key; }
+        }
+      }
+      var kx = sx + (n._sLeft || 0), ky = sy + (n._sTop || 0), kids = n._c;
+      for (var j = kids.length - 1; j >= 0; j--) { stack.push(kids[j]); sxs.push(kx); sys.push(ky); }
+    }
     return best;
   }
   function positionedOf(cs) { return cs.position && cs.position !== 'static'; }
@@ -6389,7 +6416,8 @@
     Object.defineProperty(sel, '_plain', { value: pl, enumerable: false, writable: true });
     return pl;
   }
-  // the attribute names the selectors of a rule set read
+  // the attribute names the selectors of a rule set read, and the ids they
+  // name ('#' + the id in lower case)
   function selAttrsOf(rs) {
     var names = Object.create(null);
     function ofList(list) { for (var i = 0; i < list.length; i++) ofSel(list[i]); }
@@ -6398,7 +6426,7 @@
       if (!parts) return;
       for (var k = 0; k < parts.length; k++) {
         var c = parts[k].c;
-        for (var q = 0; q < c.length; q++) { if (c[q].t === 'attr') names[c[q].n] = 1; else if (c[q].list) ofList(c[q].list); }
+        for (var q = 0; q < c.length; q++) { if (c[q].t === 'attr') names[c[q].n] = 1; else if (c[q].t === 'id') names['#' + String(c[q].v).toLowerCase()] = 1; else if (c[q].list) ofList(c[q].list); }
       }
     }
     function ofIdx(idx) { for (var key in idx) { var l = idx[key]; for (var i = 0; i < l.length; i++) ofSel(l[i].r.sel); } }
@@ -6430,7 +6458,9 @@
       var an = at[a].name;
       if (an === 'style') continue;
       if (!html) an = an.toLowerCase();
-      if (an === 'class' || an === 'id' || sa[an] === 1) key += '\u0001' + an + '\u0002' + at[a]._v;
+      // (an id no selector names tells elements apart for no rule: AG Grid
+      // gives every checkbox one of its own, a new signature per row)
+      if (an === 'class' || sa[an] === 1 || (an === 'id' && sa['#' + String(at[a]._v).toLowerCase()] === 1)) key += '\u0001' + an + '\u0002' + at[a]._v;
     }
     var id = sigIds.get(key);
     if (id === undefined) {
@@ -6516,7 +6546,10 @@
       // (elements alike in what the plain selectors read, see sigOf: the
       // rules found for the first one; only the others are tried)
       if (!shadowCount && d === doc) {
-        sg = sigOf(el, rs);
+        // (kept with the element as for a parent: its ::before and ::after
+        // ask again)
+        if (el._sgE === sigEpoch && el._sgR === rs) sg = el._sg;
+        else { sg = sigOf(el, rs); el._sg = sg; el._sgE = sigEpoch; el._sgR = rs; }
         var sck = pe ? sg + ':' + pe : sg;
         sc = rs._sc.get(sck);
         // (kept for the viewport its media rules were answered for)
