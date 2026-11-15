@@ -442,7 +442,7 @@ async function step() {
     const t0 = performance.now();
     const line = await rdRun(`__bench.run(${k})`, 20000);
     const drawn = performance.now() - t0;
-    r = { name: state.steps[k], native: { js: native.line && native.line.total, drawn: native.drawn }, rd: { js: line && line.total, render: acc.render, layout: acc.layout, paint: acc.paint, gl: acc.gl, drawn }, nativeProbe: native.probe, rdProbe: rdProbe() };
+    r = { name: state.steps[k], native: { js: native.line && native.line.total, drawn: native.drawn }, rd: { js: line && line.total, render: acc.render, layout: acc.layout, paint: acc.paint, gl: acc.gl, frames: acc.frames, drawn }, nativeProbe: native.probe, rdProbe: rdProbe() };
     r.picture = pictureCheck();
     if (BUDGET > 0 && drawn > BUDGET) state.over = true;
   }
