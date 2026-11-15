@@ -777,7 +777,13 @@ impl DomView {
         if root.borrow().kind != 5 {
             return Rc::clone(&r#box);
         }
-        let inh: Rc<RefCell<JsonValue>> = v.borrow().inherit(&JsonValue::mkObj(), &root.borrow().get("s"));
+        // (a host drawing with the browser's own faces: their metrics,
+        // metricFace)
+        let seed: Rc<RefCell<JsonValue>> = JsonValue::mkObj();
+        if page.borrow().getText("fm") == "browser" {
+            seed.borrow_mut().putStr("_fm", "browser");
+        }
+        let inh: Rc<RefCell<JsonValue>> = v.borrow().inherit(&seed, &root.borrow().get("s"));
         let body: Rc<RefCell<JsonValue>> = v.borrow().child(&root, "body");
         if body.borrow().kind != 5 {
             return Rc::clone(&r#box);
@@ -1306,7 +1312,7 @@ impl DomView {
                 ffs = 16.0;
             }
             let flh: f64 = DomView::lineHeight(&inh);
-            let fface: String = DomView::faceOf(&inh.borrow().getText("font-family"), "")[0].clone();
+            let fface: String = DomView::metricFace(&inh);
             let fsp: Vec<f64> = DomView::lineSplit(ffs, flh, &fface);
             let farea: f64 = (ffs * DomView::ascentEm(&fface) + 0.5).floor() + (ffs * DomView::descentEm(&fface) + 0.5).floor();
             let lead: f64 = fsp[0] - (ffs * DomView::ascentEm(&fface) + 0.5).floor();
@@ -1469,12 +1475,15 @@ impl DomView {
             fs = 16.0;
         }
         let _tmp_1 = DomView::lineHeight(inh);
-        return DomView::lineSplit(fs, _tmp_1, &DomView::faceOf(&inh.borrow().getText("font-family"), "")[0].clone());
+        return DomView::lineSplit(fs, _tmp_1, &DomView::metricFace(&inh));
     }
     /// a text element's line above and under its baseline
     fn splitOf(el: &Rc<RefCell<EVGElement>>) -> Vec<f64> {
         let fs: f64 = el.borrow().font_size.as_ref().unwrap().borrow().value;
-        let face: String = el.borrow().font_family.clone();
+        let mut face: String = el.borrow().font_family.clone();
+        if DomText::index_of(&el.borrow().class_name, "mfd-bf") >= 0 {
+            face = "Arial (browser)".to_string();
+        }
         let mut lh: f64 = el.borrow().line_height * fs;
         if el.borrow().line_height_unit.as_ref().unwrap().borrow().is_set {
             lh = el.borrow().line_height_unit.as_ref().unwrap().borrow().value;
@@ -1525,6 +1534,19 @@ impl DomView {
         }
         b
     }
+    /// a run's line above and under its baseline (splitOf), with the
+    /// padding and border of a box around it (runOf's wrapper, an
+    /// inline-flex badge): those are above and under the run too
+    fn runSplit(el: &Rc<RefCell<EVGElement>>, t: &Rc<RefCell<EVGElement>>) -> Vec<f64> {
+        let own: Vec<f64> = DomView::splitOf(t);
+        if Rc::ptr_eq(t, el) {
+            return own;
+        }
+        let ebw: f64 = DomView::mPx(el.borrow().r#box.as_ref().unwrap().borrow().border_width.clone());
+        let ept: f64 = DomView::mPx(el.borrow().r#box.as_ref().unwrap().borrow().padding_top.clone());
+        let epb: f64 = DomView::mPx(el.borrow().r#box.as_ref().unwrap().borrow().padding_bottom.clone());
+        vec![own[0] + ept + ebw, own[1] + epb + ebw].clone()
+    }
     /// a text element on a line that reaches `above` over the baseline and
     /// `below` under it: margins make up the difference
     fn onStrut(el: &Rc<RefCell<EVGElement>>, above: f64, below: f64) {
@@ -1532,7 +1554,7 @@ impl DomView {
         if t.is_none() {
             return;
         }
-        let own: Vec<f64> = DomView::splitOf(&t.clone().unwrap());
+        let own: Vec<f64> = DomView::runSplit(el, &t.clone().unwrap());
         let up: f64 = above - own[0];
         let down: f64 = below - own[1];
         // (the strut's room is the line's: it collapses with no margin)
@@ -1550,7 +1572,24 @@ impl DomView {
         }
     }
     pub fn normalLineOf(fs: f64, face: &str) -> f64 {
-        (((fs * DomView::ascentEm(face) + 0.5).floor() as i64) as f64) + (((fs * DomView::descentEm(face) + 0.5).floor() as i64) as f64)
+        (((fs * DomView::ascentEm(face) + 0.5).floor() as i64) as f64) + (((fs * DomView::descentEm(face) + 0.5).floor() as i64) as f64) + (((fs * DomView::lineGapEm(face) + 0.5).floor() as i64) as f64)
+    }
+    /// the face whose metrics a line of inh's text has: the one faceOf
+    /// names, or, where the host draws with the browser's own faces, the
+    /// browser's Arial for the faces a native host draws as Open Sans
+    pub fn metricFace(inh: &Rc<RefCell<JsonValue>>) -> String {
+        let f: String = DomView::faceOf(&inh.borrow().getText("font-family"), "")[0].clone();
+        if f == "Arial" && inh.borrow().getText("_fm") == "browser" {
+            return "Arial (browser)".to_string();
+        }
+        f
+    }
+    /// a face's line gap (hhea) in ems: only Arial's is not 0 here
+    pub fn lineGapEm(face: &str) -> f64 {
+        if face == "Arial (browser)" {
+            return 0.032715;
+        }
+        0.0
     }
     /// a face's ascent and descent (hhea) in ems: Figtree, Ahem (WPT's
     /// test face) and Open Sans, which stands for every other family
@@ -1564,6 +1603,9 @@ impl DomView {
         if face == "DejaVu Sans Mono" {
             return 0.92822;
         }
+        if face == "Arial (browser)" {
+            return 0.905273;
+        }
         1.06885
     }
     pub fn descentEm(face: &str) -> f64 {
@@ -1576,15 +1618,15 @@ impl DomView {
         if face == "DejaVu Sans Mono" {
             return 0.23584;
         }
+        if face == "Arial (browser)" {
+            return 0.211914;
+        }
         0.29297
     }
     /// `line-height: normal` as Chromium has it: the face's ascent and
     /// descent (hhea), each rounded to the pixel
     pub fn normalLine(inh: &Rc<RefCell<JsonValue>>, fs: f64) -> f64 {
-        let face: String = DomView::faceOf(&inh.borrow().getText("font-family"), "")[0].clone();
-        let asc: f64 = DomView::ascentEm(&face);
-        let desc: f64 = DomView::descentEm(&face);
-        (((fs * asc + 0.5).floor() as i64) as f64) + (((fs * desc + 0.5).floor() as i64) as f64)
+        DomView::normalLineOf(fs, &DomView::metricFace(&inh))
     }
     pub fn or(s: &str, fallback: &str) -> String {
         if s.is_empty() {
@@ -2936,7 +2978,7 @@ impl DomView {
         if fs == 0.0 && inh.borrow().getText("font-size") != "0px" {
             fs = 16.0;
         }
-        let d: f64 = DomView::descentEm(&DomView::faceOf(&inh.borrow().getText("font-family"), "")[0].clone());
+        let d: f64 = DomView::descentEm(&DomView::metricFace(&inh));
         let lh: f64 = DomView::lineHeight(inh);
         // the half-leading a line-height other than normal adds
         let half: f64 = (lh - DomView::normalLine(inh, fs)) / 2.0;
@@ -3029,7 +3071,7 @@ impl DomView {
         if fs == 0.0 && inh.borrow().getText("font-size") != "0px" {
             fs = 16.0;
         }
-        let face: String = DomView::faceOf(&inh.borrow().getText("font-family"), "")[0].clone();
+        let face: String = DomView::metricFace(&inh);
         // (word-spacing is added to each space, CSS Text 3 8.2)
         let ws: f64 = DomView::pxOf(&inh.borrow().getText("word-spacing"));
         if (DomView::has(&face, "Figtree")) {
@@ -3041,6 +3083,9 @@ impl DomView {
         // (every glyph of the monospace face is 1233/2048 em wide)
         if face == "DejaVu Sans Mono" {
             return fs * 0.60205 + ws;
+        }
+        if face == "Arial (browser)" {
+            return fs * 0.27783 + ws;
         }
         fs * 0.2598 + ws
     }
@@ -3763,7 +3808,7 @@ impl DomView {
             if bfs <= 0.0 {
                 bfs = 16.0;
             }
-            let bface: String = DomView::faceOf(&o.borrow().getText("font-family"), &o.borrow().getText("font-weight"))[0].clone();
+            let bface: String = DomView::metricFace(&o);
             let basc: f64 = (bfs * DomView::ascentEm(&bface) + 0.5).floor();
             let mut rew: String = String::new();
             for es in tin.split(";").map(|s| s.to_string()).collect::<Vec<String>>().iter().cloned() {
@@ -3962,6 +4007,27 @@ impl DomView {
             if k == "line-height" && v == "normal" {
                 continue;
             }
+            // (drawn with the browser's faces: their normal line, which
+            // EVG's measurer does not know, and splitOf's face)
+            if k == "_fm" {
+                if v == "browser" {
+                    let fc: String = DomView::metricFace(inh);
+                    if fc == "Arial (browser)" {
+                        let cn: String = e.borrow().class_name.clone();
+                        e.borrow_mut().class_name = if cn.is_empty() { "mfd-bf".to_string() } else { format!("{} mfd-bf", cn) };
+                        if inh.borrow().getText("line-height") == "normal" || !inh.borrow().has("line-height") {
+                            let mut bfs: f64 = DomView::pxOf(&inh.borrow().getText("font-size"));
+                            if bfs == 0.0 && inh.borrow().getText("font-size") != "0px" {
+                                bfs = 16.0;
+                            }
+                            if bfs > 0.0 {
+                                EVGElement::set_attribute(&e, "line-height", format!("{}px", DomView::fmt(DomView::normalLineOf(bfs, &fc))));
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             // (and a font-size of 0 too: text of no size is not drawn)
             if k == "font-size" && v == "0px" {
                 EVGElement::set_attribute(&e, "font-size", "0.001px".to_string());
@@ -3977,7 +4043,11 @@ impl DomView {
             }
             EVGElement::set_attribute(&e, &k, v.clone());
         }
-        let face: Vec<String> = DomView::faceOf(&inh.borrow().getText("font-family"), &inh.borrow().getText("font-weight"));
+        let mut face: Vec<String> = DomView::faceOf(&inh.borrow().getText("font-family"), &inh.borrow().getText("font-weight"));
+        // (the browser's Arial has no semibold face: 600 is drawn bold)
+        if face[0].clone() == "Arial-Semibold" && inh.borrow().getText("_fm") == "browser" {
+            face = vec!["Arial".to_string(), "bold".to_string()].clone();
+        }
         EVGElement::set_attribute(&e, "font-family", face[0].clone());
         // (the text-decoration lines that reach it; an underline through a
         // face of solid glyphs is left only under the spaces, skip-ink)
@@ -8653,9 +8723,13 @@ impl DomView {
                 } else {
                     tpl = format!("{}{}", tpl, cw);
                 }
+            } else if tw.ends_with("%") && DomView::pxOf(&tw) <= 0.0 && cw.ends_with("px") {
+                // (a percentage table: a column with a width in px keeps
+                // it, the others share the rest)
+                tpl = format!("{}{}", tpl, cw);
             } else if DomView::pxOf(&tw) <= 0.0 {
-                // (no width, or a percentage: the content's widths, the
-                // free room shared out by the grid)
+                // (no width: the content's widths, the free room shared
+                // out by the grid)
                 if cw.is_empty() {
                     tpl = format!("{}auto", tpl);
                 } else {
@@ -10433,7 +10507,7 @@ impl DomView {
         if br_fs == 0.0 {
             br_fs = 16.0;
         }
-        let br_desc: f64 = ((br_fs * DomView::descentEm(&DomView::faceOf(&inh.borrow().getText("font-family"), "")[0].clone()) + 0.5).floor() as i64) as f64;
+        let br_desc: f64 = ((br_fs * DomView::descentEm(&DomView::metricFace(&inh)) + 0.5).floor() as i64) as f64;
         // (a line-height under the font's: the strut ends above the
         // baseline, and a picture's bottom is the line's)
         if desc < 0.0 {
@@ -10448,7 +10522,7 @@ impl DomView {
         for it0 in line.iter().cloned() {
             let t0: Option<Rc<RefCell<EVGElement>>> = DomView::runOf(&it0);
             if t0.is_some() {
-                let sp: Vec<f64> = DomView::splitOf(&t0.clone().unwrap());
+                let sp: Vec<f64> = DomView::runSplit(&it0, &t0.clone().unwrap());
                 above = DomView::maxOf(above, sp[0]);
                 below = DomView::maxOf(below, sp[1]);
             }
@@ -10568,7 +10642,7 @@ impl DomView {
                         if br_low {
                             // (its line-height adds nothing to the line: its
                             // margins take its height back)
-                            let br_asc: f64 = ((br_fs * DomView::ascentEm(&DomView::faceOf(&inh.borrow().getText("font-family"), "")[0].clone()) + 0.5).floor() as i64) as f64;
+                            let br_asc: f64 = ((br_fs * DomView::ascentEm(&DomView::metricFace(&inh)) + 0.5).floor() as i64) as f64;
                             EVGElement::set_attribute(&it, "align-self", "flex-end".to_string());
                             EVGElement::set_attribute(
                                 &it,

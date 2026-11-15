@@ -187,9 +187,21 @@ async function nativeRun(call) {
 // The probe says what the page reports; this says what it shows.
 const PIC_GRID = 24; // px between flat points
 const PIC_TOL = 48; // |dr| + |dg| + |db|
+// (a colour of another space, oklch() or color-mix(), as the browser
+// draws it in sRGB: one pixel of a 2D canvas)
+let colorCtx = null;
+function drawnColor(v) {
+  if (!colorCtx) colorCtx = Object.assign(document.createElement("canvas"), { width: 1, height: 1 }).getContext("2d", { willReadFrequently: true });
+  colorCtx.clearRect(0, 0, 1, 1);
+  colorCtx.fillStyle = "rgba(0, 0, 0, 0)";
+  colorCtx.fillStyle = v;
+  colorCtx.fillRect(0, 0, 1, 1);
+  const d = colorCtx.getImageData(0, 0, 1, 1).data;
+  return [d[0], d[1], d[2], d[3] / 255];
+}
 function rgbaOf(v) {
   const m = /rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:\s*[,/]\s*([\d.]+%?))?\s*\)/.exec(v || "");
-  if (!m) return null;
+  if (!m) return /^(oklch|oklab|lab|lch|hwb|hsla?|color)\(/.test(v || "") ? drawnColor(v) : null;
   let a = m[4] === undefined ? 1 : m[4].endsWith("%") ? parseFloat(m[4]) / 100 : +m[4];
   return [+m[1], +m[2], +m[3], a];
 }
