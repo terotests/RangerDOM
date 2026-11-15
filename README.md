@@ -75,6 +75,22 @@ Ranger target build them:
 | --- | --- |
 | `json/` (`rangerdom_json`) | `JsonParser` / `JsonValue`: the tree `__render()` gives, and `DomText` |
 | `view/` (`rangerdom_view`) | `DomView`: that tree as [EVG](https://github.com/terotests/evg) elements, laid out and drawn by EVG on any host (SDL, Kotlin, Go or Rust WASM, EVGBrowser); `DomMemo` keeps the elements and their layout from frame to frame, so a frame costs what changed |
+| `view/` `DomPage` | a host's whole side of a changing page: takes `__renderDelta()` (after `__deltaRender(true)`), keeps the nodes it was sent and the elements built for them (DomMemo, keepLayout), gives `__layout` only the boxes that changed (`settle`), and takes the sizes of pictures the host fetches (http, https: `wanted`, `setImageSize`, drawn by their URL). EVGBrowser draws its script pages with it |
+
+A host with DomPage, in Ranger:
+
+```ranger
+def p:DomPage (new DomPage())
+p.setSize(w h)
+def r:int (p.take((realm.eval("__renderDelta()"))))  ; -1: ask __renderDelta(1)
+if (r > 0) {
+    lay.layout((p.view()))                            ; in the host's own tree
+    def boxes:string (p.settle())                     ; "" when none moved
+    if ((strlen boxes) > 0) {
+        realm.layout(("{\"boxes\":" + boxes + "}"))
+    }
+}
+```
 
 Both name the Ranger runtime as `../../runtime/rust/ranger` and the view
 names `../domjson`, so a project copies them into `<Ranger>/gallery/domjson`
