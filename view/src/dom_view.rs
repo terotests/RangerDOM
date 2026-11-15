@@ -10032,9 +10032,11 @@ impl DomView {
             }
             if !text && !end {
                 let d: String = DomView::displayOf(&kid);
-                let kinh: Rc<RefCell<JsonValue>> = self.inherit(&iinh,
-                    &kid.borrow().get("s")
-                );
+                // (what the child inherits is made when it is built, or when
+                // a grid asks for its baseline: a kept child needs neither,
+                // and 4 000 kept table cells made 4 000 of these a frame)
+                let mut kinh: Rc<RefCell<JsonValue>> = Rc::clone(&iinh);
+                let mut kinh_made: bool = false;
                 let was_flex: bool = self.inFlex;
                 let was_outer: Rc<RefCell<JsonValue>> = self.outerS.clone().clone();
                 if d == "list-item" {
@@ -10093,6 +10095,8 @@ impl DomView {
                         }
                         memo.borrow_mut().begin(kid.borrow().stamp);
                     }
+                    kinh = self.inherit(&iinh, &kid.borrow().get("s"));
+                    kinh_made = true;
                     ke = self.element(&kid, kinh.clone());
                     if mon {
                         memo.borrow_mut().end();
@@ -10103,11 +10107,19 @@ impl DomView {
                     }
                 }
                 if tbl && k < (flat_row.len() as i64) {
-                    EVGElement::set_attribute(&ke, "grid-row", flat_row[k as usize].clone());
-                    EVGElement::set_attribute(&ke, "grid-column", flat_col[k as usize].clone());
+                    // (the members themselves: set_attribute finds a name
+                    // by comparing it with every one before it)
+                    ke.borrow_mut().grid_row = flat_row[k as usize].clone();
+                    ke.borrow_mut().grid_column = flat_col[k as usize].clone();
                 }
                 self.inTransform = was_tr;
-                self.parallelBaseline(Rc::clone(&ke), &kid, &kinh);
+                let pod: String = self.outerS.borrow().getText("display");
+                if pod == "grid" || pod == "inline-grid" {
+                    if !kinh_made {
+                        kinh = self.inherit(&iinh, &kid.borrow().get("s"));
+                    }
+                    self.parallelBaseline(Rc::clone(&ke), &kid, &kinh);
+                }
                 self.inFlex = was_flex;
                 self.outerS = was_outer.clone();
                 let pos: String = kid.borrow().get("s").borrow().getText("position");
