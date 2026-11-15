@@ -221,6 +221,11 @@ impl Playground {
         self.newest();
         let (Some(root), Some(lay)) = (self.root.clone(), self.lay.clone()) else { return String::new() };
         let dl = Rc::new(RefCell::new(EVGDisplayList::new()));
+        // (a list made for this one paint has no commands of an earlier
+        // walk to give again, and with fragments on a kept subtree is
+        // drawn whole, also what is outside its clip: AG Grid 1 743
+        // commands for 186)
+        EVGDisplayList::set_fragments(&dl, false);
         EVGDisplayList::set_text_engine(&dl, EVGLayout::get_text_engine(&lay));
         EVGDisplayList::build(&dl, root);
         EVGDisplayList::to_json(&dl)
@@ -266,6 +271,7 @@ fn lay_out(page: &Rc<RefCell<JsonValue>>, delta: bool, w: f64, h: f64, kept: &mu
     if std::env::var("PG_RETAINCHECK").is_ok() {
         let list = |root: &Rc<RefCell<EVGElement>>, lay: &Rc<RefCell<EVGLayout>>| {
             let dl = Rc::new(RefCell::new(EVGDisplayList::new()));
+            EVGDisplayList::set_fragments(&dl, false);
             EVGDisplayList::set_text_engine(&dl, EVGLayout::get_text_engine(lay));
             EVGDisplayList::build(&dl, root.clone());
             EVGDisplayList::to_json(&dl)
@@ -430,12 +436,12 @@ impl Kept {
     fn new() -> Kept {
         let svgs = Rc::new(RefCell::new(DomSvgDocs::new()));
         svgs.borrow().memo.borrow_mut().on = true;
-        // (the kept elements are laid out again: with their layouts kept too
-        // AG Grid's header row and a stretched pane came out where they
-        // were before a scroll or a resize; PG_KEEPLAYOUT to see it)
-        svgs.borrow().memo.borrow_mut().keepLayout = false;
+        // (a kept element keeps its layout too, EVGElement.keepLayout;
+        // PG_NOKEEPLAYOUT lays every kept element out again, PG_RETAINCHECK
+        // compares each frame with a page built and laid out from nothing)
+        svgs.borrow().memo.borrow_mut().keepLayout = true;
         #[cfg(not(target_arch = "wasm32"))]
-        if std::env::var("PG_KEEPLAYOUT").is_ok() { svgs.borrow().memo.borrow_mut().keepLayout = true; }
+        if std::env::var("PG_NOKEEPLAYOUT").is_ok() { svgs.borrow().memo.borrow_mut().keepLayout = false; }
         #[cfg(not(target_arch = "wasm32"))]
         let off = std::env::var("PG_NORETAIN").is_ok();
         #[cfg(target_arch = "wasm32")]
