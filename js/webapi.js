@@ -6230,7 +6230,7 @@
       case 'height': return v === null || viewport.h === mediaPx(v);
       case 'orientation': return v === (viewport.w >= viewport.h ? 'landscape' : 'portrait');
       case 'prefers-color-scheme': return v === 'light';
-      case 'prefers-reduced-motion': return v === 'reduce';
+      case 'prefers-reduced-motion': return v === 'no-preference';
       case 'prefers-contrast': return v === 'no-preference';
       case 'prefers-reduced-transparency': return v === 'no-preference';
       case 'forced-colors': return v === 'none';
@@ -7120,6 +7120,8 @@
   function interpolateValue(prop, a, b, t) {
     if (a === b || a === undefined || b === undefined) return t < 0.5 ? a : b;
     a = String(a); b = String(b);
+    // (one form for both: `translate(0,-50px)` as written, `translate(0, 0px)`)
+    if (a.indexOf(',') >= 0 || b.indexOf(',') >= 0) { a = a.replace(/\s*,\s*/g, ', '); b = b.replace(/\s*,\s*/g, ', '); }
     if (prop === 'transform' || prop === 'translate' || prop === 'rotate' || prop === 'scale') {
       if (a === 'none') a = identityOf(b);
       else if (b === 'none') b = identityOf(a);
@@ -7223,6 +7225,118 @@
     }
     for (var sk in st) if (!keep[sk]) delete st[sk];
     if (again) scheduleAnimationFrame(el);
+  }
+  // ---- CSS transitions (CSS Transitions 1) ---------------------------------
+
+  // the transitions a style asks for: [{prop, dur, delay, timing}] from the
+  // transition shorthand or its longhands, the list's lengths repeated as
+  // the property list's (3.)
+  function transitionList(c) {
+    var out = [];
+    var tp = c['transition-property'], td = c['transition-duration'];
+    if (c.transition && c.transition !== 'none' && !(tp && td)) {
+      splitTop(String(c.transition), ',').forEach(function (part) {
+        var t = { prop: 'all', dur: 0, delay: 0, timing: 'ease' }, times = 0;
+        splitValue(part).forEach(function (tk) {
+          var lo = tk.toLowerCase();
+          if (/^-?[\d.]+m?s$/.test(lo)) { if (times++ === 0) t.dur = timeMs(lo); else t.delay = timeMs(lo); }
+          else if (EASING.test(lo)) t.timing = lo;
+          else if (lo !== 'normal' && lo !== 'allow-discrete') t.prop = lo;
+        });
+        out.push(t);
+      });
+      return out;
+    }
+    if (!td || !/[1-9]/.test(String(td))) return out;
+    var props = splitTop(String(tp || 'all'), ',');
+    var get = function (k, i, d) { var v = c[k]; if (!v) return d; var q = splitTop(String(v), ','); return q[i % q.length]; };
+    for (var i = 0; i < props.length; i++) out.push({ prop: props[i].trim().toLowerCase(), dur: timeMs(get('transition-duration', i, '0s')), delay: timeMs(get('transition-delay', i, '0s')), timing: get('transition-timing-function', i, 'ease').trim() });
+    return out;
+  }
+  // el's style went from its last one (_trBase) to c (without animations):
+  // each property its transitions name that changed starts one, from the
+  // value it shows now; a running one whose end changed starts again from
+  // where it is. Not for an element that was not rendered (display none,
+  // just made): it has no style to go from.
+  function startTransitions(el, c) {
+    var prev = el._trBase, shown = el._trOut;
+    el._trBase = c;
+    if (!prev || prev === c) return;
+    if (c.display === 'none' || prev.display === 'none' || !el.isConnected) { el._tr = null; return; }
+    var run = el._tr, list = transitionList(c);
+    if (!list.length && !run) return;
+    var spec = {}, all = null;
+    for (var i = 0; i < list.length; i++) {
+      var t = list[i];
+      if (t.prop === 'none') continue;
+      if (t.prop === 'all') { all = t; continue; }
+      var parts = shorthandParts(t.prop) || [t.prop];
+      for (var j = 0; j < parts.length; j++) spec[parts[j]] = t;
+    }
+    var names = {};
+    for (var sn in spec) names[sn] = 1;
+    if (all) { for (var k in c) if (k.charAt(0) !== '_' && k.slice(0, 2) !== '--') names[k] = 1; for (var k2 in prev) if (k2.charAt(0) !== '_' && k2.slice(0, 2) !== '--') names[k2] = 1; }
+    if (run) for (var rk in run) names[rk] = 1;
+    var now0 = animNow();
+    for (var n in names) {
+      // (a property a style leaves out has its initial value)
+      var nv = c[n] !== undefined ? c[n] : INITIAL[n], pv = prev[n] !== undefined ? prev[n] : INITIAL[n], r = run && run[n], sp = spec[n] || all;
+      if (r) {
+        if (r.to === nv) continue;
+        if (!sp || sp.dur <= 0 || nv === undefined) { delete run[n]; continue; }
+        var cur = shown && shown[n] !== undefined ? shown[n] : INITIAL[n] !== undefined ? INITIAL[n] : r.to;
+        run[n] = { from: cur, to: nv, start: now0, dur: sp.dur, delay: sp.delay, timing: sp.timing };
+        continue;
+      }
+      if (!sp || sp.dur <= 0 || pv === nv || pv === undefined || nv === undefined) continue;
+      // (only what interpolates: a discrete value changes at once)
+      if (n !== 'visibility' && interpolateValue(n, pv, nv, 0.5) === nv) continue;
+      if (!run) run = el._tr = {};
+      run[n] = { from: shown && shown[n] !== undefined ? shown[n] : pv, to: nv, start: now0, dur: sp.dur, delay: sp.delay, timing: sp.timing };
+    }
+  }
+  function transitionLonghands(out, spec) {
+    var v = String(out.transition || '');
+    var sec = function (ms) { return +(ms / 1000).toFixed(4) + 's'; };
+    var parts = v && v !== 'none' ? splitTop(v, ',') : ['all 0s ease 0s'];
+    var pr = [], du = [], de = [], ti = [];
+    parts.forEach(function (part) {
+      var p = 'all', d = 0, dl = 0, tf = 'ease', times = 0;
+      splitValue(part).forEach(function (tk) {
+        var lo = tk.toLowerCase();
+        if (/^-?[\d.]+m?s$/.test(lo)) { if (times++ === 0) d = timeMs(lo); else dl = timeMs(lo); }
+        else if (EASING.test(lo)) tf = lo;
+        else if (lo !== 'normal' && lo !== 'allow-discrete') p = lo;
+      });
+      pr.push(p); du.push(sec(d)); de.push(sec(dl)); ti.push(tf);
+    });
+    if (spec['transition-property'] === undefined) out['transition-property'] = pr.join(', ');
+    if (spec['transition-duration'] === undefined) out['transition-duration'] = du.join(', ');
+    if (spec['transition-delay'] === undefined) out['transition-delay'] = de.join(', ');
+    if (spec['transition-timing-function'] === undefined) out['transition-timing-function'] = ti.join(', ');
+  }
+  function hasTransitions(el) { if (!el._tr) return false; for (var k in el._tr) return true; el._tr = null; return false; }
+  // the running transitions onto c; transitionend for each that ended
+  function applyTransitions(el, c) {
+    var tr = el._tr, t = animNow(), again = false;
+    for (var p in tr) {
+      var r = tr[p], e = t - r.start - r.delay;
+      if (e >= r.dur) { delete tr[p]; transitionEnd(el, p, r.dur); continue; }
+      again = true;
+      if (frameKeys) frameKeys[p] = 1;
+      if (e < 0) { c[p] = r.from; continue; }
+      // (visibility: visible while either end is, CSS Transitions 1, 6.2)
+      c[p] = p === 'visibility' ? (r.from === 'visible' || r.to === 'visible' ? 'visible' : r.to) : interpolateValue(p, r.from, r.to, easingFn(r.timing)(e / r.dur));
+    }
+    if (again) scheduleAnimationFrame(el);
+    else el._tr = null;
+  }
+  function transitionEnd(el, prop, dur) {
+    setTimeout(function () {
+      var ev = new TransitionEvent('transitionend', { bubbles: true, cancelable: false });
+      ev.propertyName = prop; ev.elapsedTime = dur / 1000; ev.pseudoElement = '';
+      dispatch(el, ev);
+    }, 0);
   }
   // ---- Web Animations (Element.animate) ------------------------------------
 
@@ -7580,12 +7694,18 @@
     if (keep && ab && ab.gen === styleGen && ab.parent === parent) c = copyStyle(ab.base);
     else c = (el._pc ? patchedStyle(el, parent) : null) || computeStyle(el, parent);
     el._pc = null;
-    var cssAnim = (c.animation && c.animation !== 'none') || (c['animation-name'] && c['animation-name'] !== 'none'), waapi = el._waapi && el._waapi.length;
-    if (cssAnim || waapi) {
+    // (a new style without animations: the transitions it starts)
+    if (!(keep && ab && ab.gen === styleGen && ab.parent === parent)) {
+      if (el._tr || (c.transition && c.transition !== 'none') || (c['transition-duration'] && /[1-9]/.test(c['transition-duration']))) startTransitions(el, c);
+      else el._trBase = c;
+    }
+    var cssAnim = (c.animation && c.animation !== 'none') || (c['animation-name'] && c['animation-name'] !== 'none'), waapi = el._waapi && el._waapi.length, trans = hasTransitions(el);
+    if (cssAnim || waapi || trans) {
       if (!(keep && ab && ab.gen === styleGen && ab.parent === parent)) { ab = el._ab = { gen: styleGen, parent: parent, base: c, out: null }; c = copyStyle(c); }
       var fk = frameKeys;
       frameKeys = {};
       try {
+        if (trans) applyTransitions(el, c);
         if (cssAnim) applyAnimations(el, c, parent);
         if (waapi) applyWaapi(el, c, parent);
         diffFrom(c, ab.base, frameKeys);
@@ -7595,6 +7715,7 @@
     } else el._ab = null;
     if (!cssAnim && el._anims) el._anims = null;
     computedCache.map[el.__id] = c;
+    el._trOut = c;
     // (styled: its ancestors are noted with it, so one never styled has
     // nothing styled under it; treeChanged keeps that true for a move)
     if (!el._es) styledNow(el);
@@ -7801,6 +7922,9 @@
       out[name] = computeValue(name, v, ctx, parent, out);
     }
     if (out.display === undefined) out.display = 'inline';
+    // the transition shorthand's longhands, as getComputedStyle gives them
+    // (Bootstrap waits transitionDuration for a modal's fade)
+    if (spec.transition !== undefined) transitionLonghands(out, spec);
     // (a side with a style and no width has the initial one, medium)
     for (var bsd = 0; bsd < 4; bsd++) {
       var bsn = ['top', 'right', 'bottom', 'left'][bsd], bst = out['border-' + bsn + '-style'];
@@ -8045,6 +8169,15 @@
       if (v === 'thin') return '1px';
       if (v === 'medium') return '3px';
       if (v === 'thick') return '5px';
+    }
+    // (the lengths of each layer in px, calc() worked out where it has no
+    // percentage: Bootstrap's `calc(.75em + .375rem)` icon sizes, 1.25rem)
+    if (name === 'background-size' || name === 'background-position') {
+      if (/calc\(|min\(|max\(|clamp\(/i.test(v)) v = calcLengths(v, ctx);
+      return v.replace(/(^|[\s,])([+-]?(?:\d+\.?\d*|\.\d+))(rem|em|vw|vh|vmin|vmax|pt|pc|in|cm|mm|q)(?=$|[\s,])/gi, function (m, pre, n, u) {
+        var q = lengthPx(n + u, ctx);
+        return q === null ? m : pre + fmtPx(q);
+      });
     }
     // (one or two lengths, each in px)
     if (name === 'border-spacing') {
@@ -9392,6 +9525,45 @@
     delete s['background-color'];
     return 'data:image/svg+xml,' + encodeURIComponent(svg);
   }
+  // An empty box drawn by its borders alone, some sides transparent: a
+  // CSS triangle (Bootstrap's dropdown caret, a tooltip's arrow), whose
+  // sides meet on the diagonals. The host fills each side as a rectangle,
+  // so the box goes as an SVG picture of the four sides (mitered), its
+  // borders taken off. '' when it is not such a box.
+  function borderPicture(s, color) {
+    var sides = ['top', 'right', 'bottom', 'left'], w = {}, col = {}, clear = 0, shown = 0;
+    for (var i = 0; i < 4; i++) {
+      var k = sides[i], st = s['border-' + k + '-style'], bw = parseFloat(s['border-' + k + '-width']) || 0;
+      w[k] = st && st !== 'none' && st !== 'hidden' ? bw : 0;
+      var c = s['border-' + k + '-color'] || s.color || color || 'rgb(0, 0, 0)';
+      col[k] = c;
+      if (!w[k]) continue;
+      if (st !== 'solid') return '';
+      if (c === 'transparent' || /^rgba\(.*,\s*0\)$/.test(c)) clear++; else shown++;
+    }
+    if (!clear || !shown) return '';
+    var cw = s.width && s.width !== 'auto' ? parseFloat(s.width) : 0, ch = s.height && s.height !== 'auto' ? parseFloat(s.height) : 0;
+    if (cw || ch || (s['background-color'] && !/^(transparent|rgba\(0, 0, 0, 0\))$/.test(s['background-color']))) return '';
+    var W = w.left + w.right, H = w.top + w.bottom;
+    if (W <= 0 || H <= 0) return '';
+    var f = function (x) { return +x.toFixed(3); };
+    var pts = {
+      top: [[0, 0], [W, 0], [W - w.right, w.top], [w.left, w.top]],
+      right: [[W, 0], [W, H], [W - w.right, H - w.bottom], [W - w.right, w.top]],
+      bottom: [[0, H], [W, H], [W - w.right, H - w.bottom], [w.left, H - w.bottom]],
+      left: [[0, 0], [0, H], [w.left, H - w.bottom], [w.left, w.top]]
+    };
+    var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + f(W) + '" height="' + f(H) + '" viewBox="0 0 ' + f(W) + ' ' + f(H) + '">';
+    for (var j = 0; j < 4; j++) {
+      var sd = sides[j], cc = col[sd];
+      if (!w[sd] || cc === 'transparent' || /^rgba\(.*,\s*0\)$/.test(cc)) continue;
+      svg += '<polygon fill="' + cc + '" points="' + pts[sd].map(function (p) { return f(p[0]) + ',' + f(p[1]); }).join(' ') + '"/>';
+    }
+    svg += '</svg>';
+    for (var q = 0; q < 4; q++) { delete s['border-' + sides[q] + '-width']; delete s['border-' + sides[q] + '-style']; delete s['border-' + sides[q] + '-color']; }
+    s.width = f(W) + 'px'; s.height = f(H) + 'px';
+    return 'data:image/svg+xml,' + encodeURIComponent(svg);
+  }
   function pseudoBox(n, cs, pe) {
     var d = n.ownerDocument || doc;
     if (d !== doc) return null;
@@ -9438,7 +9610,7 @@
       s[k] = typeof v === 'string' && v.slice(0, 5) === 'calc(' ? flatCalc(v) : v;
     }
     if (!s.display) s.display = 'inline';
-    var mask = text ? '' : maskAsImage(s);
+    var mask = text ? '' : maskAsImage(s) || borderPicture(s, ps.color);
     if (mask) { o.t = 'img'; o.a = { src: mask }; }
     o.s = s;
     if (text) o.c = ps['white-space'] === 'pre-line' && text.indexOf('\n') >= 0 ? preLineParts(o.i + 't', text) : [{ i: o.i + 't', x: text }];
