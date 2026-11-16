@@ -12054,7 +12054,7 @@
       if (k === 'ArrowLeft' || k === 'ArrowRight' || k === 'Home' || k === 'End') { editMove(el, k, m.shift); return; }
       if ((m.ctrl || m.meta) && k === 'a') { editCommand(el, 'selectall'); changed(); return; }
     }
-    if ((k === 'Enter' && (el.localName === 'button' || el.localName === 'a' || (el.localName === 'input' && /^(button|submit|reset|checkbox|radio)$/.test(el.type) && el.type !== 'checkbox'))) || (k === ' ' && (el.localName === 'button' || (el.localName === 'input' && /^(button|submit|reset|checkbox|radio)$/.test(el.type))))) {
+    if ((k === 'Enter' && (el.localName === 'button' || el.localName === 'a' || (el.localName === 'input' && /^(button|submit|reset|checkbox|radio|file)$/.test(el.type) && el.type !== 'checkbox'))) || (k === ' ' && (el.localName === 'button' || (el.localName === 'input' && /^(button|submit|reset|checkbox|radio|file)$/.test(el.type))))) {
       el.click();
       return;
     }

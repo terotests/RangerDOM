@@ -202,23 +202,33 @@ function drain() {
 }
 // a file field's chooser in RangerDOM is this browser's: the chosen files
 // go to the page (webapi.js __setFiles), up to 16 MB each
+// (one input kept in the document: a detached one can be collected while
+// the chooser is open, and its change never comes)
+let filePicker = null;
 function pickFiles(m) {
-  const inp = document.createElement("input");
-  inp.type = "file";
-  inp.multiple = !!m.multiple;
-  if (m.accept) inp.accept = m.accept;
-  inp.addEventListener("change", async () => {
-    const out = [];
-    for (const f of inp.files) {
-      if (f.size > 16 << 20) continue;
-      const bytes = new Uint8Array(await f.arrayBuffer());
-      let bin = "";
-      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-      out.push({ name: f.name, type: f.type, lastModified: f.lastModified, b64: btoa(bin) });
-    }
-    if (pg) pg.eval("__setFiles(" + JSON.stringify(m.id) + ", " + JSON.stringify(JSON.stringify(out)) + ")");
-  });
-  inp.click();
+  if (!filePicker) {
+    filePicker = document.createElement("input");
+    filePicker.type = "file";
+    filePicker.style.display = "none";
+    filePicker.tabIndex = -1;
+    document.body.appendChild(filePicker);
+    filePicker.addEventListener("change", async () => {
+      const id = filePicker.dataset.id, out = [];
+      for (const f of filePicker.files) {
+        if (f.size > 16 << 20) continue;
+        const bytes = new Uint8Array(await f.arrayBuffer());
+        let bin = "";
+        for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        out.push({ name: f.name, type: f.type, lastModified: f.lastModified, b64: btoa(bin) });
+      }
+      filePicker.value = "";
+      if (pg && out.length) pg.eval("__setFiles(" + id + ", " + JSON.stringify(JSON.stringify(out)) + ")");
+    });
+  }
+  filePicker.dataset.id = JSON.stringify(m.id);
+  filePicker.multiple = !!m.multiple;
+  filePicker.accept = m.accept || "";
+  filePicker.click();
 }
 let clock = 0;
 function tick() {
@@ -794,6 +804,9 @@ for (const [evName, type] of [["pointerdown", "down"], ["pointerup", "up"], ["po
     if (!pg || busy) return;
     const p = pagePoint(ev);
     pg.input(JSON.stringify({ type, x: p.x, y: p.y, button: ev.button > 0 ? ev.button : 0, shift: ev.shiftKey, ctrl: ev.ctrlKey, alt: ev.altKey, meta: ev.metaKey }));
+    // (what the press asked of the host, a file chooser, in the press's own
+    // task: browsers open a chooser only from a user gesture)
+    if (type !== "move") drain();
   });
 }
 // the wheel scrolls the page in RangerDOM (webapi.js: wheel event, then
@@ -812,6 +825,7 @@ for (const [evName, type] of [["keydown", "key"], ["keyup", "keyup"]]) {
     if (!pg || busy) return;
     if (ev.key === "Tab" || ev.key.startsWith("Arrow") || ev.key === " " || ev.key === "Backspace" || ev.key === "Home" || ev.key === "End" || ev.key.startsWith("Page")) ev.preventDefault();
     pg.input(JSON.stringify({ type, key: ev.key, code: ev.code, shift: ev.shiftKey, ctrl: ev.ctrlKey, alt: ev.altKey, meta: ev.metaKey }));
+    drain();
   });
 }
 // between steps the page lives: its timers and animations run
