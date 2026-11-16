@@ -915,6 +915,7 @@
     textStamp++;
     if (shadowCount) { stampUp(n); return; }
     for (; n; n = n.parentNode) n._rv = textStamp;
+    if (virts.length) virtCheck(false);
   }
   // a text changed under n: n and its ancestors render again
   function textChanged(n) {
@@ -1158,7 +1159,14 @@
       var e = scrollers[i];
       if (!e.isConnected || (!e._sTop && !e._sLeft)) { e._scl = false; continue; }
       keep.push(e);
-      if (!boxes[e.__id] || e === (doc && doc.documentElement)) continue;
+      // (the page's own scroll: within the page's height, as a browser
+      // keeps it)
+      if (e === (doc && doc.documentElement)) {
+        var rmt = Math.max(0, Math.round(pageHeight()) - viewport.h), rml = Math.max(0, pageWidth() - viewport.w);
+        if (e._sTop > rmt || e._sLeft > rml) { e._sTop = Math.min(e._sTop, rmt); e._sLeft = Math.min(e._sLeft, rml); scriptScrolled(e); }
+        continue;
+      }
+      if (!boxes[e.__id]) continue;
       if (clampScroll(e)) scriptScrolled(e);
     }
     scrollers = keep;
@@ -2321,7 +2329,7 @@
     // (a scrolled box's offset is clamped by a layout: read after its
     // content shrank, it is laid out first)
     get scrollTop() { if (this._scl) scrollRead(this); return this._sTop; }
-    set scrollTop(v) { v = Math.max(0, +v || 0); if (v === this._sTop) return; this._sTop = v; keptScroll(this); scriptScrolled(this); }
+    set scrollTop(v) { v = Math.max(0, +v || 0); if (this === (doc && doc.documentElement) && doc.body && boxes[doc.body.__id]) v = Math.min(v, Math.max(0, Math.round(pageHeight()) - viewport.h)); if (v === this._sTop) return; this._sTop = v; keptScroll(this); scriptScrolled(this); }
     get scrollLeft() { if (this._scl) scrollRead(this); return this._sLeft; }
     set scrollLeft(v) { v = +v || 0; if (v === this._sLeft) return; this._sLeft = v; keptScroll(this); scriptScrolled(this); }
     get nodeName() { return this.tagName; }
@@ -2434,7 +2442,7 @@
       for (var n = this; n && n.nodeType === 1; n = n.parentNode) if (matchList(n, list)) return n;
       return null;
     }
-    getBoundingClientRect() { reflow(); return boxes[this.__id] ? rectOf(this) : estimatedRect(this) || rectOf(this); }
+    getBoundingClientRect() { reflow(); if (!boxes[this.__id] && virts.length && virtBoxOf(this) === null && virtPin(this)) reflow(); return boxes[this.__id] || (virts.length && virtBoxOf(this)) ? rectOf(this) : estimatedRect(this) || rectOf(this); }
     getClientRects() { var r = this.getBoundingClientRect(); return r.width || r.height ? [r] : []; }
     get clientWidth() { return sizeOf(this, 'cw'); }
     get clientHeight() { return sizeOf(this, 'ch'); }
@@ -5076,16 +5084,24 @@
     if (!syncLayout || reflowing || layoutGen === generation || !doc || !doc.documentElement) return;
     reflowing = true;
     try {
-      var json = render(deltaOn), g = generation, sb = scrollBumps, out = __hostSync(json);
-      // (a host that does not have a node the delta names: everything again)
-      if (out === '!' && deltaOn) { deltaEpoch++; json = render(true); out = __hostSync(json); if (out === '!') out = ''; }
-      if (out) { takeBoxes(JSON.parse(out)); layoutGen = g; layoutSb = sb; if (scrollers.length) clampScrolls(); }
+      // (again while virtual rows find the heights they guessed other)
+      for (var vr = 0; vr < 4; vr++) {
+        var json = render(deltaOn), g = generation, sb = scrollBumps, out = __hostSync(json);
+        // (a host that does not have a node the delta names: everything again)
+        if (out === '!' && deltaOn) { deltaEpoch++; json = render(true); out = __hostSync(json); if (out === '!') out = ''; }
+        if (out) { takeBoxes(JSON.parse(out)); layoutGen = g; layoutSb = sb; if (scrollers.length) clampScrolls(); if (virts.length) virtCheck(true); }
+        if (!virtAgain || layoutGen === generation) break;
+        virtAgain = false;
+      }
     } catch (e) { syncLayout = false; reportError(e); }
     reflowing = false;
   }
   function rectOf(el) {
     reflow();
     var b = boxes[el.__id];
+    var vb = !b && virts.length ? virtBoxOf(el) : null;
+    if (vb) b = vb;
+    else if (vb === null && !b && virts.length && virtPin(el)) { reflow(); b = boxes[el.__id]; }
     if (!b) return DOMRect(0, 0, 0, 0);
     var sx = 0, sy = 0;
     // (the offsets as they are: the layout above has clamped them)
@@ -5099,6 +5115,9 @@
   function layoutSize(el) {
     if (!sizesStand()) reflow();
     var b = boxes[el.__id];
+    var vb = !b && virts.length ? virtBoxOf(el) : null;
+    if (vb) b = vb;
+    else if (vb === null && !b && virts.length && virtPin(el)) { reflow(); b = boxes[el.__id]; }
     if (!b) return textOnlySize(el);
     return b[8] !== undefined ? [b[8], b[9]] : [b[2], b[3]];
   }
@@ -5203,6 +5222,9 @@
   function sizeNow(el, what) {
     var b = boxes[el.__id];
     if (el === (doc && doc.documentElement) && (what === 'cw' || what === 'ch')) return what === 'cw' ? viewport.w : viewport.h;
+    // (the page's scrolling area: the viewport, or the body past it, as
+    // the wheel scrolls it, scrollBy)
+    if (!b && el === (doc && doc.documentElement) && (what === 'sw' || what === 'sh')) return what === 'sw' ? Math.max(viewport.w, pageWidth()) : Math.round(Math.max(viewport.h, pageHeight()));
     if (!b) return 0;
     // client size: the padding box (the border box without its borders)
     if (what === 'cw') return Math.round(b[4] !== undefined ? b[4] : b[2] - edgesOf(el).bx);
@@ -9517,7 +9539,14 @@
       if (pm) { kids.push(JSON.stringify(pm)); kd.push(pm.s.display); kel.push(null); }
       if (pb) { kids.push(JSON.stringify(pb)); kd.push(pb.s && pb.s.display); kel.push(null); }
       if (kdj) for (kn0 = 0; kn0 < kids.length; kn0++) kdj.push(kids[kn0]);
+      // (the children far from the viewport: runs of them as boxes of
+      // their height, virtWindow)
+      var vw = virtWindow(n, cs, src), vrun = -1;
       for (var jj = 0; jj < src.length; jj++) {
+        if (vw) {
+          if (!vw.on[jj]) { if (vrun < 0) vrun = jj; continue; }
+          if (vrun >= 0) { kids.push(virtSpacer(vw, vrun, jj)); kd.push(vw.tbl ? 'table-row' : 'block'); kel.push(null); if (kdj) kdj.push(kids[kids.length - 1]); vrun = -1; }
+        }
         if (fl && src[jj] === fl.node) { kids.push(JSON.stringify(fl.box)); kd.push(''); kel.push(null); if (kdj) kdj.push(kids[kids.length - 1]); if (fl.rest) { kids.push(JSON.stringify(fl.rest)); kd.push(''); kel.push(null); if (kdj) kdj.push(kids[kids.length - 1]); } if (!fl.zw) continue; }
         var dmk = marks.length;
         var rj = renderJson(src[jj], cs), dj = lastDelta;
@@ -9529,6 +9558,7 @@
         }
         if (rj) { kids.push(rj); kd.push(kidDisplay(src[jj])); kel.push(src[jj]); if (kdj) kdj.push(dj); }
       }
+      if (vw && vrun >= 0) { kids.push(virtSpacer(vw, vrun, src.length)); kd.push(vw.tbl ? 'table-row' : 'block'); kel.push(null); if (kdj) kdj.push(kids[kids.length - 1]); }
       if (collapsed) deltaOff--;
       pa = leaf ? null : pseudoBox(n, cs, 'after');
       ctrLeave(n);
@@ -10623,6 +10653,576 @@
   }
   // (a text JSON.stringify would write otherwise than between two quotes)
   var PLAIN_TEXT = /["\\\x00-\x1f\u2028\u2029%]/;
+  // VIRTUAL ROWS. The children of a box that stacks them one under the
+  // other (block flow, a table's row group) whose boxes are more than a
+  // viewport from the visible part of the page are not rendered: a run of
+  // them stands as one box of their height (a spacer). Nothing else may
+  // tell them apart from rendered ones, so a child is left out only when
+  // its height is known exactly and nothing about it can reach the
+  // viewport or change another box:
+  // - its height: its own pitch (its top to the next one's) from the last
+  //   layout, the subtree unchanged and laid at the same width since; else
+  //   the pitch of a laid-out child of the same signature (virtSig: tags,
+  //   classes, style attributes, the attributes selectors or layout look
+  //   at), when no rule that depends on a child's position (nth-child, +,
+  //   ~, :has, ...) and sets a property that changes boxes can match in it
+  //   and each of its lines of text fits on one line with room to spare
+  //   (virtFits), as the laid-out child's do;
+  // - nothing in it is positioned, floated or transformed (it would draw
+  //   outside its band), and its width cannot change the box's or a
+  //   column's (the box's width does not come from its content; a table's
+  //   columns are fixed or all in percentages, and its text fits them).
+  // A child without a known height is rendered. On a first render none is
+  // known: the first two of each signature and the ones near the viewport
+  // by a guess are rendered, the others guessed (st.guess); the layout
+  // then gives the heights and the box renders again before it is painted
+  // (__virtAgain, the host's frame; reflow for a script's reads). After
+  // every layout and scroll the plan is made again from the new boxes: a
+  // child near the viewport left out, or a height other than the one used,
+  // renders the box again. An element a script asks the geometry of is
+  // rendered where it is (virtPin), as is the focused one.
+  // A host turns them on (__virtRows(true)) when its frame renders again
+  // while __virtAgain() says so, before it paints.
+  var VIRT_GUESS = 24, virts = [], virtOn = false, virtAgain = false, virtR = { gen: -1 };
+  G.__virtRows = function (on) { virtOn = !!on; changed(); return String(virtOn); };
+  var vstat = { sig: 0, plan: 0, again: 0, info: 0, rules: 0, why: [] };
+  G.__virtStats = function () { var o = JSON.stringify(vstat); vstat = { sig: 0, plan: 0, again: 0, info: 0, rules: 0, why: [] }; return o; };
+  G.__virtAgain = function () { var a = virtAgain; virtAgain = false; return a ? '1' : ''; };
+  G.__virtState = function () {
+    return JSON.stringify(virts.map(function (st) {
+      var k = 0, p = st.plan;
+      if (p) for (var i = 0; i < p.on.length; i++) if (p.on[i]) k++;
+      var rf = {};
+      for (var sg in st.refs) { var rr = st.refs[sg], f0 = p && p.src[0]; rf[sg.slice(0, 60)] = { pitch: rr.pitch, plain: rr.info.plain, W: rr.info.W, extra: rr.info.extra, fits0: f0 && f0._vsg ? virtFits(f0, rr.info) : null, t0: f0 && f0._vsg ? f0._vsg.t : null }; }
+      return { n: p ? p.on.length : 0, rendered: k, guess: p ? p.guess : null, top: st.top, refs: p && p.on.length > 100 ? rf : Object.keys(st.refs).length, why: st.why };
+    }));
+  };
+  // (properties that change no box: what only paints)
+  var VIRT_PAINT = /^(color|opacity|cursor|visibility|caret-color|accent-color|fill|fill-opacity|stroke|stroke-opacity|stroke-width|filter|backdrop-filter|mix-blend-mode|isolation|clip-path|pointer-events|user-select|-webkit-user-select|-webkit-tap-highlight-color|will-change|text-shadow|box-shadow|z-index|transition|transition-[a-z-]+|background|background-[a-z-]+|outline|outline-[a-z-]+|text-decoration|text-decoration-[a-z-]+|border-color|border-(top|right|bottom|left)-color|border-radius|border-(top|bottom)-(left|right)-radius|border-(start|end)-(start|end)-radius|border-style|border-(top|right|bottom|left)-style|scrollbar-color|scrollbar-gutter)$/;
+  var VIRT_POS = /^(nth-child|nth-last-child|nth-of-type|nth-last-of-type|first-child|last-child|only-child|first-of-type|last-of-type|only-of-type|has|empty)$/;
+  // the page's rules as virtual rows see them: the ids and attributes
+  // selectors look at, and the rules that depend on an element's place and
+  // change boxes (matched by virtMatch)
+  function virtRules() {
+    if (virtR.gen === styleGen) return virtR;
+    // (a class set somewhere restyles the page, styleGen: the rules are
+    // the same, and so is what was learnt from them, fp)
+    var rules = [], sheets = cascadeSheets(doc), fp = viewport.w + 'x' + viewport.h;
+    for (var s = 0; s < sheets.length; s++) {
+      var sh = sheets[s];
+      if (!sh || sh.disabled || !sh._rules) continue;
+      var tl = 0;
+      for (var i = 0; i < sh._rules.length; i++) { var r = sh._rules[i]; tl += r.decls.length + (r.text ? r.text.length : 0); if (!r.media || mediaMatches(r.media)) rules.push(r); }
+      fp += ',' + sh._order + ':' + sh._rules.length + ':' + tl;
+    }
+    if (virtR.fp === fp) { virtR.gen = styleGen; return virtR; }
+    vstat.rules++;
+    var R = { gen: styleGen, fp: fp, ids: {}, attrs: {}, pos: [] };
+    // custom properties a box-changing property uses (and those they use)
+    var geomVars = {}, deps = {}, VREF = /var\(\s*(--[A-Za-z0-9_-]+)/g, m, d, j;
+    for (i = 0; i < rules.length; i++) {
+      for (j = 0; j < rules[i].decls.length; j++) {
+        d = rules[i].decls[j];
+        var v = String(d.value);
+        if (v.indexOf('var(') < 0) continue;
+        VREF.lastIndex = 0;
+        if (d.name.charCodeAt(0) === 45 && d.name.charCodeAt(1) === 45) { var dl = deps[d.name] || (deps[d.name] = []); while ((m = VREF.exec(v))) dl.push(m[1]); }
+        else if (!VIRT_PAINT.test(d.name)) while ((m = VREF.exec(v))) geomVars[m[1]] = true;
+      }
+    }
+    for (var more = true; more;) { more = false; for (var gv in geomVars) { var dd = deps[gv]; if (dd) for (j = 0; j < dd.length; j++) if (!geomVars[dd[j]]) { geomVars[dd[j]] = true; more = true; } } }
+    for (i = 0; i < rules.length; i++) {
+      var rr = rules[i], pos = { p: false };
+      virtWalkSel(rr.sel, R, pos);
+      if (!pos.p) {
+        // (a ::before or ::after showing an attribute or a counter: as
+        // wide as what it shows)
+        if (!rr.sel.pseudo) continue;
+        var shows = false;
+        for (j = 0; j < rr.decls.length; j++) if (rr.decls[j].name === 'content' && /attr\(|counter/.test(String(rr.decls[j].value))) shows = true;
+        if (!shows) continue;
+      } else {
+        var geom = false;
+        for (j = 0; j < rr.decls.length && !geom; j++) {
+          d = rr.decls[j];
+          if (d.name.charCodeAt(0) === 45 && d.name.charCodeAt(1) === 45) geom = !!geomVars[d.name];
+          else geom = !VIRT_PAINT.test(d.name);
+        }
+        if (!geom) continue;
+      }
+      R.pos.push(rr.sel);
+    }
+    virtR = R;
+    return R;
+  }
+  function virtWalkSel(sel, R, pos) {
+    for (var k = 0; k < sel.parts.length; k++) {
+      var p = sel.parts[k];
+      if (p.comb === '+' || p.comb === '~') pos.p = true;
+      for (var q = 0; q < p.c.length; q++) {
+        var s = p.c[q];
+        if (s.t === 'id') R.ids[s.v] = true;
+        else if (s.t === 'attr') R.attrs[s.n] = true;
+        else if (s.t === 'pseudo') {
+          if (VIRT_POS.test(s.n)) pos.p = true;
+          if (s.list) for (var l = 0; l < s.list.length; l++) if (s.list[l] && s.list[l].parts) virtWalkSel(s.list[l], R, pos);
+          if (s.of) for (var o = 0; o < s.of.length; o++) if (s.of[o] && s.of[o].parts) virtWalkSel(s.of[o], R, pos);
+        }
+      }
+    }
+  }
+  function virtPosIn(sel) { var pos = { p: false }; virtWalkSel(sel, { ids: {}, attrs: {} }, pos); return pos.p; }
+  // whether sel can match el, the child e (and the children reps stand
+  // for, the others of its box) taken in any place: what depends on their
+  // place (:nth-child() and the like, a :not(), :is() or :has() holding
+  // one) left out of their compounds, a sibling before them by + or ~ any
+  // of reps. Inside a child the places are the same in every child of its
+  // signature, so they are matched as they are.
+  function virtMatch(el, parts, k, e, reps) {
+    var free = el === e || reps.indexOf(el) >= 0, c = parts[k].c;
+    if (free) c = virtFree(c);
+    if (!matchCompound(el, c, null)) return false;
+    if (k + 1 >= parts.length) return true;
+    var comb = parts[k].comb;
+    if (comb === '>') { var p = upEl(el); return !!p && virtMatch(p, parts, k + 1, e, reps); }
+    if (comb === ' ') {
+      for (var a = upEl(el); a; a = upEl(a)) if (virtMatch(a, parts, k + 1, e, reps)) return true;
+      return false;
+    }
+    if (free) {
+      if (reps.over) return true;
+      for (var r = 0; r < reps.length; r++) if (reps[r] !== el && virtMatch(reps[r], parts, k + 1, e, reps)) return true;
+      return false;
+    }
+    if (comb === '+') { var s = siblingElement(el, -1); return !!s && virtMatch(s, parts, k + 1, e, reps); }
+    if (comb === '~') {
+      for (var t = siblingElement(el, -1); t; t = siblingElement(t, -1)) if (virtMatch(t, parts, k + 1, e, reps)) return true;
+      return false;
+    }
+    return false;
+  }
+  function virtFree(c) {
+    if (c._vfree) return c._vfree;
+    var out = [];
+    for (var q = 0; q < c.length; q++) {
+      var s = c[q];
+      if (s.t === 'pseudo' && (VIRT_POS.test(s.n) || ((s.list || s.of) && virtListPos(s)))) continue;
+      out.push(s);
+    }
+    Object.defineProperty(c, '_vfree', { value: out, enumerable: false });
+    return out;
+  }
+  function virtListPos(s) {
+    var l = (s.list || []).concat(s.of || []);
+    for (var i = 0; i < l.length; i++) if (l[i] && l[i].parts && virtPosIn(l[i])) return true;
+    return false;
+  }
+  // a child's signature: what decides its style and boxes, other than its
+  // place and its texts (null: one that cannot stand for another or be
+  // stood for: a picture, a control, text in another script...). Its texts
+  // go in c._vsg.t as [element index, width at 1000px, has a newline].
+  var VIRT_ATTRS = { colspan: 1, rowspan: 1, width: 1, height: 1, size: 1, cols: 1, rows: 1, span: 1, align: 1, valign: 1, nowrap: 1, hidden: 1, dir: 1, lang: 1, type: 1, border: 1, cellpadding: 1, cellspacing: 1, start: 1, value: 1, face: 1, 'xml:lang': 1 };
+  var VIRT_LEAF = { img: 1, input: 1, textarea: 1, select: 1, button: 1, br: 1, hr: 1, iframe: 1, canvas: 1, video: 1, audio: 1, svg: 1, object: 1, embed: 1, picture: 1, math: 1, slot: 1, template: 1, details: 1, dialog: 1, marquee: 1, progress: 1, meter: 1 };
+  // a text's width at 1000px in the Helvetica table, its runs of white
+  // space as one (-1: a character outside it)
+  function virtTextW(t) {
+    var w = 0, sp = false;
+    for (var i = 0; i < t.length; i++) {
+      var ch = t.charCodeAt(i);
+      if (ch === 32 || ch === 10 || ch === 9 || ch === 13 || ch === 12) { if (!sp) { w += CANVAS_W[0]; sp = true; } continue; }
+      sp = false;
+      if (ch > 32 && ch <= 126) w += CANVAS_W[ch - 32];
+      else if (ch < 0x250 && ch >= 0xa0 || ch >= 0x2000 && ch <= 0x206f) w += canvasTextWidth(t.charAt(i), { size: 1000, weight: '400' });
+      else return -1;
+    }
+    return w;
+  }
+  function virtSig(c, R) {
+    var k = c._vsg;
+    if (k && k.rv === c._rv && k.g === R.fp) return k.s;
+    vstat.sig++;
+    var out = '', texts = [], els = 0, ok = true;
+    (function walk(e, pi) {
+      if (!ok) return;
+      var nt = e.nodeType;
+      if (nt === 3 || nt === 4) {
+        var t = e._data;
+        if (!t) return;
+        var tw = virtTextW(t);
+        if (tw < 0) { ok = false; return; }
+        texts.push([pi, tw, t.indexOf('\n') >= 0]);
+        out += '#' + pi;
+        return;
+      }
+      if (nt !== 1) return;
+      // (a child of more than a few hundred elements is no row: a page's
+      // table under its wrapper, walked at every render)
+      if (els > 300 || e.namespaceURI !== HTML_NS || VIRT_LEAF[e.localName] === 1 || e._sr || e._ab || (e._waapi && e._waapi.length)) { ok = false; return; }
+      var me = els++, s = '<' + e.localName, at = e._attrs;
+      for (var a = 0; a < at.length; a++) {
+        var nm = at[a].name, v = at[a].value;
+        if (nm === 'class') s += ' class=' + v;
+        else if (nm === 'style') { if (v.indexOf('var(') >= 0) { ok = false; return; } s += ' style=' + v; }
+        else if (nm === 'id') { if (R.ids[v]) s += ' id=' + v; }
+        else { nm = nm.toLowerCase(); if (R.attrs[nm] || VIRT_ATTRS[nm] || nm === 'contenteditable') s += ' ' + nm + '=' + v; }
+      }
+      out += s;
+      var kids = e._c;
+      for (var j = 0; j < kids.length; j++) walk(kids[j], me);
+      out += '>';
+    })(c, -1);
+    var sig = ok ? out : null;
+    c._vsg = { rv: c._rv, g: R.fp, s: sig, t: texts };
+    return sig;
+  }
+  function virtPx(v) { var f = parseFloat(v); return isFinite(f) ? f : 0; }
+  // what a laid-out child of a signature tells the others: whether one may
+  // stand for it (plain) and, per element, the width its lines have
+  // (W, for a block's) and what takes room in them besides the text
+  // (extra), the font of its text
+  function virtRefInfo(e, R, tbl, reps) {
+    vstat.info++;
+    var els = [], ok = true;
+    (function walk(x) {
+      if (x.nodeType !== 1) return;
+      els.push(x);
+      for (var j = 0; j < x._c.length; j++) walk(x._c[j]);
+    })(e);
+    var info = { plain: false, W: [], extra: [], blockOf: [], fs: [], bold: [], pre: [] };
+    for (var i = 0; i < els.length && ok; i++) {
+      var x = els[i], c = computedOf(x), disp = c.display || 'inline';
+      var tf = c.transform;
+      if ((c.position && c.position !== 'static' && c.position !== 'relative') || (c.float && c.float !== 'none') || (tf && tf !== 'none') || (c.translate && c.translate !== 'none') || (c.rotate && c.rotate !== 'none') || (c.scale && c.scale !== 'none')) ok = false;
+      if (c.position === 'relative' && ((c.top && c.top !== 'auto' && virtPx(c.top)) || (c.bottom && c.bottom !== 'auto' && virtPx(c.bottom)))) ok = false;
+      if (disp === 'list-item' && c['list-style-position'] === 'inside') ok = false;
+      if (/^(inline-)?(flex|grid)$/.test(disp) || disp === 'contents' || /^ruby/.test(disp) || (c.columns && c.columns !== 'auto auto') || (c['column-count'] && c['column-count'] !== 'auto')) ok = false;
+      // a rule that depends on the place and changes boxes, where it could match
+      for (var r = 0; r < R.pos.length && ok; r++) if (virtMatch(x, R.pos[r].parts, 0, e, reps)) ok = false;
+      var inl = disp === 'inline' || disp === 'inline-block';
+      var pi = i === 0 ? -1 : els.indexOf(x.parentNode);
+      info.blockOf[i] = inl && pi >= 0 ? info.blockOf[pi] : i;
+      info.fs[i] = virtPx(c['font-size']) || 16;
+      info.bold[i] = parseInt(c['font-weight'], 10) >= 600;
+      info.pre[i] = /^(pre|pre-wrap|pre-line|break-spaces)$/.test(c['white-space'] || '');
+      var hor = virtPx(c['padding-left']) + virtPx(c['padding-right']) + virtPx(c['border-left-width']) + virtPx(c['border-right-width']);
+      if (!inl) {
+        var b = boxes[x.__id];
+        // (a row of a collapsed table has no box: its cells have)
+        if (!b) { if (disp !== 'none' && !/^table-row/.test(disp)) ok = false; info.W[i] = /^table-row/.test(disp) ? Infinity : 0; }
+        else info.W[i] = b[2] - hor;
+        info.extra[i] = 0;
+      } else if (pi >= 0) {
+        if (disp === 'inline-block' && /px$/.test(c.width || '')) ok = false;
+        info.extra[info.blockOf[i]] = (info.extra[info.blockOf[i]] || 0) + hor + Math.max(0, virtPx(c['margin-left'])) + Math.max(0, virtPx(c['margin-right']));
+      }
+      // (what a ::before or ::after shows, as wide as it may be)
+      if (pi >= -1 && ok) {
+        for (var pk = 0; pk < 2; pk++) {
+          var ps = cascade(x, pk ? 'after' : 'before'), ct = ps && ps.content;
+          if (!ct || ct === 'none' || ct === 'normal') continue;
+          var lit = /^(["'])(.*)\1$/.exec(String(ct).trim());
+          if (!lit) { ok = false; break; }
+          var w = 0, str = lit[2].replace(/\\([0-9a-fA-F]{1,6})\s?/g, function (m0, hx) { return String.fromCodePoint(parseInt(hx, 16)); }).replace(/\\(.)/g, '$1');
+          for (var q = 0; q < str.length; q++) w += str.charCodeAt(q) < 0x250 ? canvasTextWidth(str.charAt(q), { size: 1000, weight: '400' }) : 1000;
+          info.extra[info.blockOf[i]] = (info.extra[info.blockOf[i]] || 0) + w * info.fs[i] / 1000 * 1.5;
+        }
+      }
+    }
+    if (!ok) return info;
+    // the child itself: a row of the table, or a box of the block flow
+    // with no margins above or below (they would join with the spacer's)
+    var rc = computedOf(e);
+    if (tbl) {
+      if (rc.display !== 'table-row') return info;
+      // the columns: fixed, or every cell's width a percentage, together
+      // the table's (their content then does not set them while it fits)
+      var table = e.parentNode && e.parentNode.parentNode, tcs = table && table.nodeType === 1 ? computedOf(table) : null;
+      if (!tcs || !/^(inline-)?table$/.test(tcs.display) || !(/(%|px)$/.test(tcs.width || '')) || !virtWidthStands(table.parentNode)) return info;
+      if (tcs['table-layout'] !== 'fixed') {
+        var sum = 0;
+        for (var ci = 0; ci < e._c.length; ci++) {
+          var cell = e._c[ci];
+          if (cell.nodeType !== 1) continue;
+          var cw = computedOf(cell).width || 'auto';
+          if (!/%$/.test(cw)) return info;
+          sum += parseFloat(cw);
+        }
+        if (sum < 99.9) return info;
+      }
+    } else {
+      if (!/^(block|flow-root|list-item|table)$/.test(rc.display) || virtPx(rc['margin-top']) || virtPx(rc['margin-bottom'])) return info;
+    }
+    info.plain = true;
+    return info;
+  }
+  // a child of the signature info is for whose lines fit as one each
+  function virtFits(c, info) {
+    var t = c._vsg && c._vsg.t;
+    if (!t) return false;
+    var sum = [];
+    for (var i = 0; i < t.length; i++) {
+      var pi = t[i][0];
+      if (pi < 0) return false;
+      if (t[i][2] && info.pre[pi]) return false;
+      var bk = info.blockOf[pi];
+      sum[bk] = (sum[bk] || 0) + t[i][1] * info.fs[pi] / 1000 * (info.bold[pi] ? 1.06 : 1) * 1.5;
+    }
+    for (var b in sum) if (sum[b] + (info.extra[b] || 0) > info.W[b]) return false;
+    // (an inline box with no text but what it shows: its own line)
+    for (var e in info.extra) if (sum[e] === undefined && info.extra[e] > info.W[e]) return false;
+    return true;
+  }
+  // a box whose width does not come from its content, all the way up
+  function virtWidthStands(q) {
+    for (; q && q.nodeType === 1 && q !== doc.documentElement; q = q.parentNode) {
+      var c = computedOf(q), d = c.display || 'block';
+      var p = q.parentNode && q.parentNode.nodeType === 1 ? computedOf(q.parentNode) : null, pd = p ? p.display || 'block' : 'block';
+      if (/px$/.test(c.width || '')) return true;
+      if ((c.position === 'absolute' || c.position === 'fixed') || (c.float && c.float !== 'none') || /^inline|^table-(cell|caption)|^table$/.test(d) && !/%$/.test(c.width || '')) return false;
+      if (/^(inline-)?grid$/.test(pd)) return false;
+      if (/^(inline-)?flex$/.test(pd)) {
+        var col = /^column/.test(p['flex-direction'] || 'row');
+        if (col) { if (!/^(normal|stretch)$/.test(p['align-items'] || 'normal') || !/^(auto|stretch|normal)$/.test(c['align-self'] || 'auto')) return false; }
+        else if (!/^(0|0px|0%|[0-9.]+px)$/.test(c['flex-basis'] || 'auto')) return false;
+      }
+    }
+    return true;
+  }
+  // what the box hands down to its children's boxes (a restyle makes new
+  // style objects of the same values)
+  var VIRT_INH = ['font-size', 'font-family', 'font-weight', 'font-style', 'line-height', 'white-space', 'letter-spacing', 'word-spacing', 'text-transform', 'text-indent', 'border-collapse', 'border-spacing', 'direction', 'writing-mode', 'visibility'];
+  function virtInh(cs) { var o = ''; for (var i = 0; i < VIRT_INH.length; i++) o += (cs[VIRT_INH[i]] || '') + ';'; return o; }
+  function virtDrop(n) { if (n._virt) n._virt = null; return null; }
+  // the width the children were laid at (the nearest laid-out box's)
+  function virtWidth(n) {
+    for (var q = n; q && q.nodeType === 1; q = q.parentNode) { var b = boxes[q.__id]; if (b) return Math.round(b[2] * 100) / 100; }
+    return -1;
+  }
+  // a child's band: [top, bottom] of its box, or of its children's (a row
+  // of a collapsed table has none of its own)
+  function virtBand(e) {
+    var b = boxes[e.__id];
+    if (b) return [b[1], b[1] + b[3]];
+    var t = Infinity, u = -Infinity;
+    for (var i = 0; i < e._c.length; i++) {
+      var k = e._c[i];
+      if (k.nodeType !== 1) continue;
+      var kb = boxes[k.__id];
+      if (kb) { if (kb[1] < t) t = kb[1]; if (kb[1] + kb[3] > u) u = kb[1] + kb[3]; }
+    }
+    return t <= u ? [t, u] : null;
+  }
+  // which children render: the plan for n's children src now
+  function virtPlan(n, cs, src, st) {
+    vstat.plan++;
+    var R = virtRules(), tbl = cs.display === 'table-row-group', len = src.length;
+    var wk = virtWidth(n), act = doc._active, h = viewport.h, ctx = R.fp + '|' + virtInh(cs);
+    var on = new Array(len), pitch = new Array(len), pos = new Array(len + 1), guess = false, seen = {}, unk = [];
+    var sv = tbl && st.sv ? st.sv : 0;
+    // (the guess for a child of no known height: one of the known ones)
+    var g = VIRT_GUESS;
+    for (var rk in st.refs) { g = st.refs[rk].pitch; break; }
+    var top = st.top !== null ? st.top : (boxes[n.__id] ? boxes[n.__id][1] : null);
+    var y0 = top === null ? null : scrollAbove(n) - top;
+    pos[0] = 0;
+    for (var i = 0; i < len; i++) {
+      var e = src[i], p = -1, cull = false;
+      if (e.nodeType !== 1) {
+        // (white space between the rows: nothing; anything else: all of them)
+        if ((e.nodeType === 3 || e.nodeType === 4) && !/[^ \t\n\r\f]/.test(e._data) && !/^pre|^break/.test(cs['white-space'] || '')) { on[i] = false; pitch[i] = 0; pos[i + 1] = pos[i]; continue; }
+        return null;
+      }
+      var sig = virtSig(e, R), ref = sig !== null ? st.refs[sig] : null;
+      if (ref && (ref.wk !== wk || ref.ctx !== ctx)) ref = null;
+      if (e._vp !== undefined && e._vpk === e._rv + '|' + wk + '|' + ctx) p = e._vp;
+      if (ref && ref.info.plain && virtFits(e, ref.info)) { cull = true; if (p < 0) p = ref.pitch; }
+      else if (sig !== null && !ref) {
+        // (none of its kind laid out yet: the first two render, the
+        // others are guessed until they are)
+        var sn = seen[sig] = (seen[sig] || 0) + 1;
+        if (sn > 2 && !st.tried[sig + '|' + wk + '|' + ctx]) { cull = true; guess = true; if (p < 0) p = g; }
+      }
+      if (p < 0) { p = g; guess = true; unk[i] = true; }
+      if (cull && (st.pins.indexOf(e) >= 0 || (act && act !== e && e.contains(act)) || act === e)) cull = false;
+      on[i] = !cull;
+      e._vpi = i;
+      pitch[i] = p;
+      pos[i + 1] = pos[i] + p;
+    }
+    // near the viewport: a viewport above it to one below
+    if (y0 !== null) {
+      var lo = y0 - h, hi = y0 + 2 * h;
+      for (i = 0; i < len; i++) if (!on[i] && src[i].nodeType === 1 && pos[i + 1] > lo && pos[i] < hi) on[i] = true;
+    } else {
+      // (where the box is not known yet: its first viewports, by the guess)
+      for (i = 0; i < len && pos[i] < 2 * h; i++) if (src[i].nodeType === 1) on[i] = true;
+      guess = true;
+    }
+    // (a rendered child of no known pitch: the next one renders too, so
+    // that the layout gives its pitch)
+    for (i = 0; i < len; i++) if (on[i] && unk[i]) for (var nk = i + 1; nk < len; nk++) if (src[nk].nodeType === 1) { on[nk] = true; break; }
+    // the runs left out, as their heights: what the plan is known by
+    var runs = [], a = -1;
+    for (i = 0; i <= len; i++) {
+      var off = i < len && !on[i];
+      if (off && a < 0) a = i;
+      if (!off && a >= 0) { runs.push(a + ':' + i + ':' + Math.round((pos[i] - pos[a]) * 100)); a = -1; }
+    }
+    return { on: on, pitch: pitch, pos: pos, guess: guess, wk: wk, sv: sv, key: runs.join(','), tbl: tbl, src: src.slice(), cs: cs };
+  }
+  // the spacer for children [a, b) of the plan
+  function virtSpacer(plan, a, b) {
+    var hgt = plan.pos[b] - plan.pos[a] - (plan.tbl ? plan.sv : 0);
+    return '{"t":"div","s":{"display":"' + (plan.tbl ? 'table-row' : 'block') + '","height":"' + (Math.round(Math.max(0, hgt) * 100) / 100) + 'px"}}';
+  }
+  // the scroll offsets above (and of) n: a child at unscrolled y is in view
+  // for y in [scrollAbove(n), scrollAbove(n) + viewport.h)
+  function scrollAbove(n) {
+    var sy = 0;
+    for (var q = n; q && q._attrs !== undefined; q = q.parentNode) sy += q._sTop || 0;
+    return sy;
+  }
+  // n's children at a render: the plan, or null for all of them
+  function virtWindow(n, cs, src) {
+    if (!virtOn || shadowCount || src.length < 2 || !doc) return virtDrop(n);
+    var tbl = cs.display === 'table-row-group';
+    if (!tbl && !/^(block|flow-root|list-item)$/.test(cs.display)) return virtDrop(n);
+    if (!tbl && !virtWidthStands(n)) return virtDrop(n);
+    // (under a transform the viewport is not where the boxes say)
+    for (var q = n; q && q.nodeType === 1; q = q.parentNode) { var qc = computedOf(q), tf = qc.transform; if ((tf && tf !== 'none') || (qc.zoom && qc.zoom !== '1' && qc.zoom !== 'normal')) return virtDrop(n); }
+    var st = n._virt;
+    if (!st) { st = n._virt = { el: n, top: null, refs: {}, tried: {}, pins: [], plan: null, sv: 0, why: '' }; virts.push(st); }
+    if (tbl) { var tb = n.parentNode && n.parentNode.nodeType === 1 ? computedOf(n.parentNode) : null; st.sv = tb && tb['border-collapse'] !== 'collapse' ? virtPx(String(tb['border-spacing'] || '0').split(/\s+/).pop()) : 0; }
+    var plan = virtPlan(n, cs, src, st);
+    if (!plan) return virtDrop(n);
+    st.plan = plan;
+    return plan;
+  }
+  // after a layout (measure) or a scroll: what the boxes say of the plans
+  function virtCheck(measure) {
+    for (var i = virts.length - 1; i >= 0; i--) {
+      var st = virts[i], n = st.el, plan = st.plan;
+      if (n._virt !== st || !n.isConnected) { virts.splice(i, 1); continue; }
+      if (!plan) continue;
+      var again = false, src = plan.src, len = src.length, R = virtRules();
+      if (measure) {
+        var wk = virtWidth(n), bands = new Array(len), j, reps = [], rseen = {}, ctx = R.fp + '|' + virtInh(computedOf(n));
+        // (the others of the box, one of each signature)
+        for (j = 0; j < len && !reps.over; j++) {
+          var se = src[j];
+          if (se.nodeType !== 1) continue;
+          var ss = virtSig(se, R);
+          if (ss !== null && rseen[ss]) continue;
+          if (ss !== null) rseen[ss] = true;
+          reps.push(se);
+          if (reps.length > 40) reps.over = true;
+        }
+        for (j = 0; j < len; j++) if (plan.on[j] && src[j].nodeType === 1) bands[j] = virtBand(src[j]);
+        // where the box starts: a rendered child's top less what is above it
+        st.top = null;
+        for (j = 0; j < len; j++) if (bands[j]) { st.top = bands[j][0] - plan.pos[j]; break; }
+        if (st.top === null && boxes[n.__id]) st.top = boxes[n.__id][1];
+        // each rendered child's pitch: to the next one's top, or its height
+        for (j = 0; j < len; j++) {
+          var bd = bands[j], e = src[j];
+          if (e.nodeType !== 1 || !plan.on[j]) continue;
+          var sig = virtSig(e, R);
+          if (sig !== null) st.tried[sig + '|' + wk + '|' + ctx] = true;
+          // (nothing laid out: nothing to its height)
+          if (!bd) { if (!boxes[e.__id]) { e._vp = 0; e._vpk = e._rv + '|' + wk + '|' + ctx; } continue; }
+          var nx = -1;
+          for (var k = j + 1; k < len; k++) { if (!plan.on[k]) break; if (src[k].nodeType === 1) { nx = k; break; } }
+          // (the last before a run left out: its height is not its pitch in
+          // a collapsed table, the border below it is shared; the plan
+          // renders the next one too while its pitch is not known)
+          var p = nx >= 0 && bands[nx] ? bands[nx][0] - bd[0] : nx < 0 && k >= len ? bd[1] - bd[0] + st.sv : -1;
+          if (p < 0) continue;
+          e._vp = p;
+          e._vpk = e._rv + '|' + wk + '|' + ctx;
+          if (sig === null) continue;
+          var ref = st.refs[sig];
+          if (!ref || ref.wk !== wk || ref.ctx !== ctx || !ref.info.plain) {
+            var info = virtRefInfo(e, R, plan.tbl, reps);
+            if (!ref || ref.wk !== wk || ref.ctx !== ctx || info.plain && virtFits(e, info)) st.refs[sig] = { pitch: p, wk: wk, ctx: ctx, info: info, rel: virtRel(e, bd[0]) };
+          }
+        }
+      }
+      // the plan again from what is known now
+      var np = virtPlan(n, plan.cs, src, st);
+      if (!np) again = true;
+      // (the same runs of the same heights: the render would be the same)
+      else if (measure) again = np.key !== plan.key;
+      else {
+        // (a scroll: only when the viewport, half a viewport either way,
+        // reaches a child left out)
+        var y0 = st.top === null ? 0 : scrollAbove(n) - st.top, lo = y0 - viewport.h / 2, hi = y0 + 1.5 * viewport.h;
+        for (j = 0; j < len && !again; j++) if (!plan.on[j] && src[j].nodeType === 1 && plan.pos[j + 1] > lo && plan.pos[j] < hi) again = true;
+      }
+      if (again) {
+        st.why = measure ? 'layout' : 'scroll';
+        vstat.again++; if (vstat.why.length < 10) vstat.why.push(measure ? (np ? (np.key === plan.key ? 'g' : 'k') : 'n') : 's');
+        generation++;
+        textStamp++;
+        for (var q = n; q; q = q.parentNode) q._rv = textStamp;
+        if (measure) virtAgain = true;
+      }
+    }
+  }
+  // the boxes of a child's elements (in the order of virtSig's walk),
+  // from its band's top: what a child of its signature left out has
+  function virtRel(e, top) {
+    var out = [];
+    (function walk(x) {
+      if (x.nodeType !== 1) return;
+      // (an inline box is as wide as its text: none to lend; 0 asks for
+      // the child to be rendered)
+      var b = boxes[x.__id];
+      out.push(/^inline/.test(computedOf(x).display || 'inline') ? 0 : b ? [b[0], b[1] - top, b[2], b[3]] : null);
+      for (var j = 0; j < x._c.length; j++) walk(x._c[j]);
+    })(e);
+    return out;
+  }
+  // the box of an element in a child left out: its signature's laid-out
+  // child's, where this child stands (null: not in one; false: one that
+  // has no box, as the laid-out one's element had none)
+  function virtBoxOf(el) {
+    for (var q = el; q && q.parentNode && q.parentNode.nodeType === 1; q = q.parentNode) {
+      var st = q.parentNode._virt;
+      if (!st || !st.plan || st.top === null) continue;
+      var plan = st.plan, ix = plan.src[q._vpi] === q ? q._vpi : -1;
+      if (ix < 0 || plan.on[ix]) return null;
+      var sig = q._vsg && q._vsg.s, ref = sig ? st.refs[sig] : null;
+      if (!ref || !ref.rel) return null;
+      var k = -1, found = false;
+      (function walk(x) {
+        if (found || x.nodeType !== 1) return;
+        k++;
+        if (x === el) { found = true; return; }
+        for (var j = 0; j < x._c.length && !found; j++) walk(x._c[j]);
+      })(q);
+      if (!found) return null;
+      var r = ref.rel[k];
+      return r ? [r[0], st.top + plan.pos[ix] + r[1], r[2], r[3]] : r === 0 ? null : false;
+    }
+    return null;
+  }
+  // an element a script asks the geometry of, in a child left out: that
+  // child renders (true: a layout is due)
+  function virtPin(el) {
+    for (var q = el; q && q.parentNode && q.parentNode.nodeType === 1; q = q.parentNode) {
+      var st = q.parentNode._virt;
+      if (!st || !st.plan) continue;
+      var ix = st.plan.src[q._vpi] === q ? q._vpi : -1;
+      if (ix < 0 || st.plan.on[ix]) continue;
+      st.pins.push(q);
+      if (st.pins.length > 64) st.pins.shift();
+      generation++;
+      textStamp++;
+      for (var u = q.parentNode; u; u = u.parentNode) u._rv = textStamp;
+      return true;
+    }
+    return false;
+  }
   function renderJson(n, parentStyle) {
     if (n.nodeType === 3) { var tj = n._data ? JSON.stringify(smallCapsText(n, parentStyle)) : ''; lastDelta = tj; return tj; }
     if (n.nodeType !== 1) { lastDelta = ''; return ''; }
@@ -11242,6 +11842,10 @@
     var bb = body && boxes[body.__id];
     if (bb) h = Math.max(h, (bb[1] || 0) + (bb[3] || 0) + (parseFloat(computedOf(body)['margin-bottom']) || 0));
     return h;
+  }
+  function pageWidth() {
+    var body = doc && doc.body, bb = body && boxes[body.__id];
+    return bb ? Math.round(bb[0] + bb[2] + (parseFloat(computedOf(body)['margin-right']) || 0)) : 0;
   }
   function codeOf(k) {
     if (/^[a-zA-Z]$/.test(k)) return 'Key' + k.toUpperCase();
@@ -12612,6 +13216,7 @@
       takeBoxes(m.boxes);
       layoutGen = generation;
       layoutSb = scrollBumps;
+      if (virts.length) virtCheck(true);
       boxSvgs = boxSvgs.filter(function (e) { return e.isConnected; });
       for (var bs = 0; bs < boxSvgs.length; bs++) {
         var sv = boxSvgs[bs], sb = boxes[sv.__id];

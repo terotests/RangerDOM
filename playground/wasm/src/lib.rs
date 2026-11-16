@@ -250,6 +250,15 @@ impl Playground {
         if delta {
             self.exec("__deltaRender(true)");
         }
+        // virtual rows: this host renders again before it paints when they
+        // ask (layout); PG_NOVIRT renders every child
+        #[cfg(not(target_arch = "wasm32"))]
+        let virt = std::env::var("PG_NOVIRT").is_err();
+        #[cfg(target_arch = "wasm32")]
+        let virt = true;
+        if virt {
+            self.exec("__virtRows(true)");
+        }
         // PG_DELTACHECK: each delta comes with the whole page, and what the
         // host put together is compared with it (Synced::lay_out)
         #[cfg(not(target_arch = "wasm32"))]
@@ -263,6 +272,19 @@ impl Playground {
         { measure::install(); self.exec("__browserFonts('measure')"); }
         #[cfg(not(target_arch = "wasm32"))]
         self.exec("__browserFonts(true)");
+    }
+    /// a new viewport size (the window resized): laid out at it from the
+    /// next frame, the page told (resize event, media queries)
+    pub fn resize(&mut self, w: f64, h: f64) {
+        self.w = w;
+        self.h = h;
+        {
+            let mut sy = self.synced.borrow_mut();
+            sy.w = w;
+            sy.h = h;
+            sy.json.clear();
+        }
+        self.exec(&format!("__layout({{viewport: [{}, {}]}})", w, h));
     }
     /// the page's scripts in a browser's order, DOMContentLoaded and load
     pub fn run_scripts(&mut self) {
@@ -320,8 +342,23 @@ impl Playground {
             self.page_json = self.value("__renderDelta(1)");
             laid = self.synced.borrow_mut().lay_out(&self.page_json);
         }
-        let Some((boxes, root, lay)) = laid else { return String::new() };
+        let Some((mut boxes, mut root, mut lay)) = laid else { return String::new() };
         self.exec(&format!("__layout({})", quote(&format!("{{\"boxes\":{}}}", boxes))));
+        // (virtual rows whose heights the layout showed to be other than
+        // guessed, or that leave out a child near the viewport: rendered
+        // and laid out again before anything is painted)
+        for _ in 0..4 {
+            if self.value("__virtAgain()").is_empty() { break; }
+            self.render();
+            let mut l = self.synced.borrow_mut().lay_out(&self.page_json);
+            if l.is_none() {
+                self.page_json = self.value("__renderDelta(1)");
+                l = self.synced.borrow_mut().lay_out(&self.page_json);
+            }
+            let Some((b2, r2, l2)) = l else { break };
+            self.exec(&format!("__layout({})", quote(&format!("{{\"boxes\":{}}}", b2))));
+            boxes = b2; root = r2; lay = l2;
+        }
         self.root = Some(root.clone());
         self.lay = Some(lay.clone());
         boxes
