@@ -60,6 +60,8 @@ class RealmTest {
         this.check("no change since the snapshot" ((r.changed()) == false))
         r.eval("document.querySelector('h1').setAttribute('data-x', '1')")
         this.check("an attribute change is a change" (r.changed()))
+        ; (the class list keeps its tokens per attribute value, attribute names their lower case)
+        this.check("classList and attribute names after changes from both sides" ((r.eval("(function(){ var e=document.createElement('div'); var c=e.classList; var o=[]; c.add('a','b'); o.push(e.className); e.className='x  y z'; o.push(c.length, c.contains('y')); c.toggle('y'); o.push(e.className); c.toggle('q', true); c.toggle('q', true); o.push(e.className); e.setAttribute('class','m'); c.remove('m'); o.push(e.getAttribute('class')); e.removeAttribute('class'); c.add(); o.push(e.getAttribute('class')); c.add('k'); var l=[]; c.forEach(function(t){l.push(t)}); o.push(l.join()); e.setAttribute('DATA-X','1'); o.push(e.getAttribute('data-x'), e.getAttribute('Data-X')); try { c.add('a b'); o.push('no'); } catch (x) { o.push(x.name); } try { e.setAttribute('a b', 1); o.push('no'); } catch (x) { o.push(x.name); } var s=document.createElementNS('http://www.w3.org/2000/svg','svg'); s.setAttribute('viewBox','0 0 1 1'); o.push(s.getAttribute('viewBox'), s.getAttribute('viewbox')); return o.join('|'); })()")) == "a b|3|true|x z|x z q|||k|1|1|InvalidCharacterError|InvalidCharacterError|0 0 1 1|"))
     }
 
     fn react:void () {

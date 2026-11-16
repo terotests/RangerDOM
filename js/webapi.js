@@ -94,17 +94,18 @@
   function attrChanged(el, name, was, now) {
     if (name === 'class' || name === 'id' || name === undefined) ancEpoch++;
     if (name !== 'style') sigEpoch++;
-    if (shadowCount && el.isConnected && inShadowScope(el)) { changed(); if (name === 'slot' || name === 'name') scheduleSlots(name === 'slot' ? assignedSlotOf(el) : null); return; }
+    var conn = el.isConnected;
+    if (shadowCount && conn && inShadowScope(el)) { changed(); if (name === 'slot' || name === 'name') scheduleSlots(name === 'slot' ? assignedSlotOf(el) : null); return; }
     // an element not in the page (React sets a new element's attributes
     // before it inserts it): nothing shown changes; what it kept goes
-    if (!el.isConnected && doc && el.ownerDocument === doc) {
+    if (!conn && doc && el.ownerDocument === doc) {
       // (el._es: el or something under it was styled at some time, see
       // computedOf. A grid builds each row out of the page, attribute by
       // attribute: nothing there is kept, and each change walked the row.)
       if (computedCache.gen === styleGen && (el._es || shadowCount)) { dropStyle(el); eachElement(el, dropStyle); }
       return;
     }
-    var reach = el.isConnected && doc && el.ownerDocument === doc && el !== doc.documentElement ? selectorReach() : 0;
+    var reach = conn && doc && el.ownerDocument === doc && el !== doc.documentElement ? selectorReach() : 0;
     if (!reach) { changed(); return; }
     generation++;
     textStamp++;
@@ -1409,7 +1410,16 @@
       var i = indexIn(this); return i > 0 ? p._c[i - 1] : null;
     }
     get isConnected() {
-      for (var n = this; n; n = n.nodeType === 11 && n.host ? n.host : n.parentNode) if (n.nodeType === 9) return true;
+      // (up to the top of the tree: the document, or a shadow root, from
+      // whose host it goes on. Asked at every attribute change)
+      for (var n = this; n;) {
+        var p = n.parentNode;
+        if (p) { n = p; continue; }
+        var t = n.nodeType;
+        if (t === 9) return true;
+        if (t !== 11 || !n.host) return false;
+        n = n.host;
+      }
       return false;
     }
     get assignedSlot() { return shadowCount ? assignedSlotOf(this) : null; }
@@ -1940,28 +1950,45 @@
     });
   }
 
+  var attrLower = Object.create(null), attrLowerN = 0, attrValid = Object.create(null), attrValidN = 0;
   class DOMTokenList {
-    constructor(el, attr) { this._el = el; this._attr = attr; }
-    _list() { var v = this._el.getAttribute(this._attr); return v ? v.split(/[ \t\n\f\r]+/).filter(Boolean) : []; }
-    _set(l) { this._el.setAttribute(this._attr, l.join(' ')); }
-    get length() { return this._list().length; }
+    constructor(el, attr) { this._el = el; this._attr = attr; this._tv = undefined; this._tl = null; }
+    // (the attribute's tokens, split once per value it has: a grid toggles
+    // a few classes on every cell it shows, and each toggle split the
+    // text twice. The list is kept as it is; a change works on a copy)
+    _tok() {
+      var v = attrOf(this._el, this._attr);
+      if (v === this._tv && this._tl) return this._tl;
+      var l = v ? (v.indexOf(' ') < 0 && !/[\t\n\f\r]/.test(v) ? [v] : v.split(/[ \t\n\f\r]+/).filter(Boolean)) : [];
+      this._tv = v;
+      this._tl = l;
+      return l;
+    }
+    _list() { return this._tok().slice(); }
+    _set(l) {
+      var s = l.join(' ');
+      this._el.setAttribute(this._attr, s);
+      // (what was set, when no hook made it something else)
+      if (attrOf(this._el, this._attr) === s) { this._tv = s; this._tl = l; }
+    }
+    get length() { return this._tok().length; }
     get value() { return this._el.getAttribute(this._attr) || ''; }
     set value(v) { this._el.setAttribute(this._attr, v); }
-    item(i) { var l = this._list(); return i < l.length ? l[i] : null; }
-    contains(t) { return this._list().indexOf(String(t)) >= 0; }
+    item(i) { var l = this._tok(); return i < l.length ? l[i] : null; }
+    contains(t) { return this._tok().indexOf(String(t)) >= 0; }
     add() {
-      var l = this._list(), before = l.length;
-      for (var i = 0; i < arguments.length; i++) { var t = String(arguments[i]); checkToken(t); if (l.indexOf(t) < 0) l.push(t); }
-      if (l.length !== before || this._el.getAttribute(this._attr) === null) this._set(l);
+      var cur = this._tok(), l = null;
+      for (var i = 0; i < arguments.length; i++) { var t = String(arguments[i]); checkToken(t); if ((l || cur).indexOf(t) < 0) { if (!l) l = cur.slice(); l.push(t); } }
+      if (l || attrOf(this._el, this._attr) === null) this._set(l || cur.slice());
     }
     remove() {
-      var l = this._list(), before = l.length;
-      for (var i = 0; i < arguments.length; i++) { var t = String(arguments[i]); checkToken(t); var k = l.indexOf(t); while (k >= 0) { l.splice(k, 1); k = l.indexOf(t); } }
-      if (l.length !== before) this._set(l);
+      var cur = this._tok(), l = null;
+      for (var i = 0; i < arguments.length; i++) { var t = String(arguments[i]); checkToken(t); var k = (l || cur).indexOf(t); while (k >= 0) { if (!l) l = cur.slice(); l.splice(k, 1); k = l.indexOf(t); } }
+      if (l) this._set(l);
     }
     toggle(t, force) {
       t = String(t);
-      var has = this.contains(t);
+      var has = this._tok().indexOf(t) >= 0;
       if (force === undefined ? has : !force) { if (has) this.remove(t); return false; }
       if (!has) this.add(t);
       return true;
@@ -1975,9 +2002,13 @@
     toString() { return this.value; }
   }
   DOMTokenList.prototype[Symbol.iterator] = function () { return this._list()[Symbol.iterator](); };
+  // (tokens that passed: the same few class names come again and again)
+  var tokenOk = Object.create(null), tokenOkN = 0;
   function checkToken(t) {
+    if (tokenOk[t] === true) return;
     if (t === '') throw DOMException('The token provided must not be empty.', 'SyntaxError');
     if (/\s/.test(t)) throw DOMException("The token provided ('" + t + "') contains HTML space characters, which are not valid in tokens.", 'InvalidCharacterError');
+    if (tokenOkN < 4096) { tokenOkN++; tokenOk[t] = true; }
   }
 
   // ---- style declarations --------------------------------------------------
@@ -2423,9 +2454,10 @@
     // sends it (TanStack Virtual's scrollToIndex waits for it)
     // (a scrolled box's offset is clamped by a layout: read after its
     // content shrank, it is laid out first)
-    get scrollTop() { if (this._scl) scrollRead(this); return this._sTop; }
+    // (an offset of 0 stays 0 whatever the range has become: no layout for it)
+    get scrollTop() { if (this._scl && this._sTop) scrollRead(this); return this._sTop; }
     set scrollTop(v) { v = Math.max(0, +v || 0); if (this === (doc && doc.documentElement) && doc.body && boxes[doc.body.__id]) v = Math.min(v, Math.max(0, Math.round(pageHeight()) - viewport.h)); if (v === this._sTop) return; this._sTop = v; keptScroll(this); scriptScrolled(this); }
-    get scrollLeft() { if (this._scl) scrollRead(this); return this._sLeft; }
+    get scrollLeft() { if (this._scl && this._sLeft) scrollRead(this); return this._sLeft; }
     set scrollLeft(v) { v = +v || 0; if (v === this._sLeft) return; this._sLeft = v; keptScroll(this); scriptScrolled(this); }
     get nodeName() { return this.tagName; }
     get tagName() { return this.namespaceURI === HTML_NS ? this._qname.toUpperCase() : this._qname; }
@@ -2437,9 +2469,18 @@
     get classList() { return this._cl || (this._cl = new DOMTokenList(this, 'class')); }
     get slot() { return this.getAttribute('slot') || ''; }
     set slot(v) { this.setAttribute('slot', v); }
-    _norm(n) { n = String(n); return this.namespaceURI === HTML_NS ? n.toLowerCase() : n; }
+    // (attribute names as HTML takes them, lower case, and the names that
+    // are valid ones: both kept for the names seen, a page uses a few
+    // dozen and reads or sets them all the time)
+    _norm(n) {
+      if (typeof n !== 'string') n = String(n);
+      if (this.namespaceURI !== HTML_NS) return n;
+      var l = attrLower[n];
+      if (l === undefined) { l = n.toLowerCase(); if (attrLowerN < 4096) { attrLowerN++; attrLower[n] = l; } }
+      return l;
+    }
     _find(n) { for (var i = 0; i < this._attrs.length; i++) if (this._attrs[i].name === n) return i; return -1; }
-    getAttribute(n) { var i = this._find(this._norm(n)); return i < 0 ? null : this._attrs[i]._v; }
+    getAttribute(n) { n = this._norm(n); var a = this._attrs; for (var i = 0; i < a.length; i++) if (a[i].name === n) return a[i]._v; return null; }
     getAttributeNS(ns, n) { return this.getAttribute(n); }
     getAttributeNode(n) { var i = this._find(this._norm(n)); return i < 0 ? null : this._attrs[i]; }
     getAttributeNames() { return this._attrs.map(function (a) { return a.name; }); }
@@ -2448,8 +2489,11 @@
     hasAttributes() { return this._attrs.length > 0; }
     setAttribute(n, v) {
       n = this._norm(n);
-      if (!/^[^\s"'>\/=\0]+$/.test(n)) throw DOMException("Failed to execute 'setAttribute' on 'Element': '" + n + "' is not a valid attribute name.", 'InvalidCharacterError');
-      v = String(v);
+      if (attrValid[n] !== true) {
+        if (!/^[^\s"'>\/=\0]+$/.test(n)) throw DOMException("Failed to execute 'setAttribute' on 'Element': '" + n + "' is not a valid attribute name.", 'InvalidCharacterError');
+        if (attrValidN < 4096) { attrValidN++; attrValid[n] = true; }
+      }
+      if (typeof v !== 'string') v = String(v);
       var i = this._find(n);
       var old = i < 0 ? null : this._attrs[i]._v;
       if (i < 0) this._attrs.push(new Attr(n, v, this)); else this._attrs[i]._v = v;
