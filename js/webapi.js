@@ -9654,6 +9654,254 @@
   // what the host lays out: each element {i, t, s: computed style (the
   // properties that differ from the initial value), a: attributes the host
   // shows, c: children}, each text {i, x}
+  // ACCESSIBILITY. What each element is to a screen reader (WAI-ARIA 1.2,
+  // HTML-AAM, Accessible Name and Description 1.2), computed where the
+  // element renders and sent with it as `ax`: r role, n name, d
+  // description and the states. The host's view puts them on its boxes
+  // (DomView: EVG's a11y fields), from which EVGA11yFromTree builds the tree
+  // a host mirrors (evg-a11y.js) or hands to the platform. Only elements
+  // with a role a reader stops on carry one; text in a box with none is a
+  // "text" node (static text). Roles are the ones EVGA11yFromTree knows: an
+  // ARIA role it lacks is mapped to the nearest it has.
+  var AX_ROLES = /^(group|text|heading|button|checkbox|radio|textbox|img|link|navigation|form|rowgroup|log|combobox|listbox|option|grid|tabpanel|tablist|tab|toolbar|menu|menubar|menuitem|menuitemcheckbox|menuitemradio|separator|dialog|alertdialog|tooltip|status|region|banner|main|paragraph|list|listitem|table|row|columnheader|rowheader|cell|gridcell|switch|radiogroup|slider|spinbutton|progressbar|tree|treeitem)$/;
+  var AX_ALIAS = { searchbox: 'textbox', image: 'img', alert: 'status', timer: 'status', marquee: 'status', meter: 'progressbar', treegrid: 'grid', scrollbar: 'slider',
+    article: 'group', complementary: 'region', contentinfo: 'region', search: 'region', figure: 'group', document: 'group', application: 'group', feed: 'group', note: 'group', blockquote: 'group', definition: 'group', term: 'group', directory: 'list', caption: 'text', math: 'img' };
+  // roles named by their content (accname 4.3.2, step 2F)
+  var AX_FROM_CONTENT = /^(button|cell|checkbox|columnheader|gridcell|heading|link|menuitem|menuitemcheckbox|menuitemradio|option|radio|rowheader|switch|tab|tooltip|treeitem)$/;
+  function axImplicit(n) {
+    var t = n.localName;
+    if (n.namespaceURI !== HTML_NS) return t === 'svg' && (n.getAttribute('aria-label') || n.getAttribute('aria-labelledby')) ? 'img' : '';
+    switch (t) {
+      case 'a': case 'area': return n.hasAttribute('href') ? 'link' : '';
+      case 'button': case 'summary': return 'button';
+      case 'h1': case 'h2': case 'h3': case 'h4': case 'h5': case 'h6': return 'heading';
+      case 'img': return n.getAttribute('alt') === '' ? '' : 'img';
+      case 'input':
+        var ty = n.type;
+        if (ty === 'hidden') return '';
+        if (/^(button|submit|reset|image)$/.test(ty)) return 'button';
+        if (ty === 'checkbox') return n.hasAttribute('switch') ? 'switch' : 'checkbox';
+        if (ty === 'radio') return 'radio';
+        if (ty === 'range') return 'slider';
+        if (ty === 'number') return 'spinbutton';
+        if (/^(color|file|date|time|datetime-local|month|week)$/.test(ty)) return ty === 'file' ? 'button' : 'textbox';
+        return n.hasAttribute('list') ? 'combobox' : 'textbox';
+      case 'textarea': return 'textbox';
+      case 'select': return n.multiple || n.size > 1 ? 'listbox' : 'combobox';
+      case 'option': return 'option';
+      case 'ul': case 'ol': case 'menu': return 'list';
+      case 'li': return 'listitem';
+      case 'nav': return 'navigation';
+      case 'main': return 'main';
+      case 'header': return axInSection(n) ? '' : 'banner';
+      case 'footer': return axInSection(n) ? '' : 'region';
+      case 'aside': return 'region';
+      case 'section': return axHasName(n) ? 'region' : '';
+      case 'form': return axHasName(n) ? 'form' : '';
+      case 'article': case 'fieldset': case 'details': case 'figure': case 'blockquote': return 'group';
+      case 'dialog': return 'dialog';
+      case 'p': return 'paragraph';
+      case 'hr': return 'separator';
+      case 'table': return 'table';
+      case 'thead': case 'tbody': case 'tfoot': return 'rowgroup';
+      case 'tr': return 'row';
+      case 'td': return axGridTable(n) ? 'gridcell' : 'cell';
+      case 'th': var sc = n.getAttribute('scope'); return sc === 'row' || sc === 'rowgroup' ? 'rowheader' : 'columnheader';
+      case 'progress': case 'meter': return 'progressbar';
+      case 'output': return 'status';
+    }
+    return '';
+  }
+  function axInSection(n) { for (var p = n.parentNode; p && p.nodeType === 1; p = p.parentNode) if (/^(article|aside|main|nav|section)$/.test(p.localName)) return true; return false; }
+  function axHasName(n) { return !!(n.getAttribute('aria-label') || n.getAttribute('aria-labelledby') || n.getAttribute('title')); }
+  function axGridTable(n) { for (var p = n.parentNode; p && p.nodeType === 1; p = p.parentNode) if (p.localName === 'table') { var r = (p.getAttribute('role') || '').trim(); return r === 'grid' || r === 'treegrid'; } return false; }
+  function axRoleOf(n) {
+    var ra = n.getAttribute('role');
+    if (ra === null && n._internals && n._internals.role) ra = String(n._internals.role);
+    if (ra !== null) {
+      var toks = ra.trim().toLowerCase().split(/\s+/);
+      for (var i = 0; i < toks.length; i++) {
+        var r = toks[i];
+        // (none/presentation is ignored on a focusable element, ARIA 9.2)
+        if (r === 'none' || r === 'presentation') { if (focusableByDefault(n) || n.hasAttribute('tabindex')) continue; return ''; }
+        if (r === 'generic') return '';
+        if (AX_ROLES.test(r)) return r;
+        if (AX_ALIAS[r]) return AX_ALIAS[r];
+      }
+    }
+    return axImplicit(n);
+  }
+  function axAttr(n, a) {
+    var v = n.getAttribute(a);
+    if (v === null && n._internals) { var p = 'aria' + a.slice(5).replace(/(^|-)([a-z])/g, function (m, d, c) { return c.toUpperCase(); }); var iv = n._internals[p]; if (iv !== null && iv !== undefined) v = String(iv); }
+    return v;
+  }
+  function axHidden(n) {
+    if (n.getAttribute('aria-hidden') === 'true' || n.hasAttribute('hidden') && n.getAttribute('hidden') !== 'until-found') return true;
+    var cs = computedOf(n);
+    return cs.display === 'none' || cs.visibility === 'hidden';
+  }
+  function axSquash(t) { return t.replace(/\s+/g, ' ').trim(); }
+  // the text of an element as a name (accname 4.3.2 steps 2B-2G): what
+  // it holds, each child by its own name, hidden parts left out
+  function axText(n, depth, seen) {
+    if (depth > 30) return '';
+    var out = '';
+    for (var i = 0; i < n._c.length; i++) {
+      var k = n._c[i];
+      if (k.nodeType === 3) { out += k.data; continue; }
+      if (k.nodeType !== 1 || seen.indexOf(k) >= 0) continue;
+      if (axHidden(k)) continue;
+      var lab = axAttr(k, 'aria-label');
+      if (lab && lab.trim()) { out += ' ' + lab + ' '; continue; }
+      var t = k.localName;
+      if (t === 'img' || (t === 'input' && k.type === 'image') || t === 'area') { out += ' ' + (k.getAttribute('alt') || '') + ' '; continue; }
+      if (t === 'input' || t === 'textarea') { out += ' ' + (k.type === 'password' ? '' : /^(checkbox|radio)$/.test(k.type) ? '' : k.value) + ' '; continue; }
+      if (t === 'select') { out += ' ' + (k.selectedOptions && k.selectedOptions[0] ? k.selectedOptions[0].text : '') + ' '; continue; }
+      if (t === 'script' || t === 'style' || t === 'template') continue;
+      // (a slot: what is assigned to it, else its own content)
+      if (t === 'slot' && shadowRootOf(k)) { var fl = flatten(k, []), ft = ''; for (var fi = 0; fi < fl.length; fi++) ft += fl[fi].nodeType === 3 ? fl[fi].data : fl[fi].nodeType === 1 && !axHidden(fl[fi]) ? ' ' + axText(fl[fi], depth + 1, seen) + ' ' : ''; out += ft; continue; }
+      var cs = computedOf(k), inl = !cs.display || /^inline/.test(cs.display) || cs.display === 'contents';
+      var bt = k._sr ? axText(k._sr, depth + 1, seen) : axText(k, depth + 1, seen);
+      out += inl ? bt : ' ' + bt + ' ';
+    }
+    return out;
+  }
+  function axRefs(n, attr) {
+    var ids = (n.getAttribute(attr) || '').trim();
+    if (!ids) return '';
+    var root = n.getRootNode ? n.getRootNode() : doc, out = [];
+    ids.split(/\s+/).forEach(function (id) {
+      var e = root.getElementById ? root.getElementById(id) : doc.getElementById(id);
+      if (!e) return;
+      var l = axAttr(e, 'aria-label');
+      out.push(l && l.trim() ? l : axSquash(axText(e, 0, [n])));
+    });
+    return axSquash(out.join(' '));
+  }
+  function axLabelText(n) {
+    // <label for=id> and an enclosing <label>, the control's own text left out
+    var out = [];
+    var id = n.getAttribute('id'), root = n.getRootNode ? n.getRootNode() : doc;
+    if (id && root.querySelectorAll) { var ls = root.querySelectorAll('label[for]'); for (var i = 0; i < ls.length; i++) if (ls[i].getAttribute('for') === id) out.push(axText(ls[i], 0, [n])); }
+    for (var p = n.parentNode; p && p.nodeType === 1; p = p.parentNode) if (p.localName === 'label' && !p.hasAttribute('for')) { out.push(axText(p, 0, [n])); break; }
+    return axSquash(out.join(' '));
+  }
+  function axName(n, role) {
+    var v = axRefs(n, 'aria-labelledby');
+    if (v) return v;
+    v = axAttr(n, 'aria-label');
+    if (v && v.trim()) return axSquash(v);
+    var t = n.localName;
+    if (t === 'input' || t === 'textarea' || t === 'select' || t === 'meter' || t === 'progress' || t === 'output') {
+      if (t === 'input' && /^(button|submit|reset)$/.test(n.type)) return n.value || (n.type === 'submit' ? 'Submit' : n.type === 'reset' ? 'Reset' : '');
+      if (t === 'input' && n.type === 'image') return n.getAttribute('alt') || 'Submit';
+      v = axLabelText(n);
+      if (v) return v;
+    }
+    if (t === 'img' || t === 'area') { v = n.getAttribute('alt'); if (v) return axSquash(v); }
+    if (t === 'fieldset' || t === 'figure' || t === 'table') {
+      var cap = t === 'fieldset' ? 'legend' : t === 'figure' ? 'figcaption' : 'caption';
+      for (var i = 0; i < n._c.length; i++) if (n._c[i].localName === cap) return axSquash(axText(n._c[i], 0, []));
+    }
+    if (t === 'svg') { for (var j = 0; j < n._c.length; j++) if (n._c[j].localName === 'title') return axSquash(n._c[j].textContent); }
+    if (AX_FROM_CONTENT.test(role)) { v = axSquash(axText(n._sr || n, 0, [])); if (v) return v.length > 400 ? v.slice(0, 400) : v; }
+    v = n.getAttribute('title');
+    if (v && v.trim()) return axSquash(v);
+    if ((role === 'textbox' || role === 'combobox' || role === 'spinbutton') && n.getAttribute('placeholder')) return axSquash(n.getAttribute('placeholder'));
+    return '';
+  }
+  function axTri(v) { return v === 'true' ? 2 : v === 'false' ? 1 : v === 'mixed' ? 3 : 0; }
+  // the render tree's `ax` for an element, or null (no role, nothing to say)
+  function axOf(n) {
+    if (n.getAttribute('aria-hidden') === 'true') return { h: 1 };
+    var role = axRoleOf(n), o = null;
+    if (!role) {
+      // static text: a box with text of its own and no role, outside a
+      // role that is named by its content (it is that role's name already)
+      var own = '';
+      for (var i = 0; i < n._c.length; i++) if (n._c[i].nodeType === 3) own += n._c[i].data;
+      if (!own.trim()) return null;
+      for (var p = composedParent(n); p && p.nodeType === 1; p = composedParent(p)) {
+        var pr = axRoleOf(p);
+        if (pr && AX_FROM_CONTENT.test(pr)) return null;
+        if (pr) break;
+      }
+      return { r: 'text', n: axSquash(own).slice(0, 2000) };
+    }
+    o = { r: role };
+    var nm = axName(n, role);
+    // (a paragraph's or list item's text as its name: EVG's tree has no
+    // static text under a role, so what it holds is said as its name)
+    if (!nm && (role === 'paragraph' || role === 'listitem')) { nm = axSquash(axText(n, 0, [])); if (nm.length > 2000) nm = nm.slice(0, 2000); }
+    if (nm) o.n = nm;
+    var ds = axRefs(n, 'aria-describedby') || axAttr(n, 'aria-description') || (nm !== axSquash(n.getAttribute('title') || '') ? axSquash(n.getAttribute('title') || '') : '');
+    if (ds) o.d = ds;
+    var t = n.localName;
+    // states
+    var ch = axTri(axAttr(n, 'aria-checked'));
+    if (t === 'input' && (n.type === 'checkbox' || n.type === 'radio')) ch = n.indeterminate ? 3 : n.checked ? 2 : 1;
+    else if (!ch && /^(checkbox|radio|switch|menuitemcheckbox|menuitemradio)$/.test(role)) ch = 1;
+    if (ch) o.ck = ch;
+    var pr2 = axTri(axAttr(n, 'aria-pressed')); if (pr2 && role === 'button') o.pr = pr2;
+    var ex = axTri(axAttr(n, 'aria-expanded'));
+    if (t === 'details') ex = n.open ? 2 : 1;
+    else if (t === 'summary' && n.parentNode && n.parentNode.localName === 'details') ex = n.parentNode.open ? 2 : 1;
+    if (ex) o.ex = ex;
+    var se = axTri(axAttr(n, 'aria-selected'));
+    if (t === 'option') se = n.selected ? 2 : 1;
+    if (se === 2) o.se = 2;
+    if (n.disabled || axAttr(n, 'aria-disabled') === 'true') o.di = 1;
+    if (focusableByDefault(n) || n.hasAttribute('tabindex')) o.fo = 1;
+    if ((t === 'dialog' && n._modal) || axAttr(n, 'aria-modal') === 'true') o.mo = 1;
+    var lv = parseInt(axAttr(n, 'aria-level'), 10);
+    if (!(lv > 0) && role === 'heading' && /^h[1-6]$/.test(t)) lv = +t.charAt(1);
+    if (!(lv > 0) && role === 'heading') lv = 2;
+    if (lv > 0) o.lv = lv;
+    var hp = axAttr(n, 'aria-haspopup'); if (hp && hp !== 'false') o.hp = hp === 'true' ? 'menu' : hp;
+    if (t === 'select' && role === 'combobox') o.hp = 'listbox';
+    var cu = axAttr(n, 'aria-current'); if (cu && cu !== 'false') o.cu = cu;
+    if (n.required || axAttr(n, 'aria-required') === 'true') o.rq = 1;
+    if (axAttr(n, 'aria-invalid') && axAttr(n, 'aria-invalid') !== 'false') o.iv = 1;
+    if (n.readOnly || axAttr(n, 'aria-readonly') === 'true') o.ro = 1;
+    var or = axAttr(n, 'aria-orientation'); if (or) o.or = or;
+    var rd = axAttr(n, 'aria-roledescription'); if (rd) o.rd = rd;
+    var ps = parseInt(axAttr(n, 'aria-posinset'), 10), sz = parseInt(axAttr(n, 'aria-setsize'), 10);
+    if (ps > 0) o.ps = ps;
+    if (sz > 0) o.sz = sz;
+    // value: a field's text, a select's choice, a range's number
+    if (role === 'textbox' || role === 'combobox' || role === 'spinbutton') {
+      var val = t === 'select' ? (n.selectedOptions && n.selectedOptions[0] ? n.selectedOptions[0].text : '') : (t === 'input' || t === 'textarea') ? (n.type === 'password' ? n.value.replace(/./g, '•') : n.value) : '';
+      if (val) o.v = val;
+    }
+    if (role === 'slider' || role === 'spinbutton' || role === 'progressbar' || role === 'separator' && o.fo) {
+      var vn = parseFloat(axAttr(n, 'aria-valuenow')), vmin = parseFloat(axAttr(n, 'aria-valuemin')), vmax = parseFloat(axAttr(n, 'aria-valuemax'));
+      if (t === 'input') { vn = parseFloat(n.value); var rb = n.type === 'range' ? rangeBounds(n) : null; if (rb) { vmin = rb[0]; vmax = rb[1]; } }
+      if ((t === 'progress' || t === 'meter') && n.hasAttribute('value')) { vn = parseFloat(n.getAttribute('value')); vmin = parseFloat(n.getAttribute('min')) || 0; vmax = parseFloat(n.getAttribute('max')) || 1; }
+      if (!isNaN(vn)) o.vn = vn;
+      if (!isNaN(vmin) && !isNaN(vmax)) { o.vmin = vmin; o.vmax = vmax; }
+      var vt = axAttr(n, 'aria-valuetext'); if (vt) o.v = vt;
+    }
+    return o;
+  }
+  // every element's ax in document order, for a host without a view and for
+  // tests against Chromium's accessibility tree
+  G.__axTree = function () {
+    var out = [];
+    function walk(n, depth) {
+      for (var i = 0; i < n._c.length; i++) {
+        var k = n._c[i];
+        if (k._attrs === undefined) continue;
+        if (axHidden(k)) continue;
+        var ax = axOf(k);
+        if (ax && ax.h) continue;
+        if (ax) { var e = { depth: depth }; for (var q in ax) e[q] = ax[q]; out.push(e); }
+        walk(k._sr || k, depth + (ax ? 1 : 0));
+      }
+    }
+    if (doc && doc.body) walk(doc.body, 0);
+    return JSON.stringify(out);
+  };
   var RENDER_ATTRS = { src: 1, alt: 1, href: 1, placeholder: 1, type: 1, role: 1, 'aria-label': 1, 'aria-hidden': 1, 'aria-expanded': 1, 'aria-selected': 1, 'aria-checked': 1, title: 1, viewBox: 1, d: 1, points: 1, cx: 1, cy: 1, r: 1, rx: 1, ry: 1, x: 1, y: 1, x1: 1, y1: 1, x2: 1, y2: 1, width: 1, height: 1, transform: 1, 'fill-rule': 1, 'clip-rule': 1, 'stroke-linecap': 1, 'stroke-linejoin': 1, tabindex: 1, contenteditable: 1, id: 1, class: 1, style: 1, rows: 1, clear: 1, colspan: 1, rowspan: 1, span: 1 };
   // a grid-lanes container goes to the layout as a grid that says which
   // axis its lanes are across (grid-lanes: column | row, fill-reverse,
@@ -9863,6 +10111,8 @@
     // in them is dropped above)
     if (cs.display === 'table-cell' && n._colCut) { if (!a) a = {}; a.colspan = String(n._colCut); }
     if (a) o.a = a;
+    var ax = axOf(n);
+    if (ax) o.ax = ax;
     if (n._ia) o.ia = 1;
     if (n.scrollTop || n.scrollLeft) o.sc = [n.scrollLeft, n.scrollTop];
     if (o.t === 'svg:svg') {

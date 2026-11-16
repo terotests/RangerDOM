@@ -7460,7 +7460,71 @@ impl DomView {
         }
     }
     /// an element and what is inside it
+    /// an element of the page with what it is to a screen reader (`ax`,
+    /// webapi.js's role, name and states) on EVG's a11y fields, from which
+    /// EVGA11yFromTree builds the accessible tree
     fn element(&mut self, n: &Rc<RefCell<JsonValue>>, inh: Rc<RefCell<JsonValue>>) -> Rc<RefCell<EVGElement>> {
+        let e: Rc<RefCell<EVGElement>> = self.elementBody(n, inh);
+        if n.borrow().has("ax") {
+            DomView::applyAx(&e, &n.borrow().get("ax"));
+            // (a form control's drawn text is its value, not its name)
+            let tg: String = n.borrow().getText("t");
+            if tg == "input" || tg == "textarea" || tg == "select" {
+                for k in e.borrow().children.iter().cloned() {
+                    k.borrow_mut().a11y_hidden = true;
+                }
+            }
+        }
+        e
+    }
+    fn axNum(ax: &Rc<RefCell<JsonValue>>, k: &str) -> Option<f64> {
+        let t: String = ax.borrow().getText(k);
+        t.trim().to_string().parse::<f64>().ok()
+    }
+    fn applyAx(e: &Rc<RefCell<EVGElement>>, ax: &Rc<RefCell<JsonValue>>) {
+        if ax.borrow().getInt("h", 0) == 1 {
+            e.borrow_mut().a11y_hidden = true;
+            return;
+        }
+        let role: String = ax.borrow().getText("r");
+        if role.is_empty() {
+            return;
+        }
+        e.borrow_mut().role = role.clone();
+        e.borrow_mut().a11y_label = ax.borrow().getText("n");
+        e.borrow_mut().a11y_description = ax.borrow().getText("d");
+        e.borrow_mut().a11y_value = ax.borrow().getText("v");
+        e.borrow_mut().a11y_checked = ax.borrow().getInt("ck", 0);
+        e.borrow_mut().a11y_pressed = ax.borrow().getInt("pr", 0);
+        e.borrow_mut().a11y_expanded = ax.borrow().getInt("ex", 0);
+        e.borrow_mut().a11y_selected = ax.borrow().getInt("se", 0);
+        e.borrow_mut().a11y_disabled = ax.borrow().getInt("di", 0) == 1;
+        e.borrow_mut().a11y_focusable = ax.borrow().getInt("fo", 0) == 1;
+        e.borrow_mut().a11y_modal = ax.borrow().getInt("mo", 0) == 1;
+        e.borrow_mut().a11y_level = ax.borrow().getInt("lv", 0);
+        e.borrow_mut().a11y_pos_in_set = ax.borrow().getInt("ps", 0);
+        e.borrow_mut().a11y_set_size = ax.borrow().getInt("sz", 0);
+        e.borrow_mut().a11y_has_popup = ax.borrow().getText("hp");
+        e.borrow_mut().a11y_current = ax.borrow().getText("cu");
+        e.borrow_mut().a11y_orientation = ax.borrow().getText("or");
+        e.borrow_mut().a11y_role_description = ax.borrow().getText("rd");
+        e.borrow_mut().a11y_required = if ax.borrow().getInt("rq", 0) == 1 { "true".to_string() } else { "".to_string() };
+        e.borrow_mut().a11y_invalid = if ax.borrow().getInt("iv", 0) == 1 { "true".to_string() } else { "".to_string() };
+        e.borrow_mut().a11y_read_only = if ax.borrow().getInt("ro", 0) == 1 { "true".to_string() } else { "".to_string() };
+        let vn: Option<f64> = DomView::axNum(ax, "vn");
+        if vn.is_some() {
+            e.borrow_mut().a11y_has_value = true;
+            e.borrow_mut().a11y_value_now = (vn.unwrap() + 0.5).floor() as i64;
+        }
+        let vmin: Option<f64> = DomView::axNum(ax, "vmin");
+        let vmax: Option<f64> = DomView::axNum(ax, "vmax");
+        if vmin.is_some() && vmax.is_some() {
+            e.borrow_mut().a11y_has_range = true;
+            e.borrow_mut().a11y_value_min = (vmin.unwrap() + 0.5).floor() as i64;
+            e.borrow_mut().a11y_value_max = (vmax.unwrap() + 0.5).floor() as i64;
+        }
+    }
+    fn elementBody(&mut self, n: &Rc<RefCell<JsonValue>>, inh: Rc<RefCell<JsonValue>>) -> Rc<RefCell<EVGElement>> {
         let band: bool = self.bandOnly;
         self.bandOnly = false;
         let own: String = DomView::wmOf(&inh);
