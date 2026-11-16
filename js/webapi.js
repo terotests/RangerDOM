@@ -212,22 +212,20 @@
   // react-remove-scroll's data-scroll-locked on every dialog and menu:
   // each matched all 2 500 elements of the page again.
   function inheritDown(el, a, b) {
-    var map = computedCache.map, disp = a.display !== b.display;
     var kids = el._sr ? null : el._c;
     if (!kids || shadowCount) { eachElement(el, dropStyle); return; }
     for (var i = 0; i < kids.length; i++) {
       var c = kids[i];
       if (c._attrs === undefined) continue;
-      var cc = oldStyle(c), rj = c._rj, pc = c._pc;
+      var cc = oldStyle(c), pc = c._pc;
       if (!cc || pc || c._ab) { dropStyle(c); eachElement(c, dropStyle); continue; }
       dropComputed(c);
       var nc = computedOf(c);
       // (alike: what is under c keeps its styles, and its renders take
-      // c's new style object as their parent's, sameStyle)
-      if (nc === cc || sameStyle(cc, nc, c)) {
-        if (!disp && rj && rj.ps === a && c.localName !== 'input') { rj.ps = b; c._rj = rj; }
-        continue;
-      }
+      // c's new style object as their parent's, sameStyle. c's own render
+      // goes: it writes what c inherits as it differs from el's, which
+      // changed)
+      if (nc === cc || sameStyle(cc, nc, c)) continue;
       inheritDown(c, cc, nc);
     }
   }
@@ -2851,8 +2849,10 @@
   });
   class HTMLImageElement extends HTMLElement {
     constructor(q) { super(q); this.complete = true; }
-    get naturalWidth() { return this.width; }
-    get naturalHeight() { return this.height; }
+    // (the picture's own size where its data says it, a data: URL's SVG,
+    // PNG or GIF; else the laid-out box)
+    get naturalWidth() { var n = intrinsicOf(this.getAttribute('src')); return n ? n[0] : this.width; }
+    get naturalHeight() { var n = intrinsicOf(this.getAttribute('src')); return n ? n[1] : this.height; }
     get width() { var a = this.getAttribute('width'); return a !== null ? parseInt(a, 10) || 0 : rectOf(this).width; }
     set width(v) { this.setAttribute('width', v); }
     get height() { var a = this.getAttribute('height'); return a !== null ? parseInt(a, 10) || 0 : rectOf(this).height; }
@@ -2866,6 +2866,51 @@
   }
   reflect(HTMLImageElement, ['alt', 'srcset', 'sizes', 'crossOrigin', 'useMap', 'loading', 'decoding', 'referrerPolicy']);
   urlProp(HTMLImageElement, ['src']);
+  // an image out of the page loads all the same (new Image(), as Radix's
+  // Avatar does to know whether to show the picture or its fallback)
+  (function () {
+    var d = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+    Object.defineProperty(HTMLImageElement.prototype, 'src', {
+      get: d.get,
+      set: function (v) {
+        d.set.call(this, v);
+        if (this.isConnected || !String(v)) return;
+        var self = this;
+        self.complete = false;
+        setTimeout(function () { self.complete = true; dispatch(self, new Event('load')); }, 0);
+      },
+      configurable: true, enumerable: true
+    });
+  })();
+  var intrinsicMemo = { src: null, v: null };
+  function intrinsicOf(src) {
+    if (!src || src.slice(0, 5) !== 'data:') return null;
+    if (intrinsicMemo.src === src) return intrinsicMemo.v;
+    var v = null;
+    try {
+      var comma = src.indexOf(','), head = src.slice(5, comma), body = src.slice(comma + 1);
+      var b64 = /;base64$/i.test(head);
+      if (/^image\/svg\+xml/i.test(head)) {
+        var t = b64 ? atob(body) : decodeURIComponent(body);
+        var m = /<svg\b[^>]*>/i.exec(t);
+        if (m) {
+          var w = /\swidth\s*=\s*["']?([\d.]+)(px)?["'\s>]/i.exec(m[0]), h = /\sheight\s*=\s*["']?([\d.]+)(px)?["'\s>]/i.exec(m[0]);
+          var vb = /viewBox\s*=\s*["']\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(m[0]);
+          var W = w ? +w[1] : 0, H = h ? +h[1] : 0;
+          if (vb && (!W || !H)) { var vw = +vb[1], vh = +vb[2]; if (!W && !H) { W = vw; H = vh; } else if (!W) W = vh ? H * vw / vh : 0; else H = vw ? W * vh / vw : 0; }
+          if (!W && !H) { W = 300; H = 150; }
+          v = [Math.round(W), Math.round(H)];
+        }
+      } else if (b64) {
+        var bin = atob(body.slice(0, 64));
+        var u8 = function (i) { return bin.charCodeAt(i) & 255; };
+        if (bin.slice(1, 4) === 'PNG') v = [(u8(16) << 24 | u8(17) << 16 | u8(18) << 8 | u8(19)) >>> 0, (u8(20) << 24 | u8(21) << 16 | u8(22) << 8 | u8(23)) >>> 0];
+        else if (bin.slice(0, 3) === 'GIF') v = [u8(6) | u8(7) << 8, u8(8) | u8(9) << 8];
+      }
+    } catch (e) { v = null; }
+    intrinsicMemo.src = src; intrinsicMemo.v = v;
+    return v;
+  }
   class HTMLIFrameElement extends HTMLElement {
     get contentWindow() { return null; }
     get contentDocument() { return null; }
@@ -9102,6 +9147,17 @@
       if (kw === 'unset') { out[name] = INHERITED[name] && parent ? parent[name] : INITIAL[name]; continue; }
       out[name] = computeValue(name, v, ctx, parent, out);
     }
+    // (the animation shorthand and its longhands, kept apart: the one set
+    // later wins. Radix's Collapsible sets animation-name: none inline over
+    // tw-animate's animation: accordion-down to measure its open height,
+    // which came out 0 while the class's animation ran on)
+    if (spec.animation !== undefined) {
+      for (var an in spec) {
+        if (an.slice(0, 10) !== 'animation-' || spec[an] === undefined) continue;
+        if ((sq[an] || 0) < (sq.animation || 0)) delete out[an];
+        else if (an === 'animation-name' && out[an] === 'none') out.animation = 'none';
+      }
+    }
     if (out.display === undefined) out.display = 'inline';
     // the transition shorthand's longhands, as getComputedStyle gives them
     // (Bootstrap waits transitionDuration for a modal's fade)
@@ -12191,6 +12247,10 @@
   // inline position (start, center, end, nearest), within its scroll range.
   // Boxes are the last layout's, in page coordinates before any scroll.
   function scrollIntoView(el, arg) {
+    // (where it is now: cmdk scrolls its selected item into view in the
+    // layout effect after Radix's accordion set its open height, and the
+    // page came out 36 px short of the browser's)
+    if (el.isConnected) reflow();
     var b = el.isConnected ? boxes[el.__id] : null;
     if (!b) return;
     var o = arg === false ? { block: 'end', inline: 'nearest' } : arg && typeof arg === 'object' ? arg : {};
@@ -12221,7 +12281,12 @@
         if (ny !== (n.scrollTop || 0) || nx !== (n.scrollLeft || 0)) { n.scrollTop = ny; n.scrollLeft = nx; scrolled(n); dispatch(n, new Event('scroll')); }
       }
       inner.push(n);
+      // (a fixed box is the viewport's: what is around it and the page do
+      // not move it. Radix Select scrolls its chosen item into view in its
+      // fixed list, and the page jumped)
+      if (nb && n !== doc.documentElement && computedOf(n).position === 'fixed') return;
     }
+    if (computedOf(el).position === 'fixed') return;
     var root = doc && doc.documentElement;
     if (!root || (computedOf(root)['overflow-y'] || '') === 'hidden') return;
     var ry = 0;

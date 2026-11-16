@@ -209,6 +209,14 @@ class RealmTest {
         def got (r.eval("var o = [], b = document.body, $ = function (i) { return document.getElementById(i); }, cs = function (i, p) { return getComputedStyle($(i)).getPropertyValue(p); }, k = function () { __render(); o.push(__styleCheck() === ''); }; k(); var s = document.createElement('style'); s.textContent = 'body[data-lock]{overflow:hidden;--gap:4px}.lock-x{color:rgb(2,2,2)}[data-v]::-webkit-scrollbar{display:none}'; document.head.appendChild(s); k(); o.push(cs('lx', 'color'), cs('u', 'padding-left')); b.setAttribute('data-lock', ''); k(); o.push(cs('u', 'padding-left')); b.style.pointerEvents = 'none'; k(); o.push(cs('lx', 'pointer-events')); b.style.pointerEvents = ''; b.removeAttribute('data-lock'); k(); o.push(cs('lx', 'pointer-events'), cs('u', 'padding-left')); var tr = document.createElement('tr'); tr.id = 'tr2'; tr.innerHTML = '<td>2</td>'; $('tb').appendChild(tr); k(); o.push(cs('tr2', 'color'), $('tb').firstChild.style.color === '' && getComputedStyle($('tb').firstChild).color); $('hx').appendChild(document.createElement('b')); k(); o.push(cs('hx', 'padding-top')); document.head.removeChild(s); k(); o.push(cs('lx', 'color')); document.documentElement.style.color = 'rgb(3,3,3)'; k(); o.push(cs('u', 'color')); o.join()"))
         this.check(("a <style> for some elements, an inherited change, :has() ancestors, an escaped class name (" + got + ")") (got == "true,true,rgb(2, 2, 2),1px,true,4px,true,none,true,auto,1px,true,rgb(7, 7, 7),rgb(0, 0, 0),true,5px,true,rgb(0, 0, 0),true,rgb(3, 3, 3)"))
     }
+    fn detachedImage:void () {
+        def r:DomRealm (this.realm("<html><body><p>i</p></body></html>"))
+        r.runScripts()
+        r.eval("window.__img = []; var svg = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'64\\' height=\\'48\\'/>'); var i = new Image(); i.onload = function () { __img.push('load', i.complete, i.naturalWidth, i.naturalHeight); }; i.src = svg; __img.push(i.complete); var v = new Image(); v.src = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns=\\'http://www.w3.org/2000/svg\\' viewBox=\\'0 0 20 10\\'/>'); __img.push(v.naturalWidth, v.naturalHeight)")
+        r.tick(0.0)
+        def got (r.eval("__img.join()"))
+        this.check(("an image out of the page loads, with its picture's own size (" + got + ")") (got == "false,20,10,load,true,64,48"))
+    }
     fn movedRender:void () {
         def r:DomRealm (this.realm("<html><head><style>.b{position:absolute;width:40px;height:30px}.red{color:rgb(9,0,0)}</style></head><body><div id=w><div class=b id=a style='transform:translate(1px,2px)'>a</div><div class=b id=b style='transform:rotate(3deg);opacity:0.5'><span id=in>in</span>t</div></div></body></html>"))
         r.runScripts()
@@ -235,6 +243,7 @@ class RealmTest {
         this.hasSibling()
         this.styleElement()
         this.scopedStyles()
+        this.detachedImage()
         this.movedRender()
         this.controls()
         print ("passed " + (to_string passes) + ", failed " + (to_string fails))
