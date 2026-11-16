@@ -174,7 +174,7 @@ impl Playground {
                 engine.set_time_zone(name);
             }
         }
-        let synced = Rc::new(std::cell::RefCell::new(Synced { w: 800.0, h: 600.0, last: None, json: String::new(), boxes: String::new(), tree: None, kept: Kept::new() }));
+        let synced = Rc::new(std::cell::RefCell::new(Synced { w: 800.0, h: 600.0, last: None, json: String::new(), boxes: String::new(), tree: None, tree_at: (0.0, 0.0), kept: Kept::new() }));
         engine.vm.set_host_sync(Box::new(SyncLayout { s: synced.clone() }));
         Playground { engine: engine, scripts: Vec::new(), units: Vec::new(), errors: Vec::new(), w: 800.0, h: 600.0, page_json: String::new(), last_gen: String::new(), root: None, lay: None, synced: synced }
     }
@@ -1007,6 +1007,9 @@ struct Synced {
     json: String,
     boxes: String,
     tree: Option<(Rc<RefCell<EVGElement>>, Rc<RefCell<EVGLayout>>)>,
+    /// the viewport tree was laid out at: at another size nothing of it
+    /// is reused, even when the page's render is the same
+    tree_at: (f64, f64),
     kept: Kept,
 }
 
@@ -1014,6 +1017,7 @@ impl Synced {
     /// None: the page is a delta that names a node this host does not
     /// have (the page is asked for whole: __renderDelta(1), "!")
     fn lay_out(&mut self, json: &str) -> Option<(String, Rc<RefCell<EVGElement>>, Rc<RefCell<EVGLayout>>)> {
+        if self.tree_at != (self.w, self.h) { self.tree = None; }
         if let Some((r, l)) = self.tree.clone() {
             if self.json == json {
                 return Some((self.boxes.clone(), r, l));
@@ -1048,6 +1052,7 @@ impl Synced {
         self.json = json.to_string();
         self.boxes = boxes.clone();
         self.tree = Some((root.clone(), lay.clone()));
+        self.tree_at = (self.w, self.h);
         self.last = Some((root.clone(), lay.clone()));
         Some((boxes, root, lay))
     }
