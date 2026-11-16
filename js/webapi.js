@@ -2672,9 +2672,22 @@
     // (the relevant ones: running, paused or filling, Web Animations 1 5.6)
     getAnimations() { return (this._waapi || []).filter(animationRelevant); }
     requestPointerLock() {}
-    setPointerCapture(id) { this._capture = id; }
-    releasePointerCapture(id) { this._capture = undefined; }
-    hasPointerCapture(id) { return this._capture === id; }
+    // (pointer capture, Pointer Events 3 9: the pointer's moves and its
+    // release go to this element wherever the pointer is, until it is
+    // released or the pointer goes up; hostInput routes them)
+    setPointerCapture(id) {
+      if (!this.isConnected) throw new DOMException('The element is not connected', 'InvalidStateError');
+      var d = this.ownerDocument;
+      if (d._cap && d._cap.el !== this) { var was = d._cap.el; d._cap = null; was._capture = undefined; dispatch(was, new PointerEvent('lostpointercapture', { bubbles: true, composed: true, pointerId: id })); }
+      this._capture = id;
+      if (!d._cap) { d._cap = { el: this, id: id }; dispatch(this, new PointerEvent('gotpointercapture', { bubbles: true, composed: true, pointerId: id })); }
+    }
+    releasePointerCapture(id) {
+      var d = this.ownerDocument;
+      this._capture = undefined;
+      if (d._cap && d._cap.el === this) { d._cap = null; dispatch(this, new PointerEvent('lostpointercapture', { bubbles: true, composed: true, pointerId: id })); }
+    }
+    hasPointerCapture(id) { return this._capture === id && !!this.ownerDocument._cap && this.ownerDocument._cap.el === this; }
     toString() { return '[object ' + (this.constructor.name || 'Element') + ']'; }
   }
   mixin(Element, ParentNode);
@@ -12598,6 +12611,11 @@
     // transforms (a node of a zoomed React Flow viewport), the boxes do
     if (m.x !== undefined && (!target || !hittable(target) || (transformedUnder(target) && !under(target, m.x, m.y)))) target = hitTest(m.x, m.y) || target;
     var t = m.type;
+    // (a captured pointer's moves and release go to the capturing element,
+    // wherever the pointer is: a slider's thumb dragged past its track)
+    var cap = doc && doc._cap && doc._cap.el.isConnected ? doc._cap.el : null;
+    if (doc && doc._cap && !cap) { doc._cap.el._capture = undefined; doc._cap = null; }
+    if (cap && (t === 'move' || t === 'up')) target = cap;
     // a release without the host's node ends the press where it began,
     // unless that is in transformed content (where the boxes are the truth)
     if (t === 'up' && m.target === undefined && downTarget && downTarget.isConnected && !transformedUnder(downTarget)) target = downTarget;
@@ -12617,7 +12635,7 @@
       if (picker && target && picker.kind === 'select') { var pmi = pickerItemOf(target); if (pmi && pmi._pickIndex !== undefined && pmi._pickIndex !== picker.at) pickerMark(pmi._pickIndex); }
       if (rangeDrag && rangeDrag.el.isConnected && m.x !== undefined) rangeAt(rangeDrag.el, m.x);
       var over = target || (doc && doc.documentElement);
-      if (over !== hoverEl) {
+      if (over !== hoverEl && !cap) {
         var old = hoverEl;
         hoverEl = over;
         pointerStateChanged(old, over);
@@ -12677,6 +12695,8 @@
       if (rangeDrag) { var rd = rangeDrag; rangeDrag = null; if (rd.el.isConnected && rd.el.value !== rd.from) dispatch(rd.el, new Event('change', { bubbles: true })); }
       dispatch(tgt, new PointerEvent('pointerup', mouseInit(m, { detail: clickCount })));
       dispatch(tgt, new MouseEvent('mouseup', mouseInit(m, { detail: clickCount })));
+      // (the release ends a capture: lostpointercapture after pointerup)
+      if (doc._cap) { var lc = doc._cap.el; doc._cap = null; lc._capture = undefined; if (lc.isConnected) dispatch(lc, new PointerEvent('lostpointercapture', { bubbles: true, composed: true, pointerId: 1 })); }
       var wasActive = activeEl;
       activeEl = null;
       pointerStateChanged(wasActive, null);
