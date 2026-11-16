@@ -5455,6 +5455,10 @@
     }
   }
   function reflow() {
+    // (a script's scroll is drawn at the next frame, but what it reads now
+    // is where the scroll took the box: rows left out that the viewport
+    // reaches now render before the read)
+    if (virts.length && scrollQueue.length && !reflowing) virtCheck(false);
     if (!syncLayout || reflowing || layoutGen === generation || !doc || !doc.documentElement) return;
     reflowing = true;
     try {
@@ -5761,7 +5765,11 @@
       var b = boxes[n.__id];
       if (b) { els.push(n); ls.push(b[0] - sx); ts.push(b[1] - sy); ws.push(b[2]); hs.push(b[3]); }
       var kx = sx + (n._sLeft || 0), ky = sy + (n._sTop || 0), kids = n._c;
-      for (var j = kids.length - 1; j >= 0; j--) { stack.push(kids[j]); sxs.push(kx); sys.push(ky); }
+      // (children left out by virtual rows have no box drawn: none of
+      // their elements is hit, and a box left from an earlier render is
+      // not where they are now)
+      var vp = n._virt && n._virt.plan, von = vp && vp.src.length === kids.length ? vp.on : null;
+      for (var j = kids.length - 1; j >= 0; j--) { if (von && !von[j] && vp.src[j] === kids[j]) continue; stack.push(kids[j]); sxs.push(kx); sys.push(ky); }
     }
     hitFlat = { g: generation, b: boxSeq, s: scrollBumps, d: doc, els: els, ls: ls, ts: ts, ws: ws, hs: hs, orderOf: orderOf };
     return hitFlat;
@@ -10162,7 +10170,12 @@
       return o;
     }
     if (n.localName === 'textarea') src = [];
-    src = paintOrder(src);
+    // (the children far from the viewport, virtWindow, first: their
+    // styles are not looked at for the painting order, they are of a
+    // signature that is not positioned)
+    var vw0 = asJson ? virtWindow(n, cs, src) : null, src0 = src;
+    src = paintOrder(src, vw0);
+    if (vw0 && src !== src0) { virtDrop(n); vw0 = null; }
     // (a replaced element has no ::before or ::after box)
     var leaf = /^(input|textarea|select|img|br|hr|iframe|video|audio)$/.test(n.localName) || !!picUrl;
     if (cs.display !== 'none') ctrApply(cs, n.parentNode, n);
@@ -10184,7 +10197,7 @@
       if (kdj) for (kn0 = 0; kn0 < kids.length; kn0++) kdj.push(kids[kn0]);
       // (the children far from the viewport: runs of them as boxes of
       // their height, virtWindow)
-      var vw = virtWindow(n, cs, src), vrun = -1;
+      var vw = vw0, vrun = -1;
       for (var jj = 0; jj < src.length; jj++) {
         if (vw) {
           if (!vw.on[jj]) { if (vrun < 0) vrun = jj; continue; }
@@ -11197,11 +11210,11 @@
   // host draws in tree order and knows no z-index (React Flow's background
   // comes after its z-index: 2 viewport, a selected node gets 1000). In-flow
   // children keep their order, so the layout does not change.
-  function paintOrder(src) {
+  function paintOrder(src, vw) {
     var keyed = null;
     for (var i = 0; i < src.length; i++) {
       var e = src[i];
-      if (e.nodeType !== 1) continue;
+      if (vw && !vw.on[i] || e.nodeType !== 1) continue;
       var cs = computedOf(e);
       // (one with neither top nor bottom keeps its place: its static
       // position is under the boxes before it)
@@ -11355,9 +11368,21 @@
   // while __virtAgain() says so, before it paints.
   var VIRT_GUESS = 24, virts = [], virtOn = false, virtAgain = false, virtR = { gen: -1 };
   G.__virtRows = function (on) { virtOn = !!on; changed(); return String(virtOn); };
-  var vstat = { sig: 0, plan: 0, again: 0, info: 0, rules: 0, why: [] };
-  G.__virtStats = function () { var o = JSON.stringify(vstat); vstat = { sig: 0, plan: 0, again: 0, info: 0, rules: 0, why: [] }; return o; };
+  var vstat = { sig: 0, plan: 0, base: 0, again: 0, info: 0, rules: 0, why: [] };
+  G.__virtStats = function () { var o = JSON.stringify(vstat); vstat = { sig: 0, plan: 0, base: 0, again: 0, info: 0, rules: 0, why: [] }; return o; };
   G.__virtAgain = function () { var a = virtAgain; virtAgain = false; return a ? '1' : ''; };
+  G.__virtDbg = function () {
+    var o = [];
+    virts.forEach(function (st) {
+      var p = st.plan; if (!p || p.on.length < 100) return;
+      var cnt = {}, mode = 0, mc = 0;
+      p.pitch.forEach(function (v) { cnt[v] = (cnt[v] || 0) + 1; if (cnt[v] > mc) { mc = cnt[v]; mode = v; } });
+      var odd = []; p.pitch.forEach(function (v, i) { if (v !== mode && p.src[i]._attrs !== undefined) odd.push(i + ':' + v); });
+      var runs = [], a = -1; for (var i = 0; i <= p.on.length; i++) { var on = i < p.on.length && p.on[i]; if (on && a < 0) a = i; if (!on && a >= 0) { runs.push(a + '-' + (i - 1)); a = -1; } }
+      o.push('mode ' + mode + ' odd ' + odd.slice(0, 20).join(' ') + ' on ' + runs.join(','));
+    });
+    return o.join(' | ');
+  };
   G.__virtState = function () {
     return JSON.stringify(virts.map(function (st) {
       var k = 0, p = st.plan;
@@ -11514,8 +11539,10 @@
     var out = '', texts = [], els = 0, ok = true;
     (function walk(e, pi) {
       if (!ok) return;
-      var nt = e.nodeType;
-      if (nt === 3 || nt === 4) {
+      var at = e._attrs;
+      if (at === undefined) {
+        var nt = e.nodeType;
+        if (nt !== 3 && nt !== 4) return;
         var t = e._data;
         if (!t) return;
         var tw = virtTextW(t);
@@ -11524,13 +11551,12 @@
         out += '#' + pi;
         return;
       }
-      if (nt !== 1) return;
       // (a child of more than a few hundred elements is no row: a page's
       // table under its wrapper, walked at every render)
       if (els > 300 || e.namespaceURI !== HTML_NS || VIRT_LEAF[e.localName] === 1 || e._sr || e._ab || (e._waapi && e._waapi.length)) { ok = false; return; }
-      var me = els++, s = '<' + e.localName, at = e._attrs;
+      var me = els++, s = '<' + e.localName;
       for (var a = 0; a < at.length; a++) {
-        var nm = at[a].name, v = at[a].value;
+        var nm = at[a].name, v = at[a]._v;
         if (nm === 'class') s += ' class=' + v;
         else if (nm === 'style') { if (v.indexOf('var(') >= 0) { ok = false; return; } s += ' style=' + v; }
         else if (nm === 'id') { if (R.ids[v]) s += ' id=' + v; }
@@ -11558,24 +11584,49 @@
       els.push(x);
       for (var j = 0; j < x._c.length; j++) walk(x._c[j]);
     })(e);
-    var info = { plain: false, W: [], extra: [], blockOf: [], fs: [], bold: [], pre: [] };
+    var info = { plain: false, W: [], extra: [], blockOf: [], fs: [], bold: [], pre: [] }, frow = [], free = [];
     for (var i = 0; i < els.length && ok; i++) {
       var x = els[i], c = computedOf(x), disp = c.display || 'inline';
       var tf = c.transform;
       if ((c.position && c.position !== 'static' && c.position !== 'relative') || (c.float && c.float !== 'none') || (tf && tf !== 'none') || (c.translate && c.translate !== 'none') || (c.rotate && c.rotate !== 'none') || (c.scale && c.scale !== 'none')) ok = false;
       if (c.position === 'relative' && ((c.top && c.top !== 'auto' && virtPx(c.top)) || (c.bottom && c.bottom !== 'auto' && virtPx(c.bottom)))) ok = false;
       if (disp === 'list-item' && c['list-style-position'] === 'inside') ok = false;
-      if (/^(inline-)?(flex|grid)$/.test(disp) || disp === 'contents' || /^ruby/.test(disp) || (c.columns && c.columns !== 'auto auto') || (c['column-count'] && c['column-count'] !== 'auto')) ok = false;
+      // (a flex box of one line, in a row: as high as its highest item,
+      // each item one line while all of them fit side by side)
+      var fx = /^(inline-)?flex$/.test(disp) && /^row/.test(c['flex-direction'] || 'row') && (c['flex-wrap'] || 'nowrap') === 'nowrap';
+      if (fx) frow[i] = 1;
+      if (!fx && /^(inline-)?(flex|grid)$/.test(disp) || disp === 'contents' || /^ruby/.test(disp) || (c.columns && c.columns !== 'auto auto') || (c['column-count'] && c['column-count'] !== 'auto')) ok = false;
       // a rule that depends on the place and changes boxes, where it could match
       for (var r = 0; r < R.pos.length && ok; r++) if (virtMatch(x, R.pos[r].parts, 0, e, reps)) ok = false;
-      var inl = disp === 'inline' || disp === 'inline-block';
       var pi = i === 0 ? -1 : els.indexOf(x.parentNode);
+      var item = pi >= 0 && frow[pi] && disp !== 'none', inl = !item && (disp === 'inline' || disp === 'inline-block');
+      // (a block under an item as wide as its content: not known)
+      if (pi >= 0 && free[pi] && !inl && disp !== 'none') ok = false;
       info.blockOf[i] = inl && pi >= 0 ? info.blockOf[pi] : i;
       info.fs[i] = virtPx(c['font-size']) || 16;
       info.bold[i] = parseInt(c['font-weight'], 10) >= 600;
       info.pre[i] = /^(pre|pre-wrap|pre-line|break-spaces)$/.test(c['white-space'] || '');
       var hor = virtPx(c['padding-left']) + virtPx(c['padding-right']) + virtPx(c['border-left-width']) + virtPx(c['border-right-width']);
-      if (!inl) {
+      if (item) {
+        // an item: its own block when its width is set, else its text is
+        // counted in the flex box's line; the flex box's line holds each
+        // item's outer width and the gaps between them
+        var mar = Math.max(0, virtPx(c['margin-left'])) + Math.max(0, virtPx(c['margin-right']));
+        var fw = /px$/.test(c.width || '') ? c.width : /px$/.test(c['flex-basis'] || '') ? c['flex-basis'] : null;
+        var bb = c['box-sizing'] === 'border-box', pc = computedOf(x.parentNode), gap = virtPx(pc['column-gap'] || pc.gap);
+        var outer = mar + (frow[pi]++ > 1 ? gap : 0);
+        if (fw !== null) {
+          var px = virtPx(fw);
+          info.W[i] = bb ? px - hor : px;
+          outer += bb ? px : px + hor;
+          info.extra[i] = 0;
+        } else {
+          info.blockOf[i] = info.blockOf[pi];
+          free[i] = true;
+          outer += hor;
+        }
+        info.extra[pi] = (info.extra[pi] || 0) + outer;
+      } else if (!inl) {
         var b = boxes[x.__id];
         // (a row of a collapsed table has no box: its cells have)
         if (!b) { if (disp !== 'none' && !/^table-row/.test(disp)) ok = false; info.W[i] = /^table-row/.test(disp) ? Infinity : 0; }
@@ -11620,7 +11671,7 @@
         if (sum < 99.9) return info;
       }
     } else {
-      if (!/^(block|flow-root|list-item|table)$/.test(rc.display) || virtPx(rc['margin-top']) || virtPx(rc['margin-bottom'])) return info;
+      if (!/^(block|flow-root|list-item|table|flex)$/.test(rc.display) || virtPx(rc['margin-top']) || virtPx(rc['margin-bottom'])) return info;
     }
     info.plain = true;
     return info;
@@ -11629,6 +11680,14 @@
   function virtFits(c, info) {
     var t = c._vsg && c._vsg.t;
     if (!t) return false;
+    // (the same texts against the same laid-out child: the same answer)
+    var m = c._vft;
+    if (m && m[0] === t && m[1] === info) return m[2];
+    var r = virtFitsNow(t, info);
+    c._vft = [t, info, r];
+    return r;
+  }
+  function virtFitsNow(t, info) {
     var sum = [];
     for (var i = 0; i < t.length; i++) {
       var pi = t[i][0];
@@ -11682,55 +11741,97 @@
     }
     return t <= u ? [t, u] : null;
   }
-  // which children render: the plan for n's children src now
-  function virtPlan(n, cs, src, st) {
-    vstat.plan++;
-    var R = virtRules(), tbl = cs.display === 'table-row-group', len = src.length;
-    var wk = virtWidth(n), act = doc._active, h = viewport.h, ctx = R.fp + '|' + virtInh(cs);
-    var on = new Array(len), pitch = new Array(len), pos = new Array(len + 1), guess = false, seen = {}, unk = [];
-    var sv = tbl && st.sv ? st.sv : 0;
+  // what the plan knows of each child apart from where the viewport is:
+  // kept while the children, their subtrees, the width, the rules and what
+  // the layouts told (st.ver) are the same, so a scroll over 10 000 rows
+  // does not look into each of them again
+  function virtBase(n, cs, src, st, R, wk, ctx) {
+    var b = st.base, len = src.length, ws = cs['white-space'] || '', i, e;
+    if (b && b.wk === wk && b.ctx === ctx && b.ver === st.ver && b.len === len && b.ws === ws) {
+      for (i = 0; i < len; i++) { e = src[i]; if (b.src[i] !== e || b.rv[i] !== (e._attrs !== undefined ? e._rv : e._data)) break; }
+      if (i === len) { vstat.base++; return b; }
+    }
+    var cull = new Array(len), pitch = new Array(len), pos = new Array(len + 1), unk = [], sigs = new Array(len), rv = new Array(len), seen = {}, guess = false;
     // (the guess for a child of no known height: one of the known ones)
-    var g = VIRT_GUESS;
+    var g = VIRT_GUESS, tk = '|' + wk + '|' + ctx, tried = st.tried[tk];
     for (var rk in st.refs) { g = st.refs[rk].pitch; break; }
-    var top = st.top !== null ? st.top : (boxes[n.__id] ? boxes[n.__id][1] : null);
-    var y0 = top === null ? null : scrollAbove(n) - top;
     pos[0] = 0;
-    for (var i = 0; i < len; i++) {
-      var e = src[i], p = -1, cull = false;
-      if (e.nodeType !== 1) {
+    for (i = 0; i < len; i++) {
+      e = src[i];
+      var p = -1, cu = false;
+      if (e._attrs === undefined) {
+        rv[i] = e._data;
         // (white space between the rows: nothing; anything else: all of them)
-        if ((e.nodeType === 3 || e.nodeType === 4) && !/[^ \t\n\r\f]/.test(e._data) && !/^pre|^break/.test(cs['white-space'] || '')) { on[i] = false; pitch[i] = 0; pos[i + 1] = pos[i]; continue; }
+        if ((e.nodeType === 3 || e.nodeType === 4) && !/[^ \t\n\r\f]/.test(e._data) && !/^pre|^break/.test(ws)) { cull[i] = true; pitch[i] = 0; pos[i + 1] = pos[i]; sigs[i] = null; continue; }
+        st.base = null;
         return null;
       }
+      rv[i] = e._rv;
       var sig = virtSig(e, R), ref = sig !== null ? st.refs[sig] : null;
+      sigs[i] = sig;
       if (ref && (ref.wk !== wk || ref.ctx !== ctx)) ref = null;
-      if (e._vp !== undefined && e._vpk === e._rv + '|' + wk + '|' + ctx) p = e._vp;
-      if (ref && ref.info.plain && virtFits(e, ref.info)) { cull = true; if (p < 0) p = ref.pitch; }
+      if (e._vp !== undefined && e._vpr === e._rv && e._vpk === tk) p = e._vp;
+      if (ref && ref.info.plain && virtFits(e, ref.info)) { cu = true; if (p < 0) p = ref.pitch; }
       else if (sig !== null && !ref) {
         // (none of its kind laid out yet: the first two render, the
         // others are guessed until they are)
         var sn = seen[sig] = (seen[sig] || 0) + 1;
-        if (sn > 2 && !st.tried[sig + '|' + wk + '|' + ctx]) { cull = true; guess = true; if (p < 0) p = g; }
+        if (sn > 2 && !(tried && tried[sig])) { cu = true; guess = true; if (p < 0) p = g; }
       }
       if (p < 0) { p = g; guess = true; unk[i] = true; }
-      if (cull && (st.pins.indexOf(e) >= 0 || (act && act !== e && e.contains(act)) || act === e)) cull = false;
-      on[i] = !cull;
+      cull[i] = cu;
       e._vpi = i;
       pitch[i] = p;
       pos[i + 1] = pos[i] + p;
     }
+    b = st.base = { wk: wk, ctx: ctx, ver: st.ver, len: len, ws: ws, src: src.slice(), rv: rv, cull: cull, pitch: pitch, pos: pos, unk: unk, sigs: sigs, guess: guess };
+    return b;
+  }
+  function virtSameKids(a, b) {
+    if (a === b) return true;
+    if (a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+  // which children render: the plan for n's children src now
+  function virtPlan(n, cs, src, st) {
+    vstat.plan++;
+    var R = virtRules(), tbl = cs.display === 'table-row-group', len = src.length, i;
+    var wk = virtWidth(n), act = doc._active, h = viewport.h, ctx = R.fp + '|' + virtInh(cs);
+    var sv = tbl && st.sv ? st.sv : 0;
+    var base = virtBase(n, cs, src, st, R, wk, ctx);
+    if (!base) return null;
+    var pitch = base.pitch, pos = base.pos, guess = base.guess, unk = base.unk, on = new Array(len);
+    for (i = 0; i < len; i++) on[i] = !base.cull[i];
+    // (a child a script asked the geometry of, and the one holding the
+    // focused element: rendered)
+    for (i = 0; i < st.pins.length; i++) { var pe = st.pins[i]; if (src[pe._vpi] === pe) on[pe._vpi] = true; }
+    if (act) { for (var q = act; q && q.parentNode !== n; q = q.parentNode); if (q && src[q._vpi] === q) on[q._vpi] = true; }
+    var top = st.top !== null ? st.top : (boxes[n.__id] ? boxes[n.__id][1] : null);
+    var y0 = top === null ? null : scrollAbove(n) - top;
+    // (the children rendered last still cover the viewport and half a
+    // viewport either way: the same ones, so that a scroll renders the
+    // rows again only every half viewport, not at each wheel turn)
+    var last = st.plan;
+    if (y0 !== null && last && last.wk === wk && virtSameKids(last.src, src)) {
+      var lo2 = y0 - h / 2, hi2 = y0 + 1.5 * h, keep = true;
+      for (i = 0; i < len && keep; i++) if (!last.on[i] && pos[i + 1] > lo2 && pos[i] < hi2 && src[i]._attrs !== undefined) keep = false;
+      if (keep) { for (i = 0; i < len; i++) if (last.on[i]) on[i] = true; }
+      else last = null;
+    } else last = null;
     // near the viewport: a viewport above it to one below
-    if (y0 !== null) {
+    if (last) {}
+    else if (y0 !== null) {
       var lo = y0 - h, hi = y0 + 2 * h;
-      for (i = 0; i < len; i++) if (!on[i] && src[i].nodeType === 1 && pos[i + 1] > lo && pos[i] < hi) on[i] = true;
+      for (i = 0; i < len; i++) if (!on[i] && pos[i + 1] > lo && pos[i] < hi && src[i]._attrs !== undefined) on[i] = true;
     } else {
       // (where the box is not known yet: its first viewports, by the guess)
-      for (i = 0; i < len && pos[i] < 2 * h; i++) if (src[i].nodeType === 1) on[i] = true;
+      for (i = 0; i < len && pos[i] < 2 * h; i++) if (src[i]._attrs !== undefined) on[i] = true;
       guess = true;
     }
     // (a rendered child of no known pitch: the next one renders too, so
     // that the layout gives its pitch)
-    for (i = 0; i < len; i++) if (on[i] && unk[i]) for (var nk = i + 1; nk < len; nk++) if (src[nk].nodeType === 1) { on[nk] = true; break; }
+    for (i in unk) { i = +i; if (on[i]) for (var nk = i + 1; nk < len; nk++) if (src[nk]._attrs !== undefined) { on[nk] = true; break; } }
     // the runs left out, as their heights: what the plan is known by
     var runs = [], a = -1;
     for (i = 0; i <= len; i++) {
@@ -11738,7 +11839,7 @@
       if (off && a < 0) a = i;
       if (!off && a >= 0) { runs.push(a + ':' + i + ':' + Math.round((pos[i] - pos[a]) * 100)); a = -1; }
     }
-    return { on: on, pitch: pitch, pos: pos, guess: guess, wk: wk, sv: sv, key: runs.join(','), tbl: tbl, src: src.slice(), cs: cs };
+    return { on: on, pitch: pitch, pos: pos, guess: guess, wk: wk, sv: sv, key: runs.join(','), tbl: tbl, src: base.src, cs: cs, base: base };
   }
   // the spacer for children [a, b) of the plan
   function virtSpacer(plan, a, b) {
@@ -11761,7 +11862,7 @@
     // (under a transform the viewport is not where the boxes say)
     for (var q = n; q && q.nodeType === 1; q = q.parentNode) { var qc = computedOf(q), tf = qc.transform; if ((tf && tf !== 'none') || (qc.zoom && qc.zoom !== '1' && qc.zoom !== 'normal')) return virtDrop(n); }
     var st = n._virt;
-    if (!st) { st = n._virt = { el: n, top: null, refs: {}, tried: {}, pins: [], plan: null, sv: 0, why: '' }; virts.push(st); }
+    if (!st) { st = n._virt = { el: n, top: null, refs: {}, tried: {}, pins: [], plan: null, base: null, ver: 0, sv: 0, why: '' }; virts.push(st); }
     if (tbl) { var tb = n.parentNode && n.parentNode.nodeType === 1 ? computedOf(n.parentNode) : null; st.sv = tb && tb['border-collapse'] !== 'collapse' ? virtPx(String(tb['border-spacing'] || '0').split(/\s+/).pop()) : 0; }
     var plan = virtPlan(n, cs, src, st);
     if (!plan) return virtDrop(n);
@@ -11776,49 +11877,55 @@
       if (!plan) continue;
       var again = false, src = plan.src, len = src.length, R = virtRules();
       if (measure) {
-        var wk = virtWidth(n), bands = new Array(len), j, reps = [], rseen = {}, ctx = R.fp + '|' + virtInh(computedOf(n));
+        var wk = virtWidth(n), bands = new Array(len), j, reps = [], rseen = {}, ctx = R.fp + '|' + virtInh(computedOf(n)), tk = '|' + wk + '|' + ctx;
         // (the others of the box, one of each signature)
+        var sigs = plan.base && plan.base.src === src ? plan.base.sigs : null;
         for (j = 0; j < len && !reps.over; j++) {
           var se = src[j];
-          if (se.nodeType !== 1) continue;
-          var ss = virtSig(se, R);
+          if (se._attrs === undefined) continue;
+          var ss = sigs ? sigs[j] : virtSig(se, R);
           if (ss !== null && rseen[ss]) continue;
           if (ss !== null) rseen[ss] = true;
           reps.push(se);
           if (reps.length > 40) reps.over = true;
         }
-        for (j = 0; j < len; j++) if (plan.on[j] && src[j].nodeType === 1) bands[j] = virtBand(src[j]);
+        for (j = 0; j < len; j++) if (plan.on[j] && src[j]._attrs !== undefined) bands[j] = virtBand(src[j]);
         // where the box starts: a rendered child's top less what is above it
         st.top = null;
         for (j = 0; j < len; j++) if (bands[j]) { st.top = bands[j][0] - plan.pos[j]; break; }
         if (st.top === null && boxes[n.__id]) st.top = boxes[n.__id][1];
         // each rendered child's pitch: to the next one's top, or its height
         for (j = 0; j < len; j++) {
+          if (!plan.on[j]) continue;
           var bd = bands[j], e = src[j];
-          if (e.nodeType !== 1 || !plan.on[j]) continue;
-          var sig = virtSig(e, R);
-          if (sig !== null) st.tried[sig + '|' + wk + '|' + ctx] = true;
+          if (e._attrs === undefined) continue;
+          var sig = virtSig(e, R), same = e._vpr === e._rv && e._vpk === tk;
+          if (sig !== null) { var tr = st.tried[tk] || (st.tried[tk] = {}); if (!tr[sig]) { tr[sig] = true; st.ver++; } }
           // (nothing laid out: nothing to its height)
-          if (!bd) { if (!boxes[e.__id]) { e._vp = 0; e._vpk = e._rv + '|' + wk + '|' + ctx; } continue; }
+          if (!bd) { if (!boxes[e.__id] && (e._vp !== 0 || !same)) { e._vp = 0; e._vpr = e._rv; e._vpk = tk; st.ver++; } continue; }
           var nx = -1;
-          for (var k = j + 1; k < len; k++) { if (!plan.on[k]) break; if (src[k].nodeType === 1) { nx = k; break; } }
+          for (var k = j + 1; k < len; k++) { if (!plan.on[k]) break; if (src[k]._attrs !== undefined) { nx = k; break; } }
           // (the last before a run left out: its height is not its pitch in
           // a collapsed table, the border below it is shared; the plan
           // renders the next one too while its pitch is not known)
           var p = nx >= 0 && bands[nx] ? bands[nx][0] - bd[0] : nx < 0 && k >= len ? bd[1] - bd[0] + st.sv : -1;
+          // (the first after a run left out, in a table: the border above
+          // it is not shared with a row as it is in the full table, so the
+          // top of its band is not where it is there)
+          if (p >= 0 && plan.tbl) { for (var pv = j - 1; pv >= 0 && src[pv]._attrs === undefined; pv--); if (pv >= 0 && !plan.on[pv]) p = -1; }
           if (p < 0) continue;
-          e._vp = p;
-          e._vpk = e._rv + '|' + wk + '|' + ctx;
+          if (e._vp !== p || !same) { e._vp = p; e._vpr = e._rv; e._vpk = tk; st.ver++; }
           if (sig === null) continue;
           var ref = st.refs[sig];
           if (!ref || ref.wk !== wk || ref.ctx !== ctx || !ref.info.plain) {
             var info = virtRefInfo(e, R, plan.tbl, reps);
-            if (!ref || ref.wk !== wk || ref.ctx !== ctx || info.plain && virtFits(e, info)) st.refs[sig] = { pitch: p, wk: wk, ctx: ctx, info: info, rel: virtRel(e, bd[0]) };
+            if (!ref || ref.wk !== wk || ref.ctx !== ctx || info.plain && virtFits(e, info)) { st.refs[sig] = { pitch: p, wk: wk, ctx: ctx, info: info, rel: virtRel(e, bd[0]) }; st.ver++; }
           }
         }
       }
-      // the plan again from what is known now
-      var np = virtPlan(n, plan.cs, src, st);
+      // the plan again from what is known now (a scroll changes nothing
+      // that the plan is made of: no plan again for it)
+      var np = measure ? virtPlan(n, plan.cs, src, st) : plan;
       if (!np) again = true;
       // (the same runs of the same heights: the render would be the same)
       else if (measure) again = np.key !== plan.key;
@@ -11826,7 +11933,7 @@
         // (a scroll: only when the viewport, half a viewport either way,
         // reaches a child left out)
         var y0 = st.top === null ? 0 : scrollAbove(n) - st.top, lo = y0 - viewport.h / 2, hi = y0 + 1.5 * viewport.h;
-        for (j = 0; j < len && !again; j++) if (!plan.on[j] && src[j].nodeType === 1 && plan.pos[j + 1] > lo && plan.pos[j] < hi) again = true;
+        for (j = 0; j < len && !again; j++) if (!plan.on[j] && plan.pos[j + 1] > lo && plan.pos[j] < hi && src[j]._attrs !== undefined) again = true;
       }
       if (again) {
         st.why = measure ? 'layout' : 'scroll';
