@@ -2341,7 +2341,7 @@
       var w = 'medium', st = 'none', c = 'currentcolor';
       var toks = splitValue(v);
       for (var t = 0; t < toks.length; t++) {
-        if (BORDER_STYLES.test(toks[t])) st = toks[t];
+        if (BORDER_STYLES.test(toks[t]) || (n === 'outline' && toks[t] === 'auto')) st = toks[t];
         else if (isLength(toks[t])) w = toks[t];
         else c = toks[t];
       }
@@ -3538,8 +3538,17 @@
   }
   class HTMLDialogElement extends HTMLElement {
     show() { this.open = true; }
-    showModal() { this.open = true; this._modal = true; topAdd(this); }
-    close(rv) { if (!this.open) return; if (this._modal) { this._modal = false; topRemove(this); } this.open = false; this.returnValue = rv === undefined ? this.returnValue : String(rv); var self = this; setTimeout(function () { dispatch(self, new Event('close')); }, 0); }
+    showModal() {
+      if (this.open && this._modal) return;
+      this.open = true; this._modal = true; topAdd(this);
+      this._returnFocus = doc && doc._active;
+      // dialog focusing steps: autofocus, else the first focusable, else the dialog
+      var inside = [];
+      tabWalk(this, inside, true);
+      var af = inside.filter(function (e) { return e.hasAttribute('autofocus'); })[0] || inside[0];
+      if (af) focusElement(af); else if (doc && doc._active && !composedContains(this, doc._active)) focusElement(null);
+    }
+    close(rv) { if (!this.open) return; if (this._modal) { this._modal = false; topRemove(this); } this.open = false; this.returnValue = rv === undefined ? this.returnValue : String(rv); var rf = this._returnFocus; this._returnFocus = null; if (rf && rf.isConnected && doc && (!doc._active || composedContains(this, doc._active))) focusElement(rf, { preventScroll: true }); var self = this; setTimeout(function () { dispatch(self, new Event('close')); }, 0); }
   }
   reflectBool(HTMLDialogElement, ['open']);
   class HTMLDetailsElement extends HTMLElement {}
@@ -4629,17 +4638,57 @@
     if (!el || el.nodeType !== 1 || !el.isConnected) return false;
     if (el.disabled) return false;
     if (el.hasAttribute('tabindex') || focusableByDefault(el)) {
-      for (var n = el; n && n.nodeType === 1; n = n.parentNode) {
+      for (var n = el; n && n.nodeType === 1; n = composedParent(n)) {
         if (n.hasAttribute('inert')) return false;
         if (computedOf(n).display === 'none') return false;
       }
+      if (blockedByModal(el)) return false;
       return computedOf(el).visibility !== 'hidden';
     }
     return false;
   }
+  // the parent in the composed tree: a shadow root's child goes on to its host
+  function composedParent(n) {
+    var p = n.parentNode;
+    return p && p.nodeType === 11 && p.host ? p.host : p;
+  }
+  function composedContains(a, n) {
+    for (; n; n = composedParent(n)) if (n === a) return true;
+    return false;
+  }
+  // an open modal dialog makes everything outside it inert (HTML 6.2,
+  // "blocked by a modal dialog"): the topmost one in the top layer
+  function topModal() {
+    for (var i = topLayer.length - 1; i >= 0; i--) { var t = topLayer[i]; if (t._modal && t.isConnected) return t; }
+    return null;
+  }
+  function blockedByModal(el) {
+    var m = topModal();
+    if (!m) return false;
+    if (composedContains(m, el)) return false;
+    // (what a popover or another top-layer box above the dialog holds is not blocked)
+    for (var i = topLayer.indexOf(m) + 1; i < topLayer.length; i++) if (composedContains(topLayer[i], el)) return false;
+    return true;
+  }
+  // a host whose shadow root delegates focus: the first focusable element
+  // in its shadow tree, in sequential order, takes the focus (HTML 6.6.4)
+  function delegateTarget(host) {
+    var out = [];
+    tabWalk(host._sr, out, true);
+    for (var i = 0; i < out.length; i++) if (out[i].hasAttribute('autofocus')) return out[i];
+    return out[0] || null;
+  }
   function focusElement(el, opts) {
     if (!doc) return;
+    if (el && el._sr && el._sr.delegatesFocus) {
+      var a = doc._active;
+      // (the focus already in its shadow tree stays where it is)
+      if (a && a !== el && composedContains(el, a)) return;
+      var dt = delegateTarget(el);
+      if (dt) el = dt;
+    }
     if (el && !focusable(el)) return;
+    if (opts && opts.focusVisible !== undefined) doc._focusVisible = !!opts.focusVisible;
     var old = doc._active && doc._active.isConnected ? doc._active : null;
     if (old === el) return;
     if (old) {
@@ -4653,14 +4702,37 @@
     doc._active = el;
     if (el) el._dirty = false;
     pointerStateChanged(old, el, true);
+    // (the focused element is scrolled into view unless the caller says
+    // not to; Chromium centers it when it is not already in view)
+    if (el && !(opts && opts.preventScroll)) { try { scrollIntoView(el, { block: 'if-needed', inline: 'if-needed' }); } catch (e) {} }
     if (el) {
       dispatch(el, new FocusEvent('focus', { relatedTarget: old, view: G }));
       dispatch(el, new FocusEvent('focusin', { bubbles: true, relatedTarget: old, view: G }));
     }
   }
+  // sequential focus order (HTML 6.6.3): the flat tree, a host's shadow
+  // tree where the host is, a slot's assigned nodes where the slot is; a
+  // host that delegates focus is not a stop of its own
+  function tabWalk(n, out, all) {
+    var kids = n._c;
+    for (var i = 0; i < kids.length; i++) {
+      var k = kids[i];
+      if (k._attrs === undefined) continue;
+      if (k.localName === 'slot' && shadowRootOf(k)) {
+        var f = flatten(k, []);
+        for (var j = 0; j < f.length; j++) if (f[j]._attrs !== undefined) tabVisit(f[j], out, all);
+        continue;
+      }
+      tabVisit(k, out, all);
+    }
+  }
+  function tabVisit(e, out, all) {
+    if (!(e._sr && e._sr.delegatesFocus) && focusable(e) && (all || e.tabIndex >= 0)) out.push(e);
+    tabWalk(e._sr || e, out, all);
+  }
   function tabOrder() {
     var out = [];
-    if (doc) eachElement(doc, function (e) { if (focusable(e) && e.tabIndex >= 0) out.push(e); });
+    if (doc) tabWalk(doc, out, false);
     var pos = out.filter(function (e) { return e.tabIndex > 0; }).sort(function (a, b) { return a.tabIndex - b.tabIndex; });
     return pos.concat(out.filter(function (e) { return e.tabIndex === 0; }));
   }
@@ -6472,7 +6544,7 @@
       case 'target': return false;
       case 'defined': return true;
       case 'focus': return !!doc && (doc._active === el || (shadowCount && !!el._sr && focusInShadow(el)));
-      case 'focus-visible': return !!doc && doc._active === el && doc._focusVisible !== false;
+      case 'focus-visible': return !!doc && doc._active === el && (doc._focusVisible !== false || textEntry(el));
       case 'focus-within':
         if (!doc || !doc._active) return false;
         if (!shadowCount) return el.contains(doc._active);
@@ -7330,6 +7402,7 @@
     'input,textarea,select{background-color:rgb(255,255,255);border:2px inset rgb(118,118,118)}input{padding:1px 2px}textarea{padding:2px;white-space:pre-wrap}button,input[type=button],input[type=submit],input[type=reset]{padding:1px 6px;border:2px outset rgb(118,118,118);background-color:rgb(239,239,239);text-align:center;cursor:default}input[type=hidden]{display:none}input[type=color]{width:50px;height:27px;padding:1px 2px;border:1px solid rgb(118,118,118);border-radius:2px;background-color:rgb(239,239,239)}input[type=range]{width:129px;height:16px;margin:2px;padding:0;border:0;background-color:transparent}input[type=file]{padding:0;border:0;background-color:transparent}input[type=checkbox]{margin:3px 3px 3px 4px}input[type=radio]{margin:3px 3px 0 5px}button:disabled,input[type=button]:disabled,input[type=submit]:disabled,input[type=reset]:disabled{color:rgba(16,16,16,0.3);border-color:rgba(118,118,118,0.3);background-color:rgba(239,239,239,0.3)}button,select,input[type=button],input[type=submit],input[type=reset],input[type=color],input[type=checkbox],input[type=radio]{box-sizing:border-box}',
     'img,svg,video,canvas,iframe,embed,object{display:inline-block}svg:not(:root){overflow:hidden}iframe{border:2px inset rgb(118,118,118)}fieldset{margin-left:2px;margin-right:2px;padding:.35em .75em .625em;border:2px groove rgb(192,192,192)}legend{padding-left:2px;padding-right:2px}',
     '[dir=rtl]{direction:rtl}[dir=ltr]{direction:ltr}',
+    ':focus-visible{outline:auto 1px rgb(16,16,16)}',
     '[popover]:not(:popover-open):not(dialog[open]){display:none}[popover]{position:fixed;inset:0;width:fit-content;height:fit-content;margin:auto;border:solid;padding:.25em;overflow:auto;color:black;background-color:white}dialog:modal{position:fixed;top:0;bottom:0;max-width:calc(100% - 6px - 2em);max-height:calc(100% - 6px - 2em);overflow:auto}',
     'dialog:not([open]){display:none}dialog{position:absolute;left:0;right:0;width:fit-content;height:fit-content;margin:auto;border:solid;padding:1em;background-color:white;color:black}mark{background-color:yellow;color:black}center{text-align:center}'
   ].join('\n');
@@ -9654,6 +9727,8 @@
       // the padding box over the background: the host draws no shadows, so
       // it is the background it makes
       if (s['box-shadow'] && s['box-shadow'].indexOf('inset') >= 0) insetFill(s);
+      // the outer layers as the host draws them: rings and one drop shadow
+      if (s['box-shadow'] && s['box-shadow'] !== 'none') shadowLayers(s, cs.color);
       var own = {};
       for (var ok in s) own[ok] = s[ok];
       Object.defineProperty(cs, '_own', { value: own, enumerable: false, configurable: true, writable: true });
@@ -10599,6 +10674,33 @@
   // calc() of % and px terms only, with numbers multiplying them, as one
   // value: `calc(50% - 30%*.5)` is 35% (the host reads one % and one px
   // term at most); anything else as it was
+  // box-shadow's outer layers for the host (it draws no CSS shadows):
+  // "box-ring" the layers with no offset and no blur but a spread, as a
+  // focus ring is (Bootstrap's 0 0 0 .25rem, Tailwind's ring-*), "spread
+  // rgba(...)" by ", " topmost first; "box-drop" the first blurred or
+  // offset one, "dx dy blur rgba(...)" (EVG has one shadow per box)
+  function shadowLayers(s, color) {
+    var layers = splitComma(s['box-shadow']), rings = [], drop = null;
+    for (var i = 0; i < layers.length; i++) {
+      var toks = splitValue(layers[i]), lens = [], col = null, inset = false;
+      for (var j = 0; j < toks.length; j++) {
+        var t = toks[j];
+        if (t === 'inset') { inset = true; continue; }
+        if (/^calc\(/.test(t)) t = flatCalc(t);
+        if (/^-?[\d.]+(px)?$/.test(t)) { lens.push(parseFloat(t)); continue; }
+        col = t;
+      }
+      if (inset || lens.length < 2) continue;
+      var c = colorRGBA(!col || col === 'currentcolor' ? color || 'rgb(0, 0, 0)' : col);
+      if (!c || !(c[3] > 0)) continue;
+      var rgba = 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + (Math.round(c[3] * 1000) / 1000) + ')';
+      var dx = lens[0], dy = lens[1], blur = lens[2] || 0, spread = lens[3] || 0;
+      if (!dx && !dy && !blur) { if (spread > 0) rings.push(fmtPx(spread) + ' ' + rgba); }
+      else if (!drop) drop = fmtPx(dx) + ' ' + fmtPx(dy) + ' ' + fmtPx(blur) + ' ' + rgba;
+    }
+    if (rings.length) s['box-ring'] = rings.join(', ');
+    if (drop) s['box-drop'] = drop;
+  }
   function insetFill(s) {
     var v = s['box-shadow'].trim(), m = /^inset\s+(.*)$/.exec(v) || /^(.*?)\s+inset$/.exec(v);
     if (!m || v.indexOf(',', v.lastIndexOf(')') + 1) >= 0) return;
@@ -11852,6 +11954,16 @@
     return found;
   }
   function elementOf(n) { while (n && n.nodeType !== 1) n = n.parentNode; return n; }
+  // the pointer's cursor over the hovered element (CSS UI 4 cursor; auto is
+  // text over a text field or text, default elsewhere, as a host draws it)
+  G.__cursor = function () {
+    var e = hoverEl;
+    if (!e || !e.isConnected) return 'default';
+    var c = String(computedOf(e).cursor || 'auto').split(',').pop().trim();
+    if (c !== 'auto') return c;
+    if (textEntry(e)) return 'text';
+    return 'default';
+  };
   var clickCount = 0, lastDown = 0, downTarget = null;
   function mods(m) { return { ctrlKey: !!m.ctrl, shiftKey: !!m.shift, altKey: !!m.alt, metaKey: !!m.meta }; }
   function mouseInit(m, extra) {
@@ -11874,6 +11986,16 @@
     if (t === 'up' && m.target === undefined && downTarget && downTarget.isConnected && !transformedUnder(downTarget)) target = downTarget;
     // a press, release or key is a user gesture (window.open may follow)
     if ((t === 'down' || t === 'up' || t === 'key') && typeof G.__activate === 'function') G.__activate();
+    if (t === 'leave') {
+      // the pointer left the host's view: nothing is hovered
+      if (hoverEl) {
+        var gone = hoverEl;
+        hoverEl = null;
+        pointerStateChanged(gone, null);
+        if (gone.isConnected) { dispatch(gone, new PointerEvent('pointerout', mouseInit(m, {}))); dispatch(gone, new MouseEvent('mouseout', mouseInit(m, {}))); leaveEnter(gone, null, m); }
+      }
+      return 'ok';
+    }
     if (t === 'move') {
       if (picker && target && picker.kind === 'select') { var pmi = pickerItemOf(target); if (pmi && pmi._pickIndex !== undefined && pmi._pickIndex !== picker.at) pickerMark(pmi._pickIndex); }
       if (rangeDrag && rangeDrag.el.isConnected && m.x !== undefined) rangeAt(rangeDrag.el, m.x);
@@ -11914,7 +12036,7 @@
       if (okm) {
         // focus moves to the focusable element under the pointer
         var f = target;
-        while (f && f.nodeType === 1 && !focusable(f)) f = f.parentNode;
+        while (f && f.nodeType === 1 && !focusable(f) && !(f._sr && f._sr.delegatesFocus)) f = composedParent(f);
         doc._focusVisible = false;
         if (f && f.nodeType === 1) focusElement(f); else if (doc._active) focusElement(null);
         // (a select opens its option list)
@@ -12051,6 +12173,7 @@
       if (how === 'start') t = start;
       else if (how === 'end') t = start + size - view;
       else if (how === 'center') t = start + size / 2 - view / 2;
+      else if (how === 'if-needed') t = start < cur || start + size > cur + view ? start + size / 2 - view / 2 : cur;
       else if (start < cur) t = size > view ? start + size - view : start;
       else if (start + size > cur + view) t = size > view ? start : start + size - view;
       else t = cur;
@@ -12058,7 +12181,7 @@
     }
     // scroll between el and the container (what the inner containers moved)
     var inner = [];
-    for (var n = el.parentNode; n && n.nodeType === 1; n = n.parentNode) {
+    for (var n = composedParent(el); n && n.nodeType === 1; n = composedParent(n)) {
       var nb = boxes[n.__id];
       if (n === doc.documentElement || !nb) { inner.push(n); continue; }
       var cs = computedOf(n), oy = cs['overflow-y'] || 'visible', ox = cs['overflow-x'] || 'visible';
@@ -12076,7 +12199,7 @@
     var root = doc && doc.documentElement;
     if (!root || (computedOf(root)['overflow-y'] || '') === 'hidden') return;
     var ry = 0;
-    for (var m = el.parentNode; m && m.nodeType === 1 && m !== root; m = m.parentNode) ry += m.scrollTop || 0;
+    for (var m = composedParent(el); m && m.nodeType === 1 && m !== root; m = composedParent(m)) ry += m.scrollTop || 0;
     var dtop = pos(b[1] - ry, b[3], viewport.h, root.scrollTop || 0, block, Math.max(0, pageHeight() - viewport.h));
     if (dtop !== (root.scrollTop || 0)) { root.scrollTop = dtop; scrolled(root); dispatch(doc, new Event('scroll')); }
   }
@@ -12127,6 +12250,8 @@
     if (k === ' ') return 'Space';
     return k;
   }
+  // a control a press focuses with :focus-visible (it takes typed text)
+  function textEntry(el) { return isTextControl(el) || !!(el && el.isContentEditable); }
   function isTextControl(el) {
     if (!el) return false;
     if (el.localName === 'textarea') return true;
@@ -12230,11 +12355,22 @@
   }
   function keyDefault(el, m) {
     var k = m.key;
+    // (Escape cancels the topmost modal dialog: cancel, then close)
+    if (k === 'Escape' && !picker) {
+      var md = topModal();
+      if (md) { if (dispatch(md, new Event('cancel', { cancelable: true }))) md.close(); return; }
+    }
     if (picker && picker.kind !== 'select' && (k === 'Escape' || k === 'Enter' || k === 'Tab')) { pickerClose(); if (k !== 'Tab') return; }
     if (k === 'Tab') {
       var order = tabOrder();
       if (!order.length) return;
       var i = order.indexOf(el);
+      // (from an element that is no stop, a host's inner one or a
+      // tabindex=-1 box: the stop it is in, else the next one after it)
+      if (i < 0 && el && el.nodeType === 1 && el !== doc.body) {
+        for (var q = 0; q < order.length; q++) if (composedContains(order[q], el) || composedContains(el, order[q])) { i = q; break; }
+        if (i < 0) { for (q = 0; q < order.length; q++) if (el.compareDocumentPosition && (el.compareDocumentPosition(order[q]) & 4)) break; i = m.shift ? q : q - 1; }
+      }
       var next = m.shift ? order[(i <= 0 ? order.length : i) - 1] : order[(i + 1) % order.length];
       focusElement(next);
       return;

@@ -807,8 +807,17 @@ for (const [evName, type] of [["pointerdown", "down"], ["pointerup", "up"], ["po
     // (what the press asked of the host, a file chooser, in the press's own
     // task: browsers open a chooser only from a user gesture)
     if (type !== "move") drain();
+    // (the page's cursor: the CSS cursor of what the pointer is over)
+    const cur = pg.eval("__cursor()");
+    if (cur && canvas.style.cursor !== cur) canvas.style.cursor = cur;
   });
 }
+// the pointer leaving the canvas leaves the page: :hover ends there too
+canvas.addEventListener("pointerleave", () => {
+  if (!pg || busy) return;
+  pg.input(JSON.stringify({ type: "leave" }));
+  canvas.style.cursor = "";
+});
 // the wheel scrolls the page in RangerDOM (webapi.js: wheel event, then
 // the scroll of the box under the pointer), keys go to its focused element
 canvas.addEventListener("wheel", (ev) => {
