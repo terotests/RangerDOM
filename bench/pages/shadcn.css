@@ -1,5 +1,6 @@
 /* Tailwind v4 + shadcn/ui's theme (new-york, neutral; MIT, ui.shadcn.com) */
 @import "tailwindcss";
+@import "tw-animate-css";
 @source "./shadcn.jsx";
 @custom-variant dark (&:is(.dark *));
 :root {
@@ -25,6 +26,10 @@
   --color-accent: var(--accent); --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
   --color-border: var(--border); --color-input: var(--input); --color-ring: var(--ring);
+  --animate-accordion-down: accordion-down 0.2s ease-out; --animate-accordion-up: accordion-up 0.2s ease-out; --animate-caret-blink: caret-blink 1.25s ease-out infinite;
+  @keyframes accordion-down { from { height: 0; } to { height: var(--radix-accordion-content-height); } }
+  @keyframes accordion-up { from { height: var(--radix-accordion-content-height); } to { height: 0; } }
+  @keyframes caret-blink { 0%,70%,100% { opacity: 1; } 20%,50% { opacity: 0; } }
 }
 @layer base {
   * { @apply border-border outline-ring/50; }

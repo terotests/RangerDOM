@@ -4105,8 +4105,12 @@ impl DomView {
         }
         // (a scrolled box's children are laid out where its scroll puts
         // them: web/dom takes their boxes unscrolled, and subtracts every
-        // ancestor's scrollTop itself, getBoundingClientRect)
-        let (esl, est) = (el.borrow().scroll_left, el.borrow().scroll_top);
+        // ancestor's scrollTop itself, getBoundingClientRect). What is added
+        // back is the scroll the layout moved them by (applied): the asked-for
+        // one can be more, when the extent was not measured yet (the root
+        // scrolled by scrollIntoView in a page still being laid out came back
+        // 314 px low in every box until the next scroll)
+        let (esl, est) = (el.borrow().applied_scroll_left, el.borrow().applied_scroll_top);
         if esl != 0.0 || est != 0.0 {
             kf = kf.borrow().then(&DomFrame::shift(esl, est));
         }
@@ -5587,6 +5591,15 @@ impl DomView {
                         }
                     }
                 }
+                // (in a grid flex-start and flex-end are start and end,
+                // CSS Box Alignment 6.1; EVG reads flex-start as its default,
+                // the stretch)
+                if (n == "align-self" || n == "justify-self") && (v == "flex-start" || v == "flex-end") {
+                    let gpd: String = self.outerS.borrow().getText("display");
+                    if gpd == "grid" || gpd == "inline-grid" {
+                        v = if v == "flex-start" { "start".to_string() } else { "end".to_string() };
+                    }
+                }
                 if v != "auto" && (v != "normal" && v != "none") {
                     EVGElement::set_attribute(&e, &n, v.clone());
                 }
@@ -5714,6 +5727,19 @@ impl DomView {
                 let pav: String = s.borrow().getText("height");
                 if (pav.as_bytes().len() as i64) > 1 && (pav[((pav.as_bytes().len() as i64) - 1) as usize..(pav.as_bytes().len() as i64) as usize].to_string() == "%" && DomText::index_of(&pav, "(") < 0) {
                     EVGElement::set_attribute(&e, "pct-auto", "true".to_string());
+                }
+            }
+        }
+        // (so is a flex or grid item's of a container whose height is not
+        // definite and will not be, flexbox 9.8: shadcn's Command, h-full in
+        // a column item of a card in a grid with items-start, was laid out
+        // at a percentage of its parent's zero flex basis, 2 px tall)
+        if self.inFlex && !placed && self.defH < 0.0 && !self.defHMaybe && (bgd == "flex" || bgd == "inline-flex" || bgd == "grid" || bgd == "inline-grid") {
+            let __v_qhi: Vec<String> = vec!["height".to_string(), "min-height".to_string()];
+            for qhn in __v_qhi.iter() {
+                let qhv: String = s.borrow().getText(qhn);
+                if (qhv.as_bytes().len() as i64) > 1 && qhv.ends_with("%") && DomText::index_of(&qhv, "(") < 0 {
+                    EVGElement::set_attribute(&e, qhn, "auto".to_string());
                 }
             }
         }
@@ -6544,11 +6570,18 @@ impl DomView {
                     EVGElement::set_attribute(&e, "lanes-tolerance", gtol.clone());
                 }
             }
-            let gi: String = s.borrow().getText("align-items");
+            // (flex-start and flex-end are start and end in a grid)
+            let mut gi: String = s.borrow().getText("align-items");
+            if gi == "flex-start" || gi == "flex-end" {
+                gi = if gi == "flex-start" { "start".to_string() } else { "end".to_string() };
+            }
             if !gi.is_empty() && gi != "normal" {
                 EVGElement::set_attribute(&e, "align-items", gi.clone());
             }
-            let gj: String = s.borrow().getText("justify-items");
+            let mut gj: String = s.borrow().getText("justify-items");
+            if gj == "flex-start" || gj == "flex-end" {
+                gj = if gj == "flex-start" { "start".to_string() } else { "end".to_string() };
+            }
             if !gj.is_empty() && (gj != "normal" && gj != "legacy") {
                 EVGElement::set_attribute(&e, "justify-items", gj.clone());
             }
@@ -9140,6 +9173,24 @@ impl DomView {
         self.defHMaybe = ((self.inFlex || (mpos == "absolute" || mpos == "fixed")) || (display == "table-cell" || display == "table")) || !mh.is_empty() && mh != "auto";
         if indef_item {
             self.defHMaybe = false;
+        }
+        // (a grid item or a flex row's item of auto height that is not
+        // stretched is as tall as its content: not definite, so a
+        // percentage height in it is auto. shadcn's Command, h-full in a
+        // card of a grid with items-start, came out 2 px tall)
+        if self.defHMaybe && self.inFlex && (mh.is_empty() || mh == "auto") && mpos != "absolute" && mpos != "fixed" {
+            let ipd: String = self.outerS.borrow().getText("display");
+            let ipdir: String = self.outerS.borrow().getText("flex-direction");
+            let across: bool = ipd == "grid" || ipd == "inline-grid" || ((ipd == "flex" || ipd == "inline-flex") && (ipdir.is_empty() || ipdir == "row" || ipdir == "row-reverse"));
+            if across {
+                let mut ias: String = s.borrow().getText("align-self");
+                if ias.is_empty() || ias == "auto" {
+                    ias = self.outerS.borrow().getText("align-items");
+                }
+                if !(ias.is_empty() || ias == "normal" || ias == "stretch") {
+                    self.defHMaybe = false;
+                }
+            }
         }
         // a positioned box paints over its in-flow siblings (CSS 2.1
         // Appendix E), whatever their order in the tree

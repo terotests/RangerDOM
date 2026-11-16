@@ -48,7 +48,12 @@
   var viewport = { w: 1024, h: 768 };
   var doc = null;
 
-  function changed() { generation++; styleGen++; ancEpoch++; sigEpoch++; }
+  function changed() { generation++; styleGen++; sheetGen++; ancEpoch++; sigEpoch++; }
+  // bumped with styleGen, and alone when a <style> came, went or changed
+  // with rules that only some elements can match (styleSheetChanged): what
+  // is read from the sheets (their list, rule sets, selectorReach, the
+  // features, keyframes) is kept per sheetGen, a computed style per styleGen
+  var sheetGen = 1;
   // registered custom properties (@property, CSS.registerProperty): name ->
   // { inh, init }; the first registration of a name stands, the API's over
   // a rule's
@@ -105,7 +110,10 @@
       if (computedCache.gen === styleGen && (el._es || shadowCount)) { dropStyle(el); eachElement(el, dropStyle); }
       return;
     }
-    var reach = conn && doc && el.ownerDocument === doc && el !== doc.documentElement ? selectorReach() : 0;
+    // (the root's inline style too: what matches stays, what its children
+    // take from it is inheritDown's. vaul sets the root's style for each
+    // drawer that opens or closes.)
+    var reach = conn && doc && el.ownerDocument === doc && (el !== doc.documentElement || name === 'style') ? selectorReach() : 0;
     if (!reach) { changed(); return; }
     generation++;
     textStamp++;
@@ -144,11 +152,18 @@
       // (and the same rules match them as before, unless a selector reads
       // the style attribute: AG Grid sets a custom property on its
       // viewport after the first layout, which matched 210 elements again)
-      if (!(old && (ownStyleOnly(old, computedOf(el), el) || kidsKept(el, old, computedOf(el), fxCache.styleRead ? dropStyle : dropComputed)))) eachElement(el, fxCache.styleRead ? dropStyle : dropComputed);
-    } else if (!old || !(sameBelow(el, old, computedOf(el)) || kidsKept(el, old, computedOf(el), dropStyle))) eachElement(el, dropStyle);
+      if (!(old && (ownStyleOnly(old, computedOf(el), el) || kidsKept(el, old, computedOf(el), fxCache.styleRead ? dropStyle : dropComputed)))) {
+        if (old && !fxCache.styleRead) inheritDown(el, old, computedOf(el));
+        else eachElement(el, fxCache.styleRead ? dropStyle : dropComputed);
+      }
+    }
     // :lang() and :dir() follow the attribute down the tree, a disabled
     // fieldset's :disabled its controls
     else if (name === 'lang' || name === 'dir' || name === 'xml:lang' || (name === 'disabled' && /^(fieldset|optgroup)$/.test(el.localName))) eachElement(el, dropStyle);
+    // (what the attribute does to the selectors under el is the features'
+    // part below: here only what they take from el's style)
+    else if (!old) eachElement(el, dropStyle);
+    else if (!(sameBelow(el, old, computedOf(el)) || kidsKept(el, old, computedOf(el), dropStyle))) inheritDown(el, old, computedOf(el));
     // what the features' sets reach: the descendants that can be a
     // selector's subject under el, the following siblings
     if (name !== 'style') invalidateFeatures(el, changedFeatures(name, was, now));
@@ -168,18 +183,52 @@
   // it is in (_es), so a subtree never styled is known by its root
   function styledNow(e) { for (; e && !e._es; e = e.parentNode) e._es = true; }
   // (and not from its style without animations: e._abKeep, animRestyle)
-  function dropStyle(e) { delete computedCache.map[e.__id]; e._rj = null; e._hm = null; e._pc = null; e._abKeep = false; }
+  function dropStyle(e) { keepOld(e); delete computedCache.map[e.__id]; e._rj = null; e._hm = null; e._pc = null; e._abKeep = false; }
+  // the style e had when it was dropped, until it has one again: what is
+  // under it was styled from that one (styling a child styles its parent
+  // first), so restyle and inheritDown compare with it. Without it, an
+  // element dropped on its own (its inline style, an attribute) and then
+  // restyled for a :has() or a child put in took all under it along.
+  function keepOld(e) { var o = computedCache.map[e.__id]; if (o && computedCache.gen === styleGen) { e._ocs = o; e._ocg = styleGen; } }
+  function oldStyle(e) { return computedCache.map[e.__id] || (e._ocg === styleGen ? e._ocs : undefined); }
   // e's computed style goes, the rules that matched it stay (cascade1's
   // _hm): for a change that alters no selector's answer for e
-  function dropComputed(e) { delete computedCache.map[e.__id]; e._rj = null; e._pc = null; e._abKeep = false; }
+  function dropComputed(e) { keepOld(e); delete computedCache.map[e.__id]; e._rj = null; e._pc = null; e._abKeep = false; }
   // e styled again; what is under it too unless e's style changed only in
   // what its children do not take from it
   function restyle(e) {
-    var old = computedCache.map[e.__id];
+    var old = oldStyle(e);
     dropStyle(e);
     if (old && (sameBelow(e, old, computedOf(e)) || kidsKept(e, old, computedOf(e), dropStyle))) return true;
-    eachElement(e, dropStyle);
+    if (old) inheritDown(e, old, computedOf(e));
+    else eachElement(e, dropStyle);
     return false;
+  }
+  // el's style went from a to b and what matches under el is as it was
+  // (the change was el's own: its inline style, an attribute whose
+  // selectors the features reach, a :has() of it, its place): each
+  // child's style is found again from the rules it matched (its _hm kept),
+  // and one that comes out alike keeps its style object and all under it,
+  // the others pass the question on. Radix sets body's pointer-events and
+  // react-remove-scroll's data-scroll-locked on every dialog and menu:
+  // each matched all 2 500 elements of the page again.
+  function inheritDown(el, a, b) {
+    var kids = el._sr ? null : el._c;
+    if (!kids || shadowCount) { eachElement(el, dropStyle); return; }
+    for (var i = 0; i < kids.length; i++) {
+      var c = kids[i];
+      if (c._attrs === undefined) continue;
+      var cc = oldStyle(c), pc = c._pc;
+      if (!cc || pc || c._ab) { dropStyle(c); eachElement(c, dropStyle); continue; }
+      dropComputed(c);
+      var nc = computedOf(c);
+      // (alike: what is under c keeps its styles, and its renders take
+      // c's new style object as their parent's, sameStyle. c's own render
+      // goes: it writes what c inherits as it differs from el's, which
+      // changed)
+      if (nc === cc || sameStyle(cc, nc, c)) continue;
+      inheritDown(c, cc, nc);
+    }
   }
   // e's animations moved on (a frame): when nothing else dropped its style
   // since, the style it has without them is kept (e._ab) and only the
@@ -331,7 +380,7 @@
     // not in the page (a fragment, a parsed document): nothing shown
     if (!doc || (p !== doc && (p.ownerDocument !== doc || !p.isConnected))) { generation++; return; }
     // (a style sheet's text is its rules)
-    if (p.localName === 'style') { changed(); return; }
+    if (p.localName === 'style') { if (p.isConnected) styleSheetChanged(p, p._sheet); else changed(); return; }
     var reach = p !== doc && p !== doc.documentElement ? selectorReach() : 0;
     if (!reach) { changed(); return; }
     generation++;
@@ -412,7 +461,7 @@
     if (computedCache.gen === styleGen) for (var n = 0; n < list.length; n++) {
       var r = list[n], p = r.p;
       if (p !== doc && !p.isConnected) continue;
-      var st = reachCache.gen === styleGen ? reachCache.struct : (selectorReach(), reachCache.struct);
+      var st = reachCache.gen === sheetGen ? reachCache.struct : (selectorReach(), reachCache.struct);
       if (p.nodeType === 1) restyle(p);
       var kids = p._c;
       // Monaco's view lines and overlays: dozens of children, a line in or
@@ -528,7 +577,12 @@
   // blink of its cursor styled and rendered the whole page again.
   function hasReached(el) {
     if (!reachCache.has || computedCache.gen !== styleGen) return;
-    for (var a = el; a && a.nodeType === 1; a = a.parentNode) restyle(a);
+    // (only an ancestor that a :has() rule's subject can be: by the rules'
+    // keys, hasSubj. Tailwind's `has-[>svg]:px-3` is on buttons; every
+    // ancestor of each change was styled again, and one whose style had
+    // been dropped took everything under it along: the page)
+    var hs = reachCache.hasAll ? null : reachCache.hasSubj;
+    for (var a = el; a && a.nodeType === 1; a = a.parentNode) if (!hs || keyedBy(a, hs)) restyle(a);
     hasAbove(el);
   }
   // :has() above a selector's subject (PrimeReact's
@@ -691,8 +745,8 @@
     }
   }
   function selectorReach() {
-    if (reachCache.gen === styleGen) return reachCache.reach;
-    var reach = 1, struct = 0, hover = 0, focus = 0, within = 0, has = 0, counted = 0, sib = [];
+    if (reachCache.gen === sheetGen) return reachCache.reach;
+    var reach = 1, struct = 0, hover = 0, focus = 0, within = 0, has = 0, counted = 0, sib = [], hasSubj = {}, hasAll = false;
     var hasKeys = { cls: {}, id: {}, tag: {}, sibOn: false, sib: { cls: {}, id: {}, tag: {} } };
     var sheets = [ua()].concat(cascadeSheets(doc));
     for (var i = 0; i < sheets.length && reach; i++) {
@@ -710,8 +764,10 @@
         if (hks.sibOn) hasKeys.sibOn = true;
       }
       if (sr.counted) counted = 1;
+      if (sr.hasAll) hasAll = true;
+      for (var hsk in sr.hasSubj) hasSubj[hsk] = 1;
     }
-    reachCache = { gen: styleGen, reach: reach, struct: struct, hover: hover, focus: focus, focusWithin: within, has: has, counted: counted, sib: sib, hasKeys: hasKeys };
+    reachCache = { gen: sheetGen, reach: reach, struct: struct, hover: hover, focus: focus, focusWithin: within, has: has, counted: counted, sib: sib, hasKeys: hasKeys, hasSubj: hasSubj, hasAll: hasAll };
     return reach;
   }
   // one sheet's part of selectorReach, read from its rules once (until
@@ -721,14 +777,22 @@
   function sheetReach(sheet) {
     var rules = sheet._rules || [];
     if (sheet._reach && sheet._reachOf === rules) return sheet._reach;
-    var reach = 1, struct = 0, hover = 0, focus = 0, within = 0, has = 0, counted = 0, sib = [], last = null;
+    var reach = 1, struct = 0, hover = 0, focus = 0, within = 0, has = 0, counted = 0, sib = [], last = null, hasSubj = {}, hasAll = false;
     var hasKeys = { cls: {}, id: {}, tag: {}, sibOn: false, sib: { cls: {}, id: {}, tag: {} } };
     for (var j = 0; j < rules.length; j++) {
       var t = rules[j].text;
+      // (the subjects a :has() can be, hasReached: each selector of a
+      // list, so before the list's text is passed over)
+      if (t && t.indexOf(':has(') >= 0 && !hasAll) { var hk0 = ruleKeys(rules[j]); if (!hk0) hasAll = true; else for (var hq = 0; hq < hk0.length; hq++) hasSubj[hk0[hq]] = 1; }
       // (the selectors of one list follow each other with the list's text)
       if (t === last) continue;
       last = t;
-      t = String(t || '');
+      var traw = String(t || '');
+      // (an escaped character is a name's: Tailwind's
+      // `.\[\&_tr\:last-child\]\:border-0 tr:last-child` has a
+      // :last-child in its class name, which read as one above the subject
+      // had every child put in or taken out restyle its siblings whole)
+      t = traw.indexOf('\\') >= 0 ? traw.replace(/\\[0-9a-fA-F]{1,6}\s?|\\[^]/g, '_') : traw;
       // (every test below needs a pseudo-class or a + or ~)
       if (t.indexOf(':') < 0 && t.indexOf('+') < 0 && t.indexOf('~') < 0) continue;
       if (/\sof\s/i.test(t)) { reach = 0; break; }
@@ -740,7 +804,7 @@
         if (sibHas || pseudoPlace(t, /:has\(/i) === 2) {
           // (above the subject: what is under the compound it is in; with
           // a + or ~ first in it: what is under the compound's parent)
-          var an = hasAnchors(t, sibHas), into = sibHas ? hasKeys.sib : hasKeys;
+          var an = hasAnchors(traw, sibHas), into = sibHas ? hasKeys.sib : hasKeys;
           if (!an) { reach = 0; break; }
           if (sibHas) hasKeys.sibOn = true;
           for (var ai = 0; ai < an.length; ai++) {
@@ -751,7 +815,7 @@
           has = 2;
         } else if (!has) has = 1;
       }
-      if (/[+~]/.test(t)) { var sl = siblingLefts(t); if (sl.length) { reach = 2; sib = sib.concat(sl); } }
+      if (/[+~]/.test(t)) { var sl = siblingLefts(traw); if (sl.length) { reach = 2; sib = sib.concat(sl); } }
       if (struct < 2 && STRUCT.test(t)) struct = Math.max(struct, pseudoPlace(t, STRUCT));
       if (!counted && COUNTED.test(t)) counted = 1;
       if (hover < 2 && HOVER.test(t)) hover = Math.max(hover, pseudoPlace(t, HOVER));
@@ -759,7 +823,7 @@
       if (within < 2 && FOCUS_WITHIN.test(t)) within = Math.max(within, pseudoPlace(t, FOCUS_WITHIN));
     }
     sheet._reachOf = rules;
-    sheet._reach = { reach: reach, struct: struct, hover: hover, focus: focus, focusWithin: within, has: has, counted: counted, sib: sib, hasKeys: hasKeys };
+    sheet._reach = { reach: reach, struct: struct, hover: hover, focus: focus, focusWithin: within, has: has, counted: counted, sib: sib, hasKeys: hasKeys, hasSubj: hasSubj, hasAll: hasAll };
     return sheet._reach;
   }
   // Invalidation sets (as Blink's): what a change of one feature of an
@@ -793,7 +857,7 @@
     }
   }
   function featureIndex() {
-    if (fxCache.gen === styleGen) return fxCache.fx;
+    if (fxCache.gen === sheetGen) return fxCache.fx;
     var fx = {}, sibs = [], styleRead = false;
     var sheets = [ua()].concat(cascadeSheets(doc));
     function entry(f) { return fx[f] || (fx[f] = { desc: [], sib: [] }); }
@@ -839,7 +903,7 @@
         }
       }
     }
-    fxCache = { gen: styleGen, fx: fx, sibs: sibs, styleRead: styleRead };
+    fxCache = { gen: sheetGen, fx: fx, sibs: sibs, styleRead: styleRead };
     return fx;
   }
   // an attribute's value by its stored name (class, id, style: the same in
@@ -960,7 +1024,7 @@
   // a text changed under n: n and its ancestors render again
   function textChanged(n) {
     // a style sheet's text is its rules
-    if (n && n.localName === 'style') { changed(); return; }
+    if (n && n.localName === 'style') { if (n.isConnected) styleSheetChanged(n, n._sheet); else changed(); return; }
     generation++;
     textStamp++;
     if (shadowCount) { stampUp(n); return; }
@@ -2799,8 +2863,8 @@
     // (one with no text yet has no rules: PrimeReact puts each component's
     // <style> in empty and gives it its text after, and an empty one for
     // its focus trap when a dialog opens: the whole page was styled again)
-    _connected() { if (this._c.length) changed(); }
-    _disconnected() { if (this._c.length) changed(); }
+    _connected() { if (this._c.length) styleSheetChanged(this, null); }
+    _disconnected() { if (this._c.length) styleSheetChanged(this, this._sheet); }
   }
   reflect(HTMLStyleElement, ['media', 'type']);
   class HTMLLinkElement extends HTMLElement {
@@ -2829,8 +2893,10 @@
   });
   class HTMLImageElement extends HTMLElement {
     constructor(q) { super(q); this.complete = true; }
-    get naturalWidth() { return this.width; }
-    get naturalHeight() { return this.height; }
+    // (the picture's own size where its data says it, a data: URL's SVG,
+    // PNG or GIF; else the laid-out box)
+    get naturalWidth() { var n = intrinsicOf(this.getAttribute('src')); return n ? n[0] : this.width; }
+    get naturalHeight() { var n = intrinsicOf(this.getAttribute('src')); return n ? n[1] : this.height; }
     get width() { var a = this.getAttribute('width'); return a !== null ? parseInt(a, 10) || 0 : rectOf(this).width; }
     set width(v) { this.setAttribute('width', v); }
     get height() { var a = this.getAttribute('height'); return a !== null ? parseInt(a, 10) || 0 : rectOf(this).height; }
@@ -2844,6 +2910,51 @@
   }
   reflect(HTMLImageElement, ['alt', 'srcset', 'sizes', 'crossOrigin', 'useMap', 'loading', 'decoding', 'referrerPolicy']);
   urlProp(HTMLImageElement, ['src']);
+  // an image out of the page loads all the same (new Image(), as Radix's
+  // Avatar does to know whether to show the picture or its fallback)
+  (function () {
+    var d = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+    Object.defineProperty(HTMLImageElement.prototype, 'src', {
+      get: d.get,
+      set: function (v) {
+        d.set.call(this, v);
+        if (this.isConnected || !String(v)) return;
+        var self = this;
+        self.complete = false;
+        setTimeout(function () { self.complete = true; dispatch(self, new Event('load')); }, 0);
+      },
+      configurable: true, enumerable: true
+    });
+  })();
+  var intrinsicMemo = { src: null, v: null };
+  function intrinsicOf(src) {
+    if (!src || src.slice(0, 5) !== 'data:') return null;
+    if (intrinsicMemo.src === src) return intrinsicMemo.v;
+    var v = null;
+    try {
+      var comma = src.indexOf(','), head = src.slice(5, comma), body = src.slice(comma + 1);
+      var b64 = /;base64$/i.test(head);
+      if (/^image\/svg\+xml/i.test(head)) {
+        var t = b64 ? atob(body) : decodeURIComponent(body);
+        var m = /<svg\b[^>]*>/i.exec(t);
+        if (m) {
+          var w = /\swidth\s*=\s*["']?([\d.]+)(px)?["'\s>]/i.exec(m[0]), h = /\sheight\s*=\s*["']?([\d.]+)(px)?["'\s>]/i.exec(m[0]);
+          var vb = /viewBox\s*=\s*["']\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(m[0]);
+          var W = w ? +w[1] : 0, H = h ? +h[1] : 0;
+          if (vb && (!W || !H)) { var vw = +vb[1], vh = +vb[2]; if (!W && !H) { W = vw; H = vh; } else if (!W) W = vh ? H * vw / vh : 0; else H = vw ? W * vh / vw : 0; }
+          if (!W && !H) { W = 300; H = 150; }
+          v = [Math.round(W), Math.round(H)];
+        }
+      } else if (b64) {
+        var bin = atob(body.slice(0, 64));
+        var u8 = function (i) { return bin.charCodeAt(i) & 255; };
+        if (bin.slice(1, 4) === 'PNG') v = [(u8(16) << 24 | u8(17) << 16 | u8(18) << 8 | u8(19)) >>> 0, (u8(20) << 24 | u8(21) << 16 | u8(22) << 8 | u8(23)) >>> 0];
+        else if (bin.slice(0, 3) === 'GIF') v = [u8(6) | u8(7) << 8, u8(8) | u8(9) << 8];
+      }
+    } catch (e) { v = null; }
+    intrinsicMemo.src = src; intrinsicMemo.v = v;
+    return v;
+  }
   class HTMLIFrameElement extends HTMLElement {
     get contentWindow() { return null; }
     get contentDocument() { return null; }
@@ -3761,7 +3872,9 @@
   // (a select event is queued, as a task, for each change of the selection
   // by the API: HTML 4.10.5.2.10)
   function selectionChanged(el) {
-    if (doc && doc._active === el) changed();
+    // (the focused control renders again with its caret and selection; no
+    // style follows from where they are)
+    if (doc && doc._active === el) textChanged(el);
     if (el._selQueued) return;
     el._selQueued = true;
     setTimeout(function () { el._selQueued = false; dispatch(el, new Event('select', { bubbles: true })); }, 0);
@@ -6976,7 +7089,7 @@
         }
       })(this.cssRules, '');
       indexSheet(this);
-      changed();
+      if (!sheetQuiet) changed();
     }
   }
 
@@ -7272,11 +7385,91 @@
     return '*';
   }
 
+  var sheetQuiet = 0;
+  // A <style> came into the page, went, or got a new text: when every rule
+  // of its sheet, before and after, is a plain style rule (no at-rule but
+  // @media, no pseudo-element) whose subject has a key (a tag, an id, a
+  // class, an attribute), only the elements with one of those keys can
+  // match one, so only they are styled again (and what is under them when
+  // their style changed in what it hands down, restyle); else the whole
+  // page. react-remove-scroll's <style> (body[data-scroll-locked], four
+  // class names) came and went with every Radix dialog, sheet, select and
+  // menu, and restyled 2 500 elements twice each time.
+  function styleSheetChanged(el, was) {
+    if (!doc || el.ownerDocument !== doc || shadowCount || el.namespaceURI !== HTML_NS) { changed(); return; }
+    var keys = {}, any = false;
+    function take(sh) {
+      if (!sh) return true;
+      if (sh.disabled) return true;
+      if (!plainRules(sh.cssRules)) return false;
+      for (var k in sh._index) { if (k === '*') return false; keys[k] = 1; any = true; }
+      // (a pseudo-element's rules by the keys of their elements: Radix
+      // Select's `[data-radix-select-viewport]::-webkit-scrollbar`)
+      for (var pn in sh._pindex) for (var pk in sh._pindex[pn]) { if (pk === '*') return false; keys[pk] = 1; any = true; }
+      return true;
+    }
+    // (the keys of the rules it had before its new text is read: the sheet
+    // object is the same one, sheetOfStyle)
+    if (!take(was)) { changed(); return; }
+    if (!take(el.isConnected ? sheetOfStyle(el) : null)) { changed(); return; }
+    sheetGen++;
+    generation++;
+    lastPseudo = NO_PSEUDO;
+    if (!any || computedCache.gen !== styleGen) return;
+    textStamp++;
+    var hit = [];
+    eachElement(doc, function (e) { if (keyedBy(e, keys)) hit.push(e); });
+    for (var i = 0; i < hit.length; i++) {
+      var e = hit[i];
+      for (var p = e; p && p._rv !== textStamp; p = p.parentNode) p._rv = textStamp;
+      // (each one: one above it whose style came out the same kept what
+      // is under it)
+      restyle(e);
+    }
+  }
+  function plainRules(rules) {
+    for (var i = 0; i < rules.length; i++) {
+      var r = rules[i];
+      if (r.type === 1) continue;
+      if (r.type === 4 && !r._layer && plainRules(r.cssRules)) continue;
+      return false;
+    }
+    return true;
+  }
+  // the index keys of a rule's subject (as indexSheet files it), null for
+  // one with none
+  function ruleKeys(r) {
+    var k = r.sel && r.sel.key;
+    if (!k) return null;
+    if (k !== '*') return [k];
+    var keys = subjectKeys(r.sel.parts[0].c, 0);
+    if (keys) return keys;
+    k = attrKey(r.sel.parts[0].c);
+    return k === '*' ? null : [k];
+  }
+  // e has one of the index keys (indexSheet): its tag, #id, .class, [attr,
+  // :root
+  function keyedBy(e, keys) {
+    if (keys[e.localName] || (e === doc.documentElement && keys[':root'])) return true;
+    var id = e.getAttribute('id');
+    if (id && keys['#' + id]) return true;
+    var at = e._attrs;
+    for (var i = 0; i < at.length; i++) {
+      var n = at[i].name;
+      if (keys['[' + n]) return true;
+      if (n === 'class') { var cl = String(at[i].value).split(/\s+/); for (var j = 0; j < cl.length; j++) if (cl[j] && keys['.' + cl[j]]) return true; }
+    }
+    return false;
+  }
   function sheetOfStyle(el) {
     if (el._sheet && el._sheetText === el.textContent) return el._sheet;
     var s = el._sheet || new CSSStyleSheet(el);
     s.cssRules = parseSheetText(el.textContent, s).cssRules;
-    s._rebuild();
+    // (the change that gave it this text has been told: its coming, its
+    // text, styleSheetChanged. Told again here, in the middle of a cascade
+    // that asked for the sheets, every style found so far was thrown away.)
+    sheetQuiet++;
+    try { s._rebuild(); } finally { sheetQuiet--; }
     el._sheet = s;
     el._sheetText = el.textContent;
     return s;
@@ -7286,10 +7479,10 @@
   // style change (styleGen) rather than by a walk of the page per element
   var sheetsCache = { gen: -1, d: null, list: null };
   function cascadeSheets(d) {
-    if (sheetsCache.gen !== styleGen || sheetsCache.d !== d) {
+    if (sheetsCache.gen !== sheetGen || sheetsCache.d !== d) {
       // without the adopted sheets: assigning the list is no change
       var all = styleSheetsOf(d);
-      sheetsCache = { gen: styleGen, d: d, list: all.slice(0, all.length - (d.adoptedStyleSheets || []).length) };
+      sheetsCache = { gen: sheetGen, d: d, list: all.slice(0, all.length - (d.adoptedStyleSheets || []).length) };
     }
     return sheetsCache.list.concat(d.adoptedStyleSheets || []);
   }
@@ -7508,12 +7701,12 @@
   }
   // a shadow root's sheets: its <style>s, then its adopted ones
   function shadowSheets(sr) {
-    if (sr._sheetGen === styleGen && sr._sheets) return sr._sheets;
+    if (sr._sheetGen === sheetGen && sr._sheets) return sr._sheets;
     var out = [];
     eachElement(sr, function (e) { if (e.localName === 'style' && e.namespaceURI === HTML_NS) out.push(sheetOfStyle(e)); });
     for (var i = 0; i < sr._adopted.length; i++) out.push(sr._adopted[i]);
     out = out.filter(function (x) { return x && !x.disabled; });
-    sr._sheets = out; sr._sheetGen = styleGen;
+    sr._sheets = out; sr._sheetGen = sheetGen;
     return out;
   }
   // the rules of a shadow tree's sheets for the tree's host (:host) and
@@ -7613,11 +7806,11 @@
   var docRuleSet = { gen: -1, d: null, rs: null };
   function scopeRuleSet(d, esr) {
     if (esr) {
-      if (esr._rsGen !== styleGen || !esr._rs) { esr._rs = ruleSetOf([ua()].concat(shadowSheets(esr)), esr._rs); esr._rsGen = styleGen; }
+      if (esr._rsGen !== sheetGen || !esr._rs) { esr._rs = ruleSetOf([ua()].concat(shadowSheets(esr)), esr._rs); esr._rsGen = sheetGen; }
       return esr._rs;
     }
-    if (docRuleSet.gen !== styleGen || docRuleSet.d !== d) {
-      docRuleSet = { gen: styleGen, d: d, rs: ruleSetOf([ua()].concat(d === doc ? cascadeSheets(d).filter(function (x) { return !x.disabled; }) : []), docRuleSet.rs) };
+    if (docRuleSet.gen !== sheetGen || docRuleSet.d !== d) {
+      docRuleSet = { gen: sheetGen, d: d, rs: ruleSetOf([ua()].concat(d === doc ? cascadeSheets(d).filter(function (x) { return !x.disabled; }) : []), docRuleSet.rs) };
     }
     return docRuleSet.rs;
   }
@@ -8129,7 +8322,7 @@
   // animationstart, animationiteration and animationend are dispatched.
   var keyframesCache = { gen: -1, map: {} };
   function keyframesNamed(name) {
-    if (keyframesCache.gen !== styleGen) {
+    if (keyframesCache.gen !== sheetGen) {
       var map = {};
       var walk = function (rules) {
         for (var i = 0; i < rules.length; i++) {
@@ -8139,7 +8332,7 @@
         }
       };
       if (doc) { var sheets = cascadeSheets(doc); for (var si = 0; si < sheets.length; si++) walk(sheets[si].cssRules || sheets[si]._rules || []); }
-      keyframesCache = { gen: styleGen, map: map, parsed: {} };
+      keyframesCache = { gen: sheetGen, map: map, parsed: {} };
     }
     if (keyframesCache.parsed[name] !== undefined) return keyframesCache.parsed[name];
     var rule = keyframesCache.map[name], out = null;
@@ -8868,6 +9061,7 @@
     } else el._ab = null;
     if (!cssAnim && el._anims) el._anims = null;
     computedCache.map[el.__id] = c;
+    el._ocs = null;
     el._trOut = c;
     // (styled: its ancestors are noted with it, so one never styled has
     // nothing styled under it; treeChanged keeps that true for a move)
@@ -9077,6 +9271,17 @@
       if (kw === 'initial' || kw === 'revert' || kw === 'revert-layer') { out[name] = INITIAL[name]; continue; }
       if (kw === 'unset') { out[name] = INHERITED[name] && parent ? parent[name] : INITIAL[name]; continue; }
       out[name] = computeValue(name, v, ctx, parent, out);
+    }
+    // (the animation shorthand and its longhands, kept apart: the one set
+    // later wins. Radix's Collapsible sets animation-name: none inline over
+    // tw-animate's animation: accordion-down to measure its open height,
+    // which came out 0 while the class's animation ran on)
+    if (spec.animation !== undefined) {
+      for (var an in spec) {
+        if (an.slice(0, 10) !== 'animation-' || spec[an] === undefined) continue;
+        if ((sq[an] || 0) < (sq.animation || 0)) delete out[an];
+        else if (an === 'animation-name' && out[an] === 'none') out.animation = 'none';
+      }
     }
     if (out.display === undefined) out.display = 'inline';
     // the transition shorthand's longhands, as getComputedStyle gives them
@@ -12565,6 +12770,10 @@
   // inline position (start, center, end, nearest), within its scroll range.
   // Boxes are the last layout's, in page coordinates before any scroll.
   function scrollIntoView(el, arg) {
+    // (where it is now: cmdk scrolls its selected item into view in the
+    // layout effect after Radix's accordion set its open height, and the
+    // page came out 36 px short of the browser's)
+    if (el.isConnected) reflow();
     var b = el.isConnected ? boxes[el.__id] : null;
     if (!b) return;
     var o = arg === false ? { block: 'end', inline: 'nearest' } : arg && typeof arg === 'object' ? arg : {};
@@ -12596,7 +12805,12 @@
         if (ny !== (n.scrollTop || 0) || nx !== (n.scrollLeft || 0)) { n.scrollTop = ny; n.scrollLeft = nx; scrolled(n); dispatch(n, new Event('scroll')); }
       }
       inner.push(n);
+      // (a fixed box is the viewport's: what is around it and the page do
+      // not move it. Radix Select scrolls its chosen item into view in its
+      // fixed list, and the page jumped)
+      if (nb && n !== doc.documentElement && computedOf(n).position === 'fixed') return;
     }
+    if (computedOf(el).position === 'fixed') return;
     var root = doc && doc.documentElement;
     if (!root || (computedOf(root)['overflow-y'] || '') === 'hidden') return;
     var ry = 0;
