@@ -9333,7 +9333,7 @@
     return out;
   }
   function individualTransforms(el, cs) {
-    var parts = [], sp = function (v) { return String(v).trim().split(/\s+/); };
+    var parts = [], sp = function (v) { return splitValue(String(v).trim()); };
     if (cs.translate && cs.translate !== 'none') { var tv = sp(cs.translate); parts.push(tv.length > 2 ? 'translate3d(' + tv[0] + ', ' + tv[1] + ', ' + tv[2] + ')' : 'translate(' + tv[0] + ', ' + (tv[1] || '0px') + ')'); }
     if (cs.rotate && cs.rotate !== 'none') {
       var rv = sp(cs.rotate), ang = rv[rv.length - 1];
@@ -9366,13 +9366,24 @@
       el._pctBox = w + ',' + h;
       if (pctTransforms.indexOf(el) < 0) pctTransforms.push(el);
     }
-    return out.transform.replace(/(translate[XY3d]*)\(([^)]*)\)/g, function (m, fn, args) {
-      var k = 0;
-      return fn + '(' + args.split(',').map(function (a) {
+    // (each argument's percentages of the box, then its calc() in px:
+    // Tailwind's translate-x-[calc(100%-2px)] and -translate-x-1/2,
+    // calc(calc(1 / 2 * 100%) * -1), were left as they were)
+    var t = out.transform, res = '', i = 0, re = /(translate(?:X|Y|3d)?)\(/g, m;
+    var ctx = { em: parseFloat(out['font-size']) || 16, rem: rootFontPx(), vw: viewport.w / 100, vh: viewport.h / 100 };
+    while ((m = re.exec(t)) !== null) {
+      var open = m.index + m[1].length, close = findClose(t, open, '(', ')');
+      if (close < 0) break;
+      var fn = m[1], k = 0;
+      var args = splitTop(t.slice(open + 1, close), ',').map(function (a) {
         var axis = fn === 'translateY' ? 'y' : fn === 'translateX' ? 'x' : k++ === 0 ? 'x' : 'y';
-        return a.replace(/(-?[\d.]+)%/, function (q, n) { return fmtPx(parseFloat(n) / 100 * (axis === 'x' ? w : h)); });
-      }).join(',') + ')';
-    });
+        a = a.trim().replace(/(-?[\d.]+(?:e-?\d+)?)%/g, function (q, n) { return fmtPx(parseFloat(n) / 100 * (axis === 'x' ? w : h)); });
+        return /calc\(|min\(|max\(|clamp\(/i.test(a) ? calcLengths(a, ctx) : a;
+      });
+      res += t.slice(i, m.index) + fn + '(' + args.join(', ') + ')';
+      i = close + 1; re.lastIndex = i;
+    }
+    return res + t.slice(i);
   }
   function rootFontPx() {
     var r = doc && doc.documentElement;
