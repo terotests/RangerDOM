@@ -5183,6 +5183,28 @@ impl DomView {
         }
         f
     }
+    /// the corner of the parent that clips a picture filling it (overflow
+    /// not visible, one border-radius, no border or padding, the picture
+    /// 100% by 100%), else empty
+    fn parentClipRadius(&self, s: &Rc<RefCell<JsonValue>>) -> String {
+        if s.borrow().getText("width") != "100%" || s.borrow().getText("height") != "100%" {
+            return String::new();
+        }
+        let pox: String = self.outerS.borrow().getText("overflow-x");
+        let pr: String = self.outerS.borrow().getText("border-top-left-radius");
+        let pbw: String = self.outerS.borrow().getText("border-top-width");
+        let ppd: String = self.outerS.borrow().getText("padding-top");
+        if pox.is_empty() || pox == "visible" || pr.is_empty() || pr == "0px" {
+            return String::new();
+        }
+        if !(pbw.is_empty() || pbw == "0px") || !(ppd.is_empty() || ppd == "0px") {
+            return String::new();
+        }
+        if self.outerS.borrow().getText("border-top-right-radius") != pr || self.outerS.borrow().getText("border-bottom-right-radius") != pr || self.outerS.borrow().getText("border-bottom-left-radius") != pr {
+            return String::new();
+        }
+        pr
+    }
     fn style(&self, e: &Rc<RefCell<EVGElement>>, s: &Rc<RefCell<JsonValue>>, display: &str) {
         // EVG places an element with an inset out of flow; in CSS only an
         // absolute or fixed one is (a relative one's offset is left out)
@@ -8563,6 +8585,15 @@ impl DomView {
                     }
                     EVGElement::set_attribute(&pic, "svg", sv2.clone());
                     pic.borrow_mut().tag_name = "svg".to_string();
+                    // (a picture filling a parent that clips at rounded
+                    // corners, an avatar's overflow hidden + rounded-full
+                    // around a size-full img: EVG's clips are rectangles, so
+                    // the picture takes the parent's corners, which EVG cuts
+                    // an SVG picture to)
+                    let pcr: String = self.parentClipRadius(&s);
+                    if !pcr.is_empty() && s.borrow().getText("border-top-left-radius").is_empty() {
+                        EVGElement::set_attribute(&pic, "border-radius", pcr);
+                    }
                     // (a picture is cut to its box)
                     EVGElement::set_attribute(&pic, "overflow", "hidden".to_string());
                     pic.borrow_mut().svg_doc = Some(self.svgs.borrow_mut().docOf(&sv2));
