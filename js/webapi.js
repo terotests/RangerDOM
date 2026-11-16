@@ -336,9 +336,11 @@
     if (reach === 2) {
       featureIndex();
       var sl = fxCache.sibs, lefts = c ? [c, prevElement(kids, i)] : [gone, prevElement(kids, at)];
-      for (var si = 0; si < sl.length; si++) {
-        if (r.sibItems.indexOf(sl[si]) >= 0) continue;
-        for (var li = 0; li < lefts.length; li++) if (lefts[li] && lefts[li].nodeType === 1 && matchCompound(lefts[li], sl[si].comp, null)) { r.sibItems.push(sl[si]); break; }
+      for (var li = 0; li < lefts.length; li++) {
+        var le = lefts[li];
+        if (!le || le.nodeType !== 1) continue;
+        var hit = sibHits(le, sl);
+        for (var si = 0; si < hit.length; si++) if (r.sibItems.indexOf(hit[si]) < 0) r.sibItems.push(hit[si]);
       }
     }
     if (!c && at === undefined) r.whole = true;
@@ -358,6 +360,29 @@
         if (same && same !== any) r.touched.push(same);
       }
     }
+  }
+  // the left sides of + and ~ an element matches (sl: fxCache.sibs; their
+  // compounds hold no pseudo-class, so elements of the same tag, classes,
+  // id and attributes match the same ones: remembered by those)
+  var sibMemo = { sl: null, map: new Map(), n: 0 };
+  function sibHits(el, sl) {
+    if (sibMemo.sl !== sl || sibMemo.n > 5000) sibMemo = { sl: sl, map: new Map(), n: 0 };
+    var key = el.namespaceURI === HTML_NS ? el.localName : el.namespaceURI + ' ' + el.localName, at = el._attrs;
+    for (var a = 0; a < at.length; a++) key += '\u0001' + at[a].name + '\u0002' + (at[a].name === 'class' || at[a].name === 'id' || sibAttrs(sl)[at[a].name.toLowerCase()] ? at[a].value : '');
+    var hit = sibMemo.map.get(key);
+    if (hit) return hit;
+    hit = [];
+    for (var i = 0; i < sl.length; i++) if (matchCompound(el, sl[i].comp, null)) hit.push(sl[i]);
+    sibMemo.map.set(key, hit);
+    sibMemo.n++;
+    return hit;
+  }
+  function sibAttrs(sl) {
+    if (sl._attrs) return sl._attrs;
+    var o = {};
+    for (var i = 0; i < sl.length; i++) for (var j = 0; j < sl[i].comp.length; j++) if (sl[i].comp[j].t === 'attr') o[sl[i].comp[j].n] = true;
+    Object.defineProperty(sl, '_attrs', { value: o, enumerable: false });
+    return o;
   }
   var treePending = new Map(), treeFlushing = false;
   // the changes to the children of each parent since the last style read:
@@ -1346,7 +1371,8 @@
     insertBefore(c, ref) {
       if (!(c instanceof Node)) throw new TypeError("Failed to execute 'insertBefore' on 'Node': parameter 1 is not of type 'Node'.");
       if (ref && ref.parentNode !== this) throw DOMException("The node before which the new node is to be inserted is not a child of this node.", 'NotFoundError');
-      if (c.contains(this)) throw DOMException('The new child element contains the parent.', 'HierarchyRequestError');
+      // (a node with no children holds only itself)
+      if (c === this || (c._c && c._c.length && c.contains(this))) throw DOMException('The new child element contains the parent.', 'HierarchyRequestError');
       if (c.nodeType === 11) {
         // (the fragment emptied at once: its children taken one at a time
         // from its front made 10 000 rows quadratic, a splice and a new
@@ -1360,7 +1386,9 @@
         return c;
       }
       if (c === ref) return c;
-      var wasConnected = c.isConnected;
+      // (a node with no parent is not in the page; once put in, it is where
+      // this is: two walks to the root less for each of 80 000 nodes)
+      var wasConnected = c.parentNode ? c.isConnected : false, nowConnected = this.isConnected;
       if (c.parentNode) detach(c);
       var at = ref ? indexIn(ref) : this._c.length;
       var wasEmpty = isText(c) ? emptyEl(this) : false;
@@ -1372,7 +1400,7 @@
       if (isText(c) && (textEdit || wasEmpty === emptyEl(this))) textChanged(this);
       else treeChanged(this, c);
       queueMutation(this, 'childList', { addedNodes: [c], removedNodes: [], previousSibling: at > 0 ? this._c[at - 1] : null, nextSibling: ref || null });
-      if (!wasConnected && c.isConnected) connected(c);
+      if (!wasConnected && nowConnected) connected(c);
       return c;
     }
     removeChild(c) {
@@ -1578,6 +1606,9 @@
   function indexIn(n) {
     var p = n.parentNode, k = p._c;
     if (k[n._i] === n) return n._i;
+    // (the last one: a loop appending 10 000 rows numbered them all at
+    // each row)
+    if (k[k.length - 1] === n) return (n._i = k.length - 1);
     for (var i = 0; i < k.length; i++) k[i]._i = i;
     return k[n._i] === n ? n._i : -1;
   }
