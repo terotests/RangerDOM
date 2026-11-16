@@ -218,6 +218,12 @@ class RealmTest {
         def got (r.eval((this.file("tests/focus.js"))))
         this.check(("focus: Tab through shadow trees and slots, delegatesFocus, modal dialog, :focus-visible, UA ring, pointer leave, cursor (" + got + ")") (got == "a in1 lin t inner last,inner,inner,auto 1px,false,t:true,d1,d2 d1 d2,false:t,true:pointer,false:default"))
     }
+    fn a11y:void () {
+        def r:DomRealm (this.realm("<html><body><nav aria-label='Main'><a href='/a'>Home</a> <a>no href</a></nav><main><h1>Title <span aria-hidden=true>*</span></h1><h3 aria-level=4>Sub</h3><p>Some text</p><button>Save <img src='x.png' alt='disk'></button><button aria-label='Close'>x</button><button aria-pressed=true>Bold</button><label for=n>Name</label><input id=n value=Ann required><label><input type=checkbox checked> Agree</label><input type=range min=0 max=10 value=3 aria-label=Volume><select aria-label=Fruit><option>Apple<option selected>Pear</select><div role=tablist><div role=tab aria-selected=true tabindex=0>One</div><div role=tab aria-selected=false tabindex=-1>Two</div></div><div role=button aria-expanded=false aria-haspopup=menu tabindex=0>Menu</div><span id=lbl>Search box</span><input aria-labelledby=lbl placeholder=Find aria-describedby=hint><span id=hint hidden>type here</span><div hidden><button>gone</button></div><div style='display:none'><button>gone2</button></div><div aria-hidden=true><button>gone3</button></div><ul><li>One</li></ul><table><tr><th>H</th></tr><tr><td>C</td></tr></table></main></body></html>"))
+        r.runScripts()
+        def got (r.eval((this.file("tests/a11y.js"))))
+        this.check(("a11y: roles, names and states from HTML and ARIA (" + got + ")") (got == "navigation:Main|link:Home|text:no href|main:|heading:Title:lv=1|heading:Sub:lv=4|paragraph:Some text|button:Save disk|img:disk|button:Close|button:Bold:pr=2|text:Name|textbox:Name:v=Ann,rq=1|text:Agree|checkbox:Agree:ck=2|slider:Volume:vn=3|combobox:Fruit:hp=listbox,v=Pear|option:Apple|option:Pear:se=2|tablist:|tab:One:se=2|tab:Two|button:Menu:ex=1,hp=menu|text:Search box|textbox:Search box:d=type here|list:|listitem:One|table:|rowgroup:|row:|columnheader:H|row:|cell:C"))
+    }
     fn run:void () {
         this.plainDom()
         this.react()
@@ -234,6 +240,7 @@ class RealmTest {
         this.movedRender()
         this.controls()
         this.focus()
+        this.a11y()
         print ("passed " + (to_string passes) + ", failed " + (to_string fails))
     }
 
