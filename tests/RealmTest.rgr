@@ -210,6 +210,12 @@ class RealmTest {
         def got (r.eval((this.file("tests/controls.js"))))
         this.check(("form controls by pointer and keys: pickers, range drag, list box, editing caret, file chooser (" + got + ")") (got == "i50 i100 c100,90,1,13,34,Xbc,true,2,12,true,2026-11-20,true,15:30,true,true,#000000,true,a.txt:2"))
     }
+    fn focus:void () {
+        def r:DomRealm (this.realm("<html><body style='margin:0;font:10px Arial'><a id=a href='#x'>a</a><div id=h><input id=lin></div><input id=t><div id=d></div><button id=last>last</button><dialog id=dlg><button id=d1>1</button><button id=d2>2</button></dialog></body></html>"))
+        r.runScripts()
+        def got (r.eval((this.file("tests/focus.js"))))
+        this.check(("focus: Tab through shadow trees and slots, delegatesFocus, modal dialog, :focus-visible, UA ring, pointer leave, cursor (" + got + ")") (got == "a in1 lin t inner last,inner,inner,auto 1px,false,t:true,d1,d2 d1 d2,false:t,true:pointer,false:default"))
+    }
     fn run:void () {
         this.plainDom()
         this.react()
@@ -225,6 +231,7 @@ class RealmTest {
         this.styleElement()
         this.movedRender()
         this.controls()
+        this.focus()
         print ("passed " + (to_string passes) + ", failed " + (to_string fails))
     }
 

@@ -9351,14 +9351,25 @@ impl DomView {
     /// outline-offset out from it, painted over the content; it takes no
     /// room (not an inline's, whose outline follows its line boxes)
     fn outlineBox(&self, e: &Rc<RefCell<EVGElement>>, s: &Rc<RefCell<JsonValue>>, inh: &Rc<RefCell<JsonValue>>, display: &str) {
-        let ost: String = s.borrow().getText("outline-style");
-        if !(ost == "solid" || ost == "dotted" || ost == "dashed") {
-            return;
-        }
         if display.is_empty() || display == "inline" || display == "contents" || (display.starts_with("table-") && display != "table-cell" && display != "table-caption") {
             return;
         }
-        let ow: f64 = DomView::pxOf(&s.borrow().getText("outline-width"));
+        // box-shadow first (webapi.js gives its outer layers as rings and
+        // one drop shadow): under the outline, as CSS paints them
+        self.shadowRings(e, s, display);
+        let mut ost: String = s.borrow().getText("outline-style");
+        let mut ow: f64 = DomView::pxOf(&s.borrow().getText("outline-width"));
+        // (outline-style auto, the browser's focus ring: Chromium draws it
+        // 2px wide whatever the width says)
+        if ost == "auto" {
+            ost = "solid".to_string();
+            if ow < 2.0 {
+                ow = 2.0;
+            }
+        }
+        if !(ost == "solid" || ost == "dotted" || ost == "dashed") {
+            return;
+        }
         if ow <= 0.0 {
             return;
         }
@@ -9370,6 +9381,48 @@ impl DomView {
         if oc.is_empty() {
             oc = "rgb(0, 0, 0)".to_string();
         }
+        self.ringBox(e, s, display, ow, off, &oc, &ost);
+    }
+    /// box-shadow's outer layers as webapi.js gives them: "box-ring" the
+    /// rings (no offset, no blur, a spread: focus rings, Bootstrap's and
+    /// Tailwind's), "spread color" by ", ", the topmost first; "box-drop"
+    /// the first blurred or offset one, "dx dy blur color", EVG's shadow
+    fn shadowRings(&self, e: &Rc<RefCell<EVGElement>>, s: &Rc<RefCell<JsonValue>>, display: &str) {
+        let rings: String = s.borrow().getText("box-ring");
+        if !rings.is_empty() {
+            let parts: Vec<String> = rings.split(", ").map(|x| x.to_string()).collect::<Vec<String>>();
+            // (the bottom one first: each later child paints over it)
+            let mut i: i64 = (parts.len() as i64) - 1;
+            while i >= 0 {
+                let one: String = parts[i as usize].clone();
+                let sp: i64 = DomText::index_of(&one, " ");
+                if sp > 0 {
+                    let w: f64 = DomView::pxOf(&one[0..(sp as usize)].to_string());
+                    let n1: i64 = one.as_bytes().len() as i64;
+                    let col: String = one[((sp + 1) as usize)..(n1) as usize].to_string();
+                    if w > 0.0 {
+                        self.ringBox(e, s, display, w, 0.0, &col, "solid");
+                    }
+                }
+                i = i - 1;
+            }
+        }
+        let drop: String = s.borrow().getText("box-drop");
+        if !drop.is_empty() {
+            // (the colour is last and has no spaces: webapi.js writes it rgba(r,g,b,a))
+            let d: Vec<String> = drop.split(" ").map(|x| x.to_string()).collect::<Vec<String>>();
+            if d.len() == 4 {
+                EVGElement::set_attribute(e, "shadow-offset-x", d[0].clone());
+                EVGElement::set_attribute(e, "shadow-offset-y", d[1].clone());
+                EVGElement::set_attribute(e, "shadow-radius", d[2].clone());
+                EVGElement::set_attribute(e, "shadow-color", d[3].clone());
+            }
+        }
+    }
+    /// a box of its own around the border box, `off` out from it and `w`
+    /// wide, painted over the content; it takes no room. Its corners follow
+    /// the element's (CSS UI 4: an outline follows border-radius)
+    fn ringBox(&self, e: &Rc<RefCell<EVGElement>>, s: &Rc<RefCell<JsonValue>>, display: &str, ow: f64, off: f64, oc: &str, ost: &str) {
         let o: Rc<RefCell<EVGElement>> = EVGElement::create_div();
         EVGElement::set_attribute(&o, "position", "absolute".to_string());
         EVGElement::set_attribute(&o, "box-sizing", "border-box".to_string());
@@ -9384,10 +9437,14 @@ impl DomView {
         EVGElement::set_attribute(&o, "right", format!("{}px", DomView::fmt(0.0 - out_r)));
         EVGElement::set_attribute(&o, "bottom", format!("{}px", DomView::fmt(0.0 - out_b)));
         EVGElement::set_attribute(&o, "left", format!("{}px", DomView::fmt(0.0 - out_l)));
+        let rad: String = DomView::grownRadius(s, ow + off);
+        if !rad.is_empty() {
+            EVGElement::set_attribute(&o, "border-radius", rad);
+        }
         let wv: String = format!("{}px", DomView::fmt(ow));
         if ost == "solid" {
             EVGElement::set_attribute(&o, "border-width", wv.clone());
-            EVGElement::set_attribute(&o, "border-color", oc.clone());
+            EVGElement::set_attribute(&o, "border-color", oc.to_string());
         } else {
             EVGElement::set_attribute(&o, "padding-top", wv.clone());
             EVGElement::set_attribute(&o, "padding-right", wv.clone());
@@ -9398,6 +9455,38 @@ impl DomView {
         }
         EVGElement::set_attribute(&o, "paint-late", "true".to_string());
         EVGElement::add_child(e, Rc::clone(&o));
+    }
+    /// the element's corner radii grown by `by` (a corner that is square
+    /// stays square), "" when it has none; a percentage is kept as it is
+    fn grownRadius(s: &Rc<RefCell<JsonValue>>, by: f64) -> String {
+        let names: Vec<String> = vec!["border-top-left-radius".to_string(), "border-top-right-radius".to_string(), "border-bottom-right-radius".to_string(), "border-bottom-left-radius".to_string()];
+        let mut out: Vec<String> = Vec::new();
+        let mut any: bool = false;
+        for nm in names.iter().cloned() {
+            let v: String = s.borrow().getText(&nm);
+            // (an elliptical corner, "4px 8px": its first radius)
+            let mut first: String = v.clone();
+            let sp: i64 = DomText::index_of(&v, " ");
+            if sp > 0 {
+                first = v[0..(sp as usize)].to_string();
+            }
+            if first.ends_with("%") {
+                any = true;
+                out.push(first.clone());
+                continue;
+            }
+            let r: f64 = DomView::pxOf(&first);
+            if r > 0.0 {
+                any = true;
+                out.push(format!("{}px", DomView::fmt(r + by)));
+            } else {
+                out.push("0px".to_string());
+            }
+        }
+        if !any {
+            return "".to_string();
+        }
+        out.join(" ")
     }
     /// --- tables ---------------------------------------------------------------
     ///
