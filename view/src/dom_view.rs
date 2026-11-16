@@ -5322,6 +5322,16 @@ impl DomView {
                 basis_skip = "width".to_string();
             }
         }
+        // (a percentage basis down a column of no definite height is the
+        // content's, CSS Flexbox 9.2 3 B: the height it says is not where
+        // the item starts. Radix Select's viewport, 36 px tall with flex: 1,
+        // showed one option where Chrome shows them all)
+        if pba_auto && (bcf == "column" || bcf == "column-reverse") && self.wm.is_empty() && !breplaced {
+            let pbh: String = s.borrow().getText("height");
+            if !pbh.is_empty() && pbh != "auto" {
+                basis_skip = "height".to_string();
+            }
+        }
         // (a cell's percentage width is its column's, of the table: the
         // cell fills the column, CSS 2.1 17.5.2)
         if (s.borrow().getText("display") == "table-cell" && (bcd == "table" || bcd == "inline-table")) && s.borrow().getText("width").ends_with("%") {
@@ -5846,6 +5856,14 @@ impl DomView {
         if wv.is_empty() || wv == "auto" {
             let fl0: String = s.borrow().getText("float");
             if display == "inline-block" || (display == "inline-flex" || (display == "inline-grid" || (display == "inline-table" || (fl0 == "left" || fl0 == "right")))) {
+                EVGElement::set_attribute(&e, "width", "fit-content".to_string());
+                fit_w = true;
+            }
+            // (so is a fixed box not held by both insets, CSS 2.1 10.3.7:
+            // EVG lays a fixed box out at the viewport's width. Radix's
+            // popper wrapper, position: fixed; left: 0, spread a Select's
+            // list over the whole page)
+            if pos == "fixed" && display != "grid" && !(s.borrow().has("left") && s.borrow().has("right")) && !fit_w {
                 EVGElement::set_attribute(&e, "width", "fit-content".to_string());
                 fit_w = true;
             }
@@ -6587,7 +6605,20 @@ impl DomView {
             }
             let gc: String = s.borrow().getText("align-content");
             if gc.is_empty() || gc == "normal" {
-                EVGElement::set_attribute(&e, "align-content", "stretch".to_string());
+                // (stretch grows only auto rows, CSS Grid 11.8: with every
+                // row content-sized by min-content or max-content it is
+                // start. EVG stretched them: shadcn's Sheet, auto-rows-min,
+                // spread its Name label and field down the whole sheet)
+                let gar: String = s.borrow().getText("grid-auto-rows").trim().to_string();
+                let gtr: String = s.borrow().getText("grid-template-rows").trim().to_string();
+                let mut keyword_rows: bool = !gar.is_empty() && (gtr.is_empty() || gtr == "none");
+                let gar_list: Vec<String> = DomView::listOf(&gar);
+                for gt in gar_list.iter() {
+                    if gt != "min-content" && gt != "max-content" {
+                        keyword_rows = false;
+                    }
+                }
+                EVGElement::set_attribute(&e, "align-content", if keyword_rows { "start".to_string() } else { "stretch".to_string() });
             }
             return;
         }
@@ -8289,6 +8320,24 @@ impl DomView {
                 EVGElement::set_attribute(&fte, "flex-shrink", "1".to_string());
                 EVGElement::set_attribute(&fte, "min-width", "0px".to_string());
                 EVGElement::add_child(&e, Rc::clone(&icon));
+            }
+            // a textarea that resizes: Chromium's grip in its bottom right
+            // corner (unset resize/overflow are Chromium's auto defaults)
+            let rsz: String = s.borrow().getText("resize");
+            let rov: String = s.borrow().getText("overflow-x");
+            if t == "textarea" && rsz != "none" && rov != "visible" && rov != "clip" {
+                let grip: Rc<RefCell<EVGElement>> = EVGElement::create_div();
+                grip.borrow_mut().tag_name = "svg".to_string();
+                EVGElement::set_attribute(&grip, "svg", "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\" viewBox=\"0 0 10 10\"><path d=\"M9 2 L2 9 M9 6 L6 9\" fill=\"none\" stroke=\"#6b6b6b\" stroke-width=\"1\"/></svg>".to_string());
+                EVGElement::set_attribute(&grip, "viewBox", "0 0 10 10".to_string());
+                EVGElement::set_attribute(&grip, "width", "10px".to_string());
+                EVGElement::set_attribute(&grip, "height", "10px".to_string());
+                EVGElement::set_attribute(&grip, "position", "absolute".to_string());
+                // (EVG's insets are of the content box: out over the padding)
+                EVGElement::set_attribute(&grip, "right", format!("{}px", DomView::fmt(1.0 - self.relOff(&s, "padding-right", false))));
+                EVGElement::set_attribute(&grip, "bottom", format!("{}px", DomView::fmt(1.0 - self.relOff(&s, "padding-bottom", false))));
+                EVGElement::set_attribute(&grip, "pointer-events", "none".to_string());
+                EVGElement::add_child(&e, Rc::clone(&grip));
             }
             // (its outline, a :focus rule's: the control returns before the
             // other elements' outlines are added)
