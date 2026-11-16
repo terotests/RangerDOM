@@ -204,6 +204,12 @@ class RealmTest {
         def got (r.eval("__deltaRender(true); __renderDelta(); __fastRenderCheck(true); var a = document.getElementById('a'), b = document.getElementById('b'), sp = document.getElementById('in'), o = []; for (var i = 0; i < 4; i++) { a.style.transform = 'translate(' + i + 'px, 2px) rotate(' + i + 'deg)'; b.style.transform = 'rotate(' + (i + 4) + 'deg)'; __renderDelta(); } o.push(JSON.parse(__fastRenderCheck()).n); for (i = 0; i < 3; i++) { b.style.opacity = String(0.4 + i / 10); __renderDelta(); } o.push(JSON.parse(__fastRenderCheck()).n); sp.className = 'red'; b.style.transform = 'rotate(20deg)'; var t = __renderDelta(); o.push(JSON.parse(__fastRenderCheck()).n, /rotate\\(20deg\\)/.test(t), /rgb\\(9, 0, 0\\)/.test(t)); a.style.transform = 'none'; __renderDelta(); a.style.transform = 'translate(50%, 0)'; __renderDelta(); a.textContent = 'z'; a.style.transform = 'rotate(1deg)'; t = __renderDelta(); o.push(JSON.parse(__fastRenderCheck()).n, /\"x\":\"z\"/.test(t), JSON.parse(__fastRenderCheck()).bad); o.join(',')"))
         this.check("only a transform or an opacity set: the kept render with the new value, the same as a whole render" (got == "8,11,11,true,true,11,true,0"))
     }
+    fn controls:void () {
+        def r:DomRealm (this.realm("<html><body style='margin:0;font:10px Arial'><input type=range id=r min=0 max=100 step=10 value=0><select id=m multiple style='font-size:10px;line-height:10px;border:0;padding:0'><option value=1>1<option value=2>2<option value=3>3<option value=4>4</select><div id=ce contenteditable style='font-size:10px'>abc</div><input id=t value=hello style='font-size:10px;padding:0;border:0'><input id=n type=number value=10 step=2><input id=d type=date value=2026-11-15><input id=tm type=time value=13:45><input id=c type=color value='#3366cc'><input id=f type=file></body></html>"))
+        r.runScripts()
+        def got (r.eval((this.file("tests/controls.js"))))
+        this.check(("form controls by pointer and keys: pickers, range drag, list box, editing caret, file chooser (" + got + ")") (got == "i50 i100 c100,90,1,13,34,Xbc,true,2,12,true,2026-11-20,true,15:30,true,true,#000000,true,a.txt:2"))
+    }
     fn run:void () {
         this.plainDom()
         this.react()
@@ -218,6 +224,7 @@ class RealmTest {
         this.hasSibling()
         this.styleElement()
         this.movedRender()
+        this.controls()
         print ("passed " + (to_string passes) + ", failed " + (to_string fails))
     }
 

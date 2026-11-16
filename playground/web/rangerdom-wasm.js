@@ -88,6 +88,14 @@ export async function loadWasmPlayground(url, opts = {}) {
     } catch (_) {}
   }
 
+  // Date's local time: the browser's zone (CEr's is UTC until told)
+  if (x.pg_set_time_zone) {
+    try {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (tz) { const [a, b] = put(tz); x.pg_set_time_zone(a, b); }
+    } catch (_) {}
+  }
+
   class WasmPlayground {
     reset() { x.pg_reset(); }
     addScript(url, text) { const [a, b] = put(url), [c, d] = put(text); x.pg_add_script(a, b, c, d); }
