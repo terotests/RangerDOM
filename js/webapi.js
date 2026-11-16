@@ -99,10 +99,11 @@
   function attrChanged(el, name, was, now) {
     if (name === 'class' || name === 'id' || name === undefined) ancEpoch++;
     if (name !== 'style') sigEpoch++;
-    if (shadowCount && el.isConnected && inShadowScope(el)) { changed(); if (name === 'slot' || name === 'name') scheduleSlots(name === 'slot' ? assignedSlotOf(el) : null); return; }
+    var conn = el.isConnected;
+    if (shadowCount && conn && inShadowScope(el)) { changed(); if (name === 'slot' || name === 'name') scheduleSlots(name === 'slot' ? assignedSlotOf(el) : null); return; }
     // an element not in the page (React sets a new element's attributes
     // before it inserts it): nothing shown changes; what it kept goes
-    if (!el.isConnected && doc && el.ownerDocument === doc) {
+    if (!conn && doc && el.ownerDocument === doc) {
       // (el._es: el or something under it was styled at some time, see
       // computedOf. A grid builds each row out of the page, attribute by
       // attribute: nothing there is kept, and each change walked the row.)
@@ -112,7 +113,7 @@
     // (the root's inline style too: what matches stays, what its children
     // take from it is inheritDown's. vaul sets the root's style for each
     // drawer that opens or closes.)
-    var reach = el.isConnected && doc && el.ownerDocument === doc && (el !== doc.documentElement || name === 'style') ? selectorReach() : 0;
+    var reach = conn && doc && el.ownerDocument === doc && (el !== doc.documentElement || name === 'style') ? selectorReach() : 0;
     if (!reach) { changed(); return; }
     generation++;
     textStamp++;
@@ -1473,7 +1474,16 @@
       var i = indexIn(this); return i > 0 ? p._c[i - 1] : null;
     }
     get isConnected() {
-      for (var n = this; n; n = n.nodeType === 11 && n.host ? n.host : n.parentNode) if (n.nodeType === 9) return true;
+      // (up to the top of the tree: the document, or a shadow root, from
+      // whose host it goes on. Asked at every attribute change)
+      for (var n = this; n;) {
+        var p = n.parentNode;
+        if (p) { n = p; continue; }
+        var t = n.nodeType;
+        if (t === 9) return true;
+        if (t !== 11 || !n.host) return false;
+        n = n.host;
+      }
       return false;
     }
     get assignedSlot() { return shadowCount ? assignedSlotOf(this) : null; }
@@ -2004,28 +2014,45 @@
     });
   }
 
+  var attrLower = Object.create(null), attrLowerN = 0, attrValid = Object.create(null), attrValidN = 0;
   class DOMTokenList {
-    constructor(el, attr) { this._el = el; this._attr = attr; }
-    _list() { var v = this._el.getAttribute(this._attr); return v ? v.split(/[ \t\n\f\r]+/).filter(Boolean) : []; }
-    _set(l) { this._el.setAttribute(this._attr, l.join(' ')); }
-    get length() { return this._list().length; }
+    constructor(el, attr) { this._el = el; this._attr = attr; this._tv = undefined; this._tl = null; }
+    // (the attribute's tokens, split once per value it has: a grid toggles
+    // a few classes on every cell it shows, and each toggle split the
+    // text twice. The list is kept as it is; a change works on a copy)
+    _tok() {
+      var v = attrOf(this._el, this._attr);
+      if (v === this._tv && this._tl) return this._tl;
+      var l = v ? (v.indexOf(' ') < 0 && !/[\t\n\f\r]/.test(v) ? [v] : v.split(/[ \t\n\f\r]+/).filter(Boolean)) : [];
+      this._tv = v;
+      this._tl = l;
+      return l;
+    }
+    _list() { return this._tok().slice(); }
+    _set(l) {
+      var s = l.join(' ');
+      this._el.setAttribute(this._attr, s);
+      // (what was set, when no hook made it something else)
+      if (attrOf(this._el, this._attr) === s) { this._tv = s; this._tl = l; }
+    }
+    get length() { return this._tok().length; }
     get value() { return this._el.getAttribute(this._attr) || ''; }
     set value(v) { this._el.setAttribute(this._attr, v); }
-    item(i) { var l = this._list(); return i < l.length ? l[i] : null; }
-    contains(t) { return this._list().indexOf(String(t)) >= 0; }
+    item(i) { var l = this._tok(); return i < l.length ? l[i] : null; }
+    contains(t) { return this._tok().indexOf(String(t)) >= 0; }
     add() {
-      var l = this._list(), before = l.length;
-      for (var i = 0; i < arguments.length; i++) { var t = String(arguments[i]); checkToken(t); if (l.indexOf(t) < 0) l.push(t); }
-      if (l.length !== before || this._el.getAttribute(this._attr) === null) this._set(l);
+      var cur = this._tok(), l = null;
+      for (var i = 0; i < arguments.length; i++) { var t = String(arguments[i]); checkToken(t); if ((l || cur).indexOf(t) < 0) { if (!l) l = cur.slice(); l.push(t); } }
+      if (l || attrOf(this._el, this._attr) === null) this._set(l || cur.slice());
     }
     remove() {
-      var l = this._list(), before = l.length;
-      for (var i = 0; i < arguments.length; i++) { var t = String(arguments[i]); checkToken(t); var k = l.indexOf(t); while (k >= 0) { l.splice(k, 1); k = l.indexOf(t); } }
-      if (l.length !== before) this._set(l);
+      var cur = this._tok(), l = null;
+      for (var i = 0; i < arguments.length; i++) { var t = String(arguments[i]); checkToken(t); var k = (l || cur).indexOf(t); while (k >= 0) { if (!l) l = cur.slice(); l.splice(k, 1); k = l.indexOf(t); } }
+      if (l) this._set(l);
     }
     toggle(t, force) {
       t = String(t);
-      var has = this.contains(t);
+      var has = this._tok().indexOf(t) >= 0;
       if (force === undefined ? has : !force) { if (has) this.remove(t); return false; }
       if (!has) this.add(t);
       return true;
@@ -2039,9 +2066,13 @@
     toString() { return this.value; }
   }
   DOMTokenList.prototype[Symbol.iterator] = function () { return this._list()[Symbol.iterator](); };
+  // (tokens that passed: the same few class names come again and again)
+  var tokenOk = Object.create(null), tokenOkN = 0;
   function checkToken(t) {
+    if (tokenOk[t] === true) return;
     if (t === '') throw DOMException('The token provided must not be empty.', 'SyntaxError');
     if (/\s/.test(t)) throw DOMException("The token provided ('" + t + "') contains HTML space characters, which are not valid in tokens.", 'InvalidCharacterError');
+    if (tokenOkN < 4096) { tokenOkN++; tokenOk[t] = true; }
   }
 
   // ---- style declarations --------------------------------------------------
@@ -2405,7 +2436,7 @@
       var w = 'medium', st = 'none', c = 'currentcolor';
       var toks = splitValue(v);
       for (var t = 0; t < toks.length; t++) {
-        if (BORDER_STYLES.test(toks[t])) st = toks[t];
+        if (BORDER_STYLES.test(toks[t]) || (n === 'outline' && toks[t] === 'auto')) st = toks[t];
         else if (isLength(toks[t])) w = toks[t];
         else c = toks[t];
       }
@@ -2487,9 +2518,10 @@
     // sends it (TanStack Virtual's scrollToIndex waits for it)
     // (a scrolled box's offset is clamped by a layout: read after its
     // content shrank, it is laid out first)
-    get scrollTop() { if (this._scl) scrollRead(this); return this._sTop; }
+    // (an offset of 0 stays 0 whatever the range has become: no layout for it)
+    get scrollTop() { if (this._scl && this._sTop) scrollRead(this); return this._sTop; }
     set scrollTop(v) { v = Math.max(0, +v || 0); if (this === (doc && doc.documentElement) && doc.body && boxes[doc.body.__id]) v = Math.min(v, Math.max(0, Math.round(pageHeight()) - viewport.h)); if (v === this._sTop) return; this._sTop = v; keptScroll(this); scriptScrolled(this); }
-    get scrollLeft() { if (this._scl) scrollRead(this); return this._sLeft; }
+    get scrollLeft() { if (this._scl && this._sLeft) scrollRead(this); return this._sLeft; }
     set scrollLeft(v) { v = +v || 0; if (v === this._sLeft) return; this._sLeft = v; keptScroll(this); scriptScrolled(this); }
     get nodeName() { return this.tagName; }
     get tagName() { return this.namespaceURI === HTML_NS ? this._qname.toUpperCase() : this._qname; }
@@ -2501,9 +2533,18 @@
     get classList() { return this._cl || (this._cl = new DOMTokenList(this, 'class')); }
     get slot() { return this.getAttribute('slot') || ''; }
     set slot(v) { this.setAttribute('slot', v); }
-    _norm(n) { n = String(n); return this.namespaceURI === HTML_NS ? n.toLowerCase() : n; }
+    // (attribute names as HTML takes them, lower case, and the names that
+    // are valid ones: both kept for the names seen, a page uses a few
+    // dozen and reads or sets them all the time)
+    _norm(n) {
+      if (typeof n !== 'string') n = String(n);
+      if (this.namespaceURI !== HTML_NS) return n;
+      var l = attrLower[n];
+      if (l === undefined) { l = n.toLowerCase(); if (attrLowerN < 4096) { attrLowerN++; attrLower[n] = l; } }
+      return l;
+    }
     _find(n) { for (var i = 0; i < this._attrs.length; i++) if (this._attrs[i].name === n) return i; return -1; }
-    getAttribute(n) { var i = this._find(this._norm(n)); return i < 0 ? null : this._attrs[i]._v; }
+    getAttribute(n) { n = this._norm(n); var a = this._attrs; for (var i = 0; i < a.length; i++) if (a[i].name === n) return a[i]._v; return null; }
     getAttributeNS(ns, n) { return this.getAttribute(n); }
     getAttributeNode(n) { var i = this._find(this._norm(n)); return i < 0 ? null : this._attrs[i]; }
     getAttributeNames() { return this._attrs.map(function (a) { return a.name; }); }
@@ -2512,8 +2553,11 @@
     hasAttributes() { return this._attrs.length > 0; }
     setAttribute(n, v) {
       n = this._norm(n);
-      if (!/^[^\s"'>\/=\0]+$/.test(n)) throw DOMException("Failed to execute 'setAttribute' on 'Element': '" + n + "' is not a valid attribute name.", 'InvalidCharacterError');
-      v = String(v);
+      if (attrValid[n] !== true) {
+        if (!/^[^\s"'>\/=\0]+$/.test(n)) throw DOMException("Failed to execute 'setAttribute' on 'Element': '" + n + "' is not a valid attribute name.", 'InvalidCharacterError');
+        if (attrValidN < 4096) { attrValidN++; attrValid[n] = true; }
+      }
+      if (typeof v !== 'string') v = String(v);
       var i = this._find(n);
       var old = i < 0 ? null : this._attrs[i]._v;
       if (i < 0) this._attrs.push(new Attr(n, v, this)); else this._attrs[i]._v = v;
@@ -3649,8 +3693,17 @@
   }
   class HTMLDialogElement extends HTMLElement {
     show() { this.open = true; }
-    showModal() { this.open = true; this._modal = true; topAdd(this); }
-    close(rv) { if (!this.open) return; if (this._modal) { this._modal = false; topRemove(this); } this.open = false; this.returnValue = rv === undefined ? this.returnValue : String(rv); var self = this; setTimeout(function () { dispatch(self, new Event('close')); }, 0); }
+    showModal() {
+      if (this.open && this._modal) return;
+      this.open = true; this._modal = true; topAdd(this);
+      this._returnFocus = doc && doc._active;
+      // dialog focusing steps: autofocus, else the first focusable, else the dialog
+      var inside = [];
+      tabWalk(this, inside, true);
+      var af = inside.filter(function (e) { return e.hasAttribute('autofocus'); })[0] || inside[0];
+      if (af) focusElement(af); else if (doc && doc._active && !composedContains(this, doc._active)) focusElement(null);
+    }
+    close(rv) { if (!this.open) return; if (this._modal) { this._modal = false; topRemove(this); } this.open = false; this.returnValue = rv === undefined ? this.returnValue : String(rv); var rf = this._returnFocus; this._returnFocus = null; if (rf && rf.isConnected && doc && (!doc._active || composedContains(this, doc._active))) focusElement(rf, { preventScroll: true }); var self = this; setTimeout(function () { dispatch(self, new Event('close')); }, 0); }
   }
   reflectBool(HTMLDialogElement, ['open']);
   class HTMLDetailsElement extends HTMLElement {}
@@ -4742,17 +4795,57 @@
     if (!el || el.nodeType !== 1 || !el.isConnected) return false;
     if (el.disabled) return false;
     if (el.hasAttribute('tabindex') || focusableByDefault(el)) {
-      for (var n = el; n && n.nodeType === 1; n = n.parentNode) {
+      for (var n = el; n && n.nodeType === 1; n = composedParent(n)) {
         if (n.hasAttribute('inert')) return false;
         if (computedOf(n).display === 'none') return false;
       }
+      if (blockedByModal(el)) return false;
       return computedOf(el).visibility !== 'hidden';
     }
     return false;
   }
+  // the parent in the composed tree: a shadow root's child goes on to its host
+  function composedParent(n) {
+    var p = n.parentNode;
+    return p && p.nodeType === 11 && p.host ? p.host : p;
+  }
+  function composedContains(a, n) {
+    for (; n; n = composedParent(n)) if (n === a) return true;
+    return false;
+  }
+  // an open modal dialog makes everything outside it inert (HTML 6.2,
+  // "blocked by a modal dialog"): the topmost one in the top layer
+  function topModal() {
+    for (var i = topLayer.length - 1; i >= 0; i--) { var t = topLayer[i]; if (t._modal && t.isConnected) return t; }
+    return null;
+  }
+  function blockedByModal(el) {
+    var m = topModal();
+    if (!m) return false;
+    if (composedContains(m, el)) return false;
+    // (what a popover or another top-layer box above the dialog holds is not blocked)
+    for (var i = topLayer.indexOf(m) + 1; i < topLayer.length; i++) if (composedContains(topLayer[i], el)) return false;
+    return true;
+  }
+  // a host whose shadow root delegates focus: the first focusable element
+  // in its shadow tree, in sequential order, takes the focus (HTML 6.6.4)
+  function delegateTarget(host) {
+    var out = [];
+    tabWalk(host._sr, out, true);
+    for (var i = 0; i < out.length; i++) if (out[i].hasAttribute('autofocus')) return out[i];
+    return out[0] || null;
+  }
   function focusElement(el, opts) {
     if (!doc) return;
+    if (el && el._sr && el._sr.delegatesFocus) {
+      var a = doc._active;
+      // (the focus already in its shadow tree stays where it is)
+      if (a && a !== el && composedContains(el, a)) return;
+      var dt = delegateTarget(el);
+      if (dt) el = dt;
+    }
     if (el && !focusable(el)) return;
+    if (opts && opts.focusVisible !== undefined) doc._focusVisible = !!opts.focusVisible;
     var old = doc._active && doc._active.isConnected ? doc._active : null;
     if (old === el) return;
     if (old) {
@@ -4766,14 +4859,37 @@
     doc._active = el;
     if (el) el._dirty = false;
     pointerStateChanged(old, el, true);
+    // (the focused element is scrolled into view unless the caller says
+    // not to; Chromium centers it when it is not already in view)
+    if (el && !(opts && opts.preventScroll)) { try { scrollIntoView(el, { block: 'if-needed', inline: 'if-needed' }); } catch (e) {} }
     if (el) {
       dispatch(el, new FocusEvent('focus', { relatedTarget: old, view: G }));
       dispatch(el, new FocusEvent('focusin', { bubbles: true, relatedTarget: old, view: G }));
     }
   }
+  // sequential focus order (HTML 6.6.3): the flat tree, a host's shadow
+  // tree where the host is, a slot's assigned nodes where the slot is; a
+  // host that delegates focus is not a stop of its own
+  function tabWalk(n, out, all) {
+    var kids = n._c;
+    for (var i = 0; i < kids.length; i++) {
+      var k = kids[i];
+      if (k._attrs === undefined) continue;
+      if (k.localName === 'slot' && shadowRootOf(k)) {
+        var f = flatten(k, []);
+        for (var j = 0; j < f.length; j++) if (f[j]._attrs !== undefined) tabVisit(f[j], out, all);
+        continue;
+      }
+      tabVisit(k, out, all);
+    }
+  }
+  function tabVisit(e, out, all) {
+    if (!(e._sr && e._sr.delegatesFocus) && focusable(e) && (all || e.tabIndex >= 0)) out.push(e);
+    tabWalk(e._sr || e, out, all);
+  }
   function tabOrder() {
     var out = [];
-    if (doc) eachElement(doc, function (e) { if (focusable(e) && e.tabIndex >= 0) out.push(e); });
+    if (doc) tabWalk(doc, out, false);
     var pos = out.filter(function (e) { return e.tabIndex > 0; }).sort(function (a, b) { return a.tabIndex - b.tabIndex; });
     return pos.concat(out.filter(function (e) { return e.tabIndex === 0; }));
   }
@@ -6585,7 +6701,7 @@
       case 'target': return false;
       case 'defined': return true;
       case 'focus': return !!doc && (doc._active === el || (shadowCount && !!el._sr && focusInShadow(el)));
-      case 'focus-visible': return !!doc && doc._active === el && doc._focusVisible !== false;
+      case 'focus-visible': return !!doc && doc._active === el && (doc._focusVisible !== false || textEntry(el));
       case 'focus-within':
         if (!doc || !doc._active) return false;
         if (!shadowCount) return el.contains(doc._active);
@@ -7523,6 +7639,7 @@
     'input,textarea,select{background-color:rgb(255,255,255);border:2px inset rgb(118,118,118)}input{padding:1px 2px}textarea{padding:2px;white-space:pre-wrap}button,input[type=button],input[type=submit],input[type=reset]{padding:1px 6px;border:2px outset rgb(118,118,118);background-color:rgb(239,239,239);text-align:center;cursor:default}input[type=hidden]{display:none}input[type=color]{width:50px;height:27px;padding:1px 2px;border:1px solid rgb(118,118,118);border-radius:2px;background-color:rgb(239,239,239)}input[type=range]{width:129px;height:16px;margin:2px;padding:0;border:0;background-color:transparent}input[type=file]{padding:0;border:0;background-color:transparent}input[type=checkbox]{margin:3px 3px 3px 4px}input[type=radio]{margin:3px 3px 0 5px}button:disabled,input[type=button]:disabled,input[type=submit]:disabled,input[type=reset]:disabled{color:rgba(16,16,16,0.3);border-color:rgba(118,118,118,0.3);background-color:rgba(239,239,239,0.3)}button,select,input[type=button],input[type=submit],input[type=reset],input[type=color],input[type=checkbox],input[type=radio]{box-sizing:border-box}',
     'img,svg,video,canvas,iframe,embed,object{display:inline-block}svg:not(:root){overflow:hidden}iframe{border:2px inset rgb(118,118,118)}fieldset{margin-left:2px;margin-right:2px;padding:.35em .75em .625em;border:2px groove rgb(192,192,192)}legend{padding-left:2px;padding-right:2px}',
     '[dir=rtl]{direction:rtl}[dir=ltr]{direction:ltr}',
+    ':focus-visible{outline:auto 1px rgb(16,16,16)}',
     '[popover]:not(:popover-open):not(dialog[open]){display:none}[popover]{position:fixed;inset:0;width:fit-content;height:fit-content;margin:auto;border:solid;padding:.25em;overflow:auto;color:black;background-color:white}dialog:modal{position:fixed;top:0;bottom:0;max-width:calc(100% - 6px - 2em);max-height:calc(100% - 6px - 2em);overflow:auto}',
     'dialog:not([open]){display:none}dialog{position:absolute;left:0;right:0;width:fit-content;height:fit-content;margin:auto;border:solid;padding:1em;background-color:white;color:black}mark{background-color:yellow;color:black}center{text-align:center}'
   ].join('\n');
@@ -9742,6 +9859,254 @@
   // what the host lays out: each element {i, t, s: computed style (the
   // properties that differ from the initial value), a: attributes the host
   // shows, c: children}, each text {i, x}
+  // ACCESSIBILITY. What each element is to a screen reader (WAI-ARIA 1.2,
+  // HTML-AAM, Accessible Name and Description 1.2), computed where the
+  // element renders and sent with it as `ax`: r role, n name, d
+  // description and the states. The host's view puts them on its boxes
+  // (DomView: EVG's a11y fields), from which EVGA11yFromTree builds the tree
+  // a host mirrors (evg-a11y.js) or hands to the platform. Only elements
+  // with a role a reader stops on carry one; text in a box with none is a
+  // "text" node (static text). Roles are the ones EVGA11yFromTree knows: an
+  // ARIA role it lacks is mapped to the nearest it has.
+  var AX_ROLES = /^(group|text|heading|button|checkbox|radio|textbox|img|link|navigation|form|rowgroup|log|combobox|listbox|option|grid|tabpanel|tablist|tab|toolbar|menu|menubar|menuitem|menuitemcheckbox|menuitemradio|separator|dialog|alertdialog|tooltip|status|region|banner|main|paragraph|list|listitem|table|row|columnheader|rowheader|cell|gridcell|switch|radiogroup|slider|spinbutton|progressbar|tree|treeitem)$/;
+  var AX_ALIAS = { searchbox: 'textbox', image: 'img', alert: 'status', timer: 'status', marquee: 'status', meter: 'progressbar', treegrid: 'grid', scrollbar: 'slider',
+    article: 'group', complementary: 'region', contentinfo: 'region', search: 'region', figure: 'group', document: 'group', application: 'group', feed: 'group', note: 'group', blockquote: 'group', definition: 'group', term: 'group', directory: 'list', caption: 'text', math: 'img' };
+  // roles named by their content (accname 4.3.2, step 2F)
+  var AX_FROM_CONTENT = /^(button|cell|checkbox|columnheader|gridcell|heading|link|menuitem|menuitemcheckbox|menuitemradio|option|radio|rowheader|switch|tab|tooltip|treeitem)$/;
+  function axImplicit(n) {
+    var t = n.localName;
+    if (n.namespaceURI !== HTML_NS) return t === 'svg' && (n.getAttribute('aria-label') || n.getAttribute('aria-labelledby')) ? 'img' : '';
+    switch (t) {
+      case 'a': case 'area': return n.hasAttribute('href') ? 'link' : '';
+      case 'button': case 'summary': return 'button';
+      case 'h1': case 'h2': case 'h3': case 'h4': case 'h5': case 'h6': return 'heading';
+      case 'img': return n.getAttribute('alt') === '' ? '' : 'img';
+      case 'input':
+        var ty = n.type;
+        if (ty === 'hidden') return '';
+        if (/^(button|submit|reset|image)$/.test(ty)) return 'button';
+        if (ty === 'checkbox') return n.hasAttribute('switch') ? 'switch' : 'checkbox';
+        if (ty === 'radio') return 'radio';
+        if (ty === 'range') return 'slider';
+        if (ty === 'number') return 'spinbutton';
+        if (/^(color|file|date|time|datetime-local|month|week)$/.test(ty)) return ty === 'file' ? 'button' : 'textbox';
+        return n.hasAttribute('list') ? 'combobox' : 'textbox';
+      case 'textarea': return 'textbox';
+      case 'select': return n.multiple || n.size > 1 ? 'listbox' : 'combobox';
+      case 'option': return 'option';
+      case 'ul': case 'ol': case 'menu': return 'list';
+      case 'li': return 'listitem';
+      case 'nav': return 'navigation';
+      case 'main': return 'main';
+      case 'header': return axInSection(n) ? '' : 'banner';
+      case 'footer': return axInSection(n) ? '' : 'region';
+      case 'aside': return 'region';
+      case 'section': return axHasName(n) ? 'region' : '';
+      case 'form': return axHasName(n) ? 'form' : '';
+      case 'article': case 'fieldset': case 'details': case 'figure': case 'blockquote': return 'group';
+      case 'dialog': return 'dialog';
+      case 'p': return 'paragraph';
+      case 'hr': return 'separator';
+      case 'table': return 'table';
+      case 'thead': case 'tbody': case 'tfoot': return 'rowgroup';
+      case 'tr': return 'row';
+      case 'td': return axGridTable(n) ? 'gridcell' : 'cell';
+      case 'th': var sc = n.getAttribute('scope'); return sc === 'row' || sc === 'rowgroup' ? 'rowheader' : 'columnheader';
+      case 'progress': case 'meter': return 'progressbar';
+      case 'output': return 'status';
+    }
+    return '';
+  }
+  function axInSection(n) { for (var p = n.parentNode; p && p.nodeType === 1; p = p.parentNode) if (/^(article|aside|main|nav|section)$/.test(p.localName)) return true; return false; }
+  function axHasName(n) { return !!(n.getAttribute('aria-label') || n.getAttribute('aria-labelledby') || n.getAttribute('title')); }
+  function axGridTable(n) { for (var p = n.parentNode; p && p.nodeType === 1; p = p.parentNode) if (p.localName === 'table') { var r = (p.getAttribute('role') || '').trim(); return r === 'grid' || r === 'treegrid'; } return false; }
+  function axRoleOf(n) {
+    var ra = n.getAttribute('role');
+    if (ra === null && n._internals && n._internals.role) ra = String(n._internals.role);
+    if (ra !== null) {
+      var toks = ra.trim().toLowerCase().split(/\s+/);
+      for (var i = 0; i < toks.length; i++) {
+        var r = toks[i];
+        // (none/presentation is ignored on a focusable element, ARIA 9.2)
+        if (r === 'none' || r === 'presentation') { if (focusableByDefault(n) || n.hasAttribute('tabindex')) continue; return ''; }
+        if (r === 'generic') return '';
+        if (AX_ROLES.test(r)) return r;
+        if (AX_ALIAS[r]) return AX_ALIAS[r];
+      }
+    }
+    return axImplicit(n);
+  }
+  function axAttr(n, a) {
+    var v = n.getAttribute(a);
+    if (v === null && n._internals) { var p = 'aria' + a.slice(5).replace(/(^|-)([a-z])/g, function (m, d, c) { return c.toUpperCase(); }); var iv = n._internals[p]; if (iv !== null && iv !== undefined) v = String(iv); }
+    return v;
+  }
+  function axHidden(n) {
+    if (n.getAttribute('aria-hidden') === 'true' || n.hasAttribute('hidden') && n.getAttribute('hidden') !== 'until-found') return true;
+    var cs = computedOf(n);
+    return cs.display === 'none' || cs.visibility === 'hidden';
+  }
+  function axSquash(t) { return t.replace(/\s+/g, ' ').trim(); }
+  // the text of an element as a name (accname 4.3.2 steps 2B-2G): what
+  // it holds, each child by its own name, hidden parts left out
+  function axText(n, depth, seen) {
+    if (depth > 30) return '';
+    var out = '';
+    for (var i = 0; i < n._c.length; i++) {
+      var k = n._c[i];
+      if (k.nodeType === 3) { out += k.data; continue; }
+      if (k.nodeType !== 1 || seen.indexOf(k) >= 0) continue;
+      if (axHidden(k)) continue;
+      var lab = axAttr(k, 'aria-label');
+      if (lab && lab.trim()) { out += ' ' + lab + ' '; continue; }
+      var t = k.localName;
+      if (t === 'img' || (t === 'input' && k.type === 'image') || t === 'area') { out += ' ' + (k.getAttribute('alt') || '') + ' '; continue; }
+      if (t === 'input' || t === 'textarea') { out += ' ' + (k.type === 'password' ? '' : /^(checkbox|radio)$/.test(k.type) ? '' : k.value) + ' '; continue; }
+      if (t === 'select') { out += ' ' + (k.selectedOptions && k.selectedOptions[0] ? k.selectedOptions[0].text : '') + ' '; continue; }
+      if (t === 'script' || t === 'style' || t === 'template') continue;
+      // (a slot: what is assigned to it, else its own content)
+      if (t === 'slot' && shadowRootOf(k)) { var fl = flatten(k, []), ft = ''; for (var fi = 0; fi < fl.length; fi++) ft += fl[fi].nodeType === 3 ? fl[fi].data : fl[fi].nodeType === 1 && !axHidden(fl[fi]) ? ' ' + axText(fl[fi], depth + 1, seen) + ' ' : ''; out += ft; continue; }
+      var cs = computedOf(k), inl = !cs.display || /^inline/.test(cs.display) || cs.display === 'contents';
+      var bt = k._sr ? axText(k._sr, depth + 1, seen) : axText(k, depth + 1, seen);
+      out += inl ? bt : ' ' + bt + ' ';
+    }
+    return out;
+  }
+  function axRefs(n, attr) {
+    var ids = (n.getAttribute(attr) || '').trim();
+    if (!ids) return '';
+    var root = n.getRootNode ? n.getRootNode() : doc, out = [];
+    ids.split(/\s+/).forEach(function (id) {
+      var e = root.getElementById ? root.getElementById(id) : doc.getElementById(id);
+      if (!e) return;
+      var l = axAttr(e, 'aria-label');
+      out.push(l && l.trim() ? l : axSquash(axText(e, 0, [n])));
+    });
+    return axSquash(out.join(' '));
+  }
+  function axLabelText(n) {
+    // <label for=id> and an enclosing <label>, the control's own text left out
+    var out = [];
+    var id = n.getAttribute('id'), root = n.getRootNode ? n.getRootNode() : doc;
+    if (id && root.querySelectorAll) { var ls = root.querySelectorAll('label[for]'); for (var i = 0; i < ls.length; i++) if (ls[i].getAttribute('for') === id) out.push(axText(ls[i], 0, [n])); }
+    for (var p = n.parentNode; p && p.nodeType === 1; p = p.parentNode) if (p.localName === 'label' && !p.hasAttribute('for')) { out.push(axText(p, 0, [n])); break; }
+    return axSquash(out.join(' '));
+  }
+  function axName(n, role) {
+    var v = axRefs(n, 'aria-labelledby');
+    if (v) return v;
+    v = axAttr(n, 'aria-label');
+    if (v && v.trim()) return axSquash(v);
+    var t = n.localName;
+    if (t === 'input' || t === 'textarea' || t === 'select' || t === 'meter' || t === 'progress' || t === 'output') {
+      if (t === 'input' && /^(button|submit|reset)$/.test(n.type)) return n.value || (n.type === 'submit' ? 'Submit' : n.type === 'reset' ? 'Reset' : '');
+      if (t === 'input' && n.type === 'image') return n.getAttribute('alt') || 'Submit';
+      v = axLabelText(n);
+      if (v) return v;
+    }
+    if (t === 'img' || t === 'area') { v = n.getAttribute('alt'); if (v) return axSquash(v); }
+    if (t === 'fieldset' || t === 'figure' || t === 'table') {
+      var cap = t === 'fieldset' ? 'legend' : t === 'figure' ? 'figcaption' : 'caption';
+      for (var i = 0; i < n._c.length; i++) if (n._c[i].localName === cap) return axSquash(axText(n._c[i], 0, []));
+    }
+    if (t === 'svg') { for (var j = 0; j < n._c.length; j++) if (n._c[j].localName === 'title') return axSquash(n._c[j].textContent); }
+    if (AX_FROM_CONTENT.test(role)) { v = axSquash(axText(n._sr || n, 0, [])); if (v) return v.length > 400 ? v.slice(0, 400) : v; }
+    v = n.getAttribute('title');
+    if (v && v.trim()) return axSquash(v);
+    if ((role === 'textbox' || role === 'combobox' || role === 'spinbutton') && n.getAttribute('placeholder')) return axSquash(n.getAttribute('placeholder'));
+    return '';
+  }
+  function axTri(v) { return v === 'true' ? 2 : v === 'false' ? 1 : v === 'mixed' ? 3 : 0; }
+  // the render tree's `ax` for an element, or null (no role, nothing to say)
+  function axOf(n) {
+    if (n.getAttribute('aria-hidden') === 'true') return { h: 1 };
+    var role = axRoleOf(n), o = null;
+    if (!role) {
+      // static text: a box with text of its own and no role, outside a
+      // role that is named by its content (it is that role's name already)
+      var own = '';
+      for (var i = 0; i < n._c.length; i++) if (n._c[i].nodeType === 3) own += n._c[i].data;
+      if (!own.trim()) return null;
+      for (var p = composedParent(n); p && p.nodeType === 1; p = composedParent(p)) {
+        var pr = axRoleOf(p);
+        if (pr && AX_FROM_CONTENT.test(pr)) return null;
+        if (pr) break;
+      }
+      return { r: 'text', n: axSquash(own).slice(0, 2000) };
+    }
+    o = { r: role };
+    var nm = axName(n, role);
+    // (a paragraph's or list item's text as its name: EVG's tree has no
+    // static text under a role, so what it holds is said as its name)
+    if (!nm && (role === 'paragraph' || role === 'listitem')) { nm = axSquash(axText(n, 0, [])); if (nm.length > 2000) nm = nm.slice(0, 2000); }
+    if (nm) o.n = nm;
+    var ds = axRefs(n, 'aria-describedby') || axAttr(n, 'aria-description') || (nm !== axSquash(n.getAttribute('title') || '') ? axSquash(n.getAttribute('title') || '') : '');
+    if (ds) o.d = ds;
+    var t = n.localName;
+    // states
+    var ch = axTri(axAttr(n, 'aria-checked'));
+    if (t === 'input' && (n.type === 'checkbox' || n.type === 'radio')) ch = n.indeterminate ? 3 : n.checked ? 2 : 1;
+    else if (!ch && /^(checkbox|radio|switch|menuitemcheckbox|menuitemradio)$/.test(role)) ch = 1;
+    if (ch) o.ck = ch;
+    var pr2 = axTri(axAttr(n, 'aria-pressed')); if (pr2 && role === 'button') o.pr = pr2;
+    var ex = axTri(axAttr(n, 'aria-expanded'));
+    if (t === 'details') ex = n.open ? 2 : 1;
+    else if (t === 'summary' && n.parentNode && n.parentNode.localName === 'details') ex = n.parentNode.open ? 2 : 1;
+    if (ex) o.ex = ex;
+    var se = axTri(axAttr(n, 'aria-selected'));
+    if (t === 'option') se = n.selected ? 2 : 1;
+    if (se === 2) o.se = 2;
+    if (n.disabled || axAttr(n, 'aria-disabled') === 'true') o.di = 1;
+    if (focusableByDefault(n) || n.hasAttribute('tabindex')) o.fo = 1;
+    if ((t === 'dialog' && n._modal) || axAttr(n, 'aria-modal') === 'true') o.mo = 1;
+    var lv = parseInt(axAttr(n, 'aria-level'), 10);
+    if (!(lv > 0) && role === 'heading' && /^h[1-6]$/.test(t)) lv = +t.charAt(1);
+    if (!(lv > 0) && role === 'heading') lv = 2;
+    if (lv > 0) o.lv = lv;
+    var hp = axAttr(n, 'aria-haspopup'); if (hp && hp !== 'false') o.hp = hp === 'true' ? 'menu' : hp;
+    if (t === 'select' && role === 'combobox') o.hp = 'listbox';
+    var cu = axAttr(n, 'aria-current'); if (cu && cu !== 'false') o.cu = cu;
+    if (n.required || axAttr(n, 'aria-required') === 'true') o.rq = 1;
+    if (axAttr(n, 'aria-invalid') && axAttr(n, 'aria-invalid') !== 'false') o.iv = 1;
+    if (n.readOnly || axAttr(n, 'aria-readonly') === 'true') o.ro = 1;
+    var or = axAttr(n, 'aria-orientation'); if (or) o.or = or;
+    var rd = axAttr(n, 'aria-roledescription'); if (rd) o.rd = rd;
+    var ps = parseInt(axAttr(n, 'aria-posinset'), 10), sz = parseInt(axAttr(n, 'aria-setsize'), 10);
+    if (ps > 0) o.ps = ps;
+    if (sz > 0) o.sz = sz;
+    // value: a field's text, a select's choice, a range's number
+    if (role === 'textbox' || role === 'combobox' || role === 'spinbutton') {
+      var val = t === 'select' ? (n.selectedOptions && n.selectedOptions[0] ? n.selectedOptions[0].text : '') : (t === 'input' || t === 'textarea') ? (n.type === 'password' ? n.value.replace(/./g, '•') : n.value) : '';
+      if (val) o.v = val;
+    }
+    if (role === 'slider' || role === 'spinbutton' || role === 'progressbar' || role === 'separator' && o.fo) {
+      var vn = parseFloat(axAttr(n, 'aria-valuenow')), vmin = parseFloat(axAttr(n, 'aria-valuemin')), vmax = parseFloat(axAttr(n, 'aria-valuemax'));
+      if (t === 'input') { vn = parseFloat(n.value); var rb = n.type === 'range' ? rangeBounds(n) : null; if (rb) { vmin = rb[0]; vmax = rb[1]; } }
+      if ((t === 'progress' || t === 'meter') && n.hasAttribute('value')) { vn = parseFloat(n.getAttribute('value')); vmin = parseFloat(n.getAttribute('min')) || 0; vmax = parseFloat(n.getAttribute('max')) || 1; }
+      if (!isNaN(vn)) o.vn = vn;
+      if (!isNaN(vmin) && !isNaN(vmax)) { o.vmin = vmin; o.vmax = vmax; }
+      var vt = axAttr(n, 'aria-valuetext'); if (vt) o.v = vt;
+    }
+    return o;
+  }
+  // every element's ax in document order, for a host without a view and for
+  // tests against Chromium's accessibility tree
+  G.__axTree = function () {
+    var out = [];
+    function walk(n, depth) {
+      for (var i = 0; i < n._c.length; i++) {
+        var k = n._c[i];
+        if (k._attrs === undefined) continue;
+        if (axHidden(k)) continue;
+        var ax = axOf(k);
+        if (ax && ax.h) continue;
+        if (ax) { var e = { depth: depth }; for (var q in ax) e[q] = ax[q]; out.push(e); }
+        walk(k._sr || k, depth + (ax ? 1 : 0));
+      }
+    }
+    if (doc && doc.body) walk(doc.body, 0);
+    return JSON.stringify(out);
+  };
   var RENDER_ATTRS = { src: 1, alt: 1, href: 1, placeholder: 1, type: 1, role: 1, 'aria-label': 1, 'aria-hidden': 1, 'aria-expanded': 1, 'aria-selected': 1, 'aria-checked': 1, title: 1, viewBox: 1, d: 1, points: 1, cx: 1, cy: 1, r: 1, rx: 1, ry: 1, x: 1, y: 1, x1: 1, y1: 1, x2: 1, y2: 1, width: 1, height: 1, transform: 1, 'fill-rule': 1, 'clip-rule': 1, 'stroke-linecap': 1, 'stroke-linejoin': 1, tabindex: 1, contenteditable: 1, id: 1, class: 1, style: 1, rows: 1, clear: 1, colspan: 1, rowspan: 1, span: 1 };
   // a grid-lanes container goes to the layout as a grid that says which
   // axis its lanes are across (grid-lanes: column | row, fill-reverse,
@@ -9859,6 +10224,8 @@
       // the padding box over the background: the host draws no shadows, so
       // it is the background it makes
       if (s['box-shadow'] && s['box-shadow'].indexOf('inset') >= 0) insetFill(s);
+      // the outer layers as the host draws them: rings and one drop shadow
+      if (s['box-shadow'] && s['box-shadow'] !== 'none') shadowLayers(s, cs.color);
       var own = {};
       for (var ok in s) own[ok] = s[ok];
       Object.defineProperty(cs, '_own', { value: own, enumerable: false, configurable: true, writable: true });
@@ -9949,6 +10316,8 @@
     // in them is dropped above)
     if (cs.display === 'table-cell' && n._colCut) { if (!a) a = {}; a.colspan = String(n._colCut); }
     if (a) o.a = a;
+    var ax = axOf(n);
+    if (ax) o.ax = ax;
     if (n._ia) o.ia = 1;
     if (n.scrollTop || n.scrollLeft) o.sc = [n.scrollLeft, n.scrollTop];
     if (o.t === 'svg:svg') {
@@ -10804,6 +11173,33 @@
   // calc() of % and px terms only, with numbers multiplying them, as one
   // value: `calc(50% - 30%*.5)` is 35% (the host reads one % and one px
   // term at most); anything else as it was
+  // box-shadow's outer layers for the host (it draws no CSS shadows):
+  // "box-ring" the layers with no offset and no blur but a spread, as a
+  // focus ring is (Bootstrap's 0 0 0 .25rem, Tailwind's ring-*), "spread
+  // rgba(...)" by ", " topmost first; "box-drop" the first blurred or
+  // offset one, "dx dy blur rgba(...)" (EVG has one shadow per box)
+  function shadowLayers(s, color) {
+    var layers = splitComma(s['box-shadow']), rings = [], drop = null;
+    for (var i = 0; i < layers.length; i++) {
+      var toks = splitValue(layers[i]), lens = [], col = null, inset = false;
+      for (var j = 0; j < toks.length; j++) {
+        var t = toks[j];
+        if (t === 'inset') { inset = true; continue; }
+        if (/^calc\(/.test(t)) t = flatCalc(t);
+        if (/^-?[\d.]+(px)?$/.test(t)) { lens.push(parseFloat(t)); continue; }
+        col = t;
+      }
+      if (inset || lens.length < 2) continue;
+      var c = colorRGBA(!col || col === 'currentcolor' ? color || 'rgb(0, 0, 0)' : col);
+      if (!c || !(c[3] > 0)) continue;
+      var rgba = 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + (Math.round(c[3] * 1000) / 1000) + ')';
+      var dx = lens[0], dy = lens[1], blur = lens[2] || 0, spread = lens[3] || 0;
+      if (!dx && !dy && !blur) { if (spread > 0) rings.push(fmtPx(spread) + ' ' + rgba); }
+      else if (!drop) drop = fmtPx(dx) + ' ' + fmtPx(dy) + ' ' + fmtPx(blur) + ' ' + rgba;
+    }
+    if (rings.length) s['box-ring'] = rings.join(', ');
+    if (drop) s['box-drop'] = drop;
+  }
   function insetFill(s) {
     var v = s['box-shadow'].trim(), m = /^inset\s+(.*)$/.exec(v) || /^(.*?)\s+inset$/.exec(v);
     if (!m || v.indexOf(',', v.lastIndexOf(')') + 1) >= 0) return;
@@ -12057,6 +12453,16 @@
     return found;
   }
   function elementOf(n) { while (n && n.nodeType !== 1) n = n.parentNode; return n; }
+  // the pointer's cursor over the hovered element (CSS UI 4 cursor; auto is
+  // text over a text field or text, default elsewhere, as a host draws it)
+  G.__cursor = function () {
+    var e = hoverEl;
+    if (!e || !e.isConnected) return 'default';
+    var c = String(computedOf(e).cursor || 'auto').split(',').pop().trim();
+    if (c !== 'auto') return c;
+    if (textEntry(e)) return 'text';
+    return 'default';
+  };
   var clickCount = 0, lastDown = 0, downTarget = null;
   function mods(m) { return { ctrlKey: !!m.ctrl, shiftKey: !!m.shift, altKey: !!m.alt, metaKey: !!m.meta }; }
   function mouseInit(m, extra) {
@@ -12079,6 +12485,16 @@
     if (t === 'up' && m.target === undefined && downTarget && downTarget.isConnected && !transformedUnder(downTarget)) target = downTarget;
     // a press, release or key is a user gesture (window.open may follow)
     if ((t === 'down' || t === 'up' || t === 'key') && typeof G.__activate === 'function') G.__activate();
+    if (t === 'leave') {
+      // the pointer left the host's view: nothing is hovered
+      if (hoverEl) {
+        var gone = hoverEl;
+        hoverEl = null;
+        pointerStateChanged(gone, null);
+        if (gone.isConnected) { dispatch(gone, new PointerEvent('pointerout', mouseInit(m, {}))); dispatch(gone, new MouseEvent('mouseout', mouseInit(m, {}))); leaveEnter(gone, null, m); }
+      }
+      return 'ok';
+    }
     if (t === 'move') {
       if (picker && target && picker.kind === 'select') { var pmi = pickerItemOf(target); if (pmi && pmi._pickIndex !== undefined && pmi._pickIndex !== picker.at) pickerMark(pmi._pickIndex); }
       if (rangeDrag && rangeDrag.el.isConnected && m.x !== undefined) rangeAt(rangeDrag.el, m.x);
@@ -12119,7 +12535,7 @@
       if (okm) {
         // focus moves to the focusable element under the pointer
         var f = target;
-        while (f && f.nodeType === 1 && !focusable(f)) f = f.parentNode;
+        while (f && f.nodeType === 1 && !focusable(f) && !(f._sr && f._sr.delegatesFocus)) f = composedParent(f);
         doc._focusVisible = false;
         if (f && f.nodeType === 1) focusElement(f); else if (doc._active) focusElement(null);
         // (a select opens its option list)
@@ -12260,6 +12676,7 @@
       if (how === 'start') t = start;
       else if (how === 'end') t = start + size - view;
       else if (how === 'center') t = start + size / 2 - view / 2;
+      else if (how === 'if-needed') t = start < cur || start + size > cur + view ? start + size / 2 - view / 2 : cur;
       else if (start < cur) t = size > view ? start + size - view : start;
       else if (start + size > cur + view) t = size > view ? start : start + size - view;
       else t = cur;
@@ -12267,7 +12684,7 @@
     }
     // scroll between el and the container (what the inner containers moved)
     var inner = [];
-    for (var n = el.parentNode; n && n.nodeType === 1; n = n.parentNode) {
+    for (var n = composedParent(el); n && n.nodeType === 1; n = composedParent(n)) {
       var nb = boxes[n.__id];
       if (n === doc.documentElement || !nb) { inner.push(n); continue; }
       var cs = computedOf(n), oy = cs['overflow-y'] || 'visible', ox = cs['overflow-x'] || 'visible';
@@ -12290,7 +12707,7 @@
     var root = doc && doc.documentElement;
     if (!root || (computedOf(root)['overflow-y'] || '') === 'hidden') return;
     var ry = 0;
-    for (var m = el.parentNode; m && m.nodeType === 1 && m !== root; m = m.parentNode) ry += m.scrollTop || 0;
+    for (var m = composedParent(el); m && m.nodeType === 1 && m !== root; m = composedParent(m)) ry += m.scrollTop || 0;
     var dtop = pos(b[1] - ry, b[3], viewport.h, root.scrollTop || 0, block, Math.max(0, pageHeight() - viewport.h));
     if (dtop !== (root.scrollTop || 0)) { root.scrollTop = dtop; scrolled(root); dispatch(doc, new Event('scroll')); }
   }
@@ -12341,6 +12758,8 @@
     if (k === ' ') return 'Space';
     return k;
   }
+  // a control a press focuses with :focus-visible (it takes typed text)
+  function textEntry(el) { return isTextControl(el) || !!(el && el.isContentEditable); }
   function isTextControl(el) {
     if (!el) return false;
     if (el.localName === 'textarea') return true;
@@ -12444,11 +12863,22 @@
   }
   function keyDefault(el, m) {
     var k = m.key;
+    // (Escape cancels the topmost modal dialog: cancel, then close)
+    if (k === 'Escape' && !picker) {
+      var md = topModal();
+      if (md) { if (dispatch(md, new Event('cancel', { cancelable: true }))) md.close(); return; }
+    }
     if (picker && picker.kind !== 'select' && (k === 'Escape' || k === 'Enter' || k === 'Tab')) { pickerClose(); if (k !== 'Tab') return; }
     if (k === 'Tab') {
       var order = tabOrder();
       if (!order.length) return;
       var i = order.indexOf(el);
+      // (from an element that is no stop, a host's inner one or a
+      // tabindex=-1 box: the stop it is in, else the next one after it)
+      if (i < 0 && el && el.nodeType === 1 && el !== doc.body) {
+        for (var q = 0; q < order.length; q++) if (composedContains(order[q], el) || composedContains(el, order[q])) { i = q; break; }
+        if (i < 0) { for (q = 0; q < order.length; q++) if (el.compareDocumentPosition && (el.compareDocumentPosition(order[q]) & 4)) break; i = m.shift ? q : q - 1; }
+      }
       var next = m.shift ? order[(i <= 0 ? order.length : i) - 1] : order[(i + 1) % order.length];
       focusElement(next);
       return;

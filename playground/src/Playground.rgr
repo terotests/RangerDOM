@@ -17,6 +17,7 @@ Import "../../src/DomRealm.rgr"
 Import "../../gallery/domview/src/lib.rs"
 Import "../../lib/evg/EVGDisplayList.rgr"
 Import "../../lib/evg/EVGHostTextMeasurer.rgr"
+Import "../../lib/evg/EVGA11yFromTree.rgr"
 
 class Playground {
     def realm:DomRealm (new DomRealm())
@@ -89,6 +90,13 @@ class Playground {
         dl.setTextEngine((lay.getTextEngine()))
         dl.build(root)
         return (dl.toJson())
+    }
+    ; the laid-out page's accessible tree (EVGA11yFromTree from the roles
+    ; and names DomView put on the boxes), JSON for evg-a11y.js
+    fn a11y:string (focusId:string gen:int) {
+        def fb:EVGA11yFromTree (new EVGA11yFromTree())
+        def t:EVGA11yTree (fb.build(root "Page" gen focusId))
+        return (t.toJson())
     }
     fn input:string (json:string) {
         return (realm.input(json))

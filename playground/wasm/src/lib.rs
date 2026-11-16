@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use rangerdom_json::{JsonParser, JsonValue};
 use rangerdom_view::{DomBoxes, DomSvgDocs, DomView};
-use rangerevg::{EVGDisplayList, EVGElement, EVGLayout, EVGUnit};
+use rangerevg::{EVGA11yFromTree, EVGA11yTree, EVGDisplayList, EVGElement, EVGLayout, EVGUnit};
 
 // ---------------------------------------------------------------- text widths
 // In the browser the page's text is measured by the browser (main.js
@@ -372,6 +372,14 @@ impl Playground {
         }
     }
     /// the laid-out page as EVG's display list (JSON)
+    /// the laid-out page's accessible tree (EVGA11yFromTree from the roles
+    /// and names DomView put on the boxes), JSON for evg-a11y.js
+    pub fn a11y(&mut self, focus_id: &str, gen: i64) -> String {
+        let Some(root) = self.root.clone() else { return String::new() };
+        let fb = Rc::new(RefCell::new(EVGA11yFromTree::new()));
+        let t = EVGA11yFromTree::build(&fb, &root, "Page".to_string(), gen, focus_id);
+        EVGA11yTree::to_json(&t)
+    }
     pub fn paint(&mut self) -> String {
         self.newest();
         let (Some(root), Some(lay)) = (self.root.clone(), self.lay.clone()) else { return String::new() };
@@ -1178,6 +1186,11 @@ pub extern "C" fn pg_layout() -> usize {
 #[no_mangle]
 pub extern "C" fn pg_paint() -> usize {
     answer(PG.with(|p| p.borrow_mut().paint()))
+}
+#[no_mangle]
+pub extern "C" fn pg_a11y(sp: *mut u8, sl: usize, gen: f64) -> usize {
+    let s = text(sp, sl);
+    answer(PG.with(|p| p.borrow_mut().a11y(&s, gen as i64)))
 }
 #[no_mangle]
 pub extern "C" fn pg_eval(sp: *mut u8, sl: usize) -> usize {

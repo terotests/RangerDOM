@@ -22,6 +22,7 @@
 import { renderDisplayList, fontSpec } from "./evg-webgl.js";
 import { installCanvasMeasurer } from "./evg-measure.js";
 import { loadWasmPlayground } from "./rangerdom-wasm.js";
+import { createA11yMirror, pressAtCentre } from "./evg-a11y.js";
 
 const params = new URLSearchParams(location.search);
 const [W, H] = (params.get("size") || "1200,800").split(",").map(Number);
@@ -806,9 +807,18 @@ for (const [evName, type] of [["pointerdown", "down"], ["pointerup", "up"], ["po
     pg.input(JSON.stringify({ type, x: p.x, y: p.y, button: ev.button > 0 ? ev.button : 0, shift: ev.shiftKey, ctrl: ev.ctrlKey, alt: ev.altKey, meta: ev.metaKey }));
     // (what the press asked of the host, a file chooser, in the press's own
     // task: browsers open a chooser only from a user gesture)
-    if (type !== "move") drain();
+    if (type !== "move") { drain(); a11yDue = true; }
+    // (the page's cursor: the CSS cursor of what the pointer is over)
+    const cur = pg.eval("__cursor()");
+    if (cur && canvas.style.cursor !== cur) canvas.style.cursor = cur;
   });
 }
+// the pointer leaving the canvas leaves the page: :hover ends there too
+canvas.addEventListener("pointerleave", () => {
+  if (!pg || busy) return;
+  pg.input(JSON.stringify({ type: "leave" }));
+  canvas.style.cursor = "";
+});
 // the wheel scrolls the page in RangerDOM (webapi.js: wheel event, then
 // the scroll of the box under the pointer), keys go to its focused element
 canvas.addEventListener("wheel", (ev) => {
@@ -820,14 +830,67 @@ canvas.addEventListener("wheel", (ev) => {
 }, { passive: false });
 canvas.tabIndex = 0;
 canvas.addEventListener("pointerdown", () => canvas.focus());
+// (keys on the pane, so the screen reader mirror's focused element sends them too)
 for (const [evName, type] of [["keydown", "key"], ["keyup", "keyup"]]) {
-  canvas.addEventListener(evName, (ev) => {
+  $("rdBox").addEventListener(evName, (ev) => {
     if (!pg || busy) return;
+    // (a mirror element types nothing itself: the page in RangerDOM does)
+    if (ev.target !== canvas) ev.preventDefault();
     if (ev.key === "Tab" || ev.key.startsWith("Arrow") || ev.key === " " || ev.key === "Backspace" || ev.key === "Home" || ev.key === "End" || ev.key.startsWith("Page")) ev.preventDefault();
     pg.input(JSON.stringify({ type, key: ev.key, code: ev.code, shift: ev.shiftKey, ctrl: ev.ctrlKey, alt: ev.altKey, meta: ev.metaKey }));
     drain();
+    if (type === "key") a11yDue = true;
   });
 }
+// the page's accessible tree over the canvas (evg-a11y.js): the roles,
+// names and states webapi.js gave each element, which DomView put on EVG's
+// boxes and EVGA11yFromTree read back; a screen reader reads and moves
+// through these elements, its presses go to the page where the element is,
+// and the page's focus is the mirror's. ?a11y=0 turns it off.
+// (a key or a press moves the focus: the next frame's update is not held back)
+let mirror = null, a11yGen = 0, a11yAt = 0, a11yDue = false;
+let paneFocus = false;
+document.addEventListener("focusin", (ev) => { paneFocus = $("rdBox").contains(ev.target); });
+document.addEventListener("pointerdown", (ev) => { if (!$("rdBox").contains(ev.target)) paneFocus = false; }, true);
+const FOCUS_ID = "(function(){var e=document.activeElement;while(e&&e.shadowRoot&&e.shadowRoot.activeElement)e=e.shadowRoot.activeElement;return e&&e!==document.body&&e!==document.documentElement?'mfd-xd-0-'+e.__id:'';})()";
+function a11yUpdate(force) {
+  if (params.get("a11y") === "0" || !pg || typeof pg.a11y !== "function") return;
+  const now = performance.now();
+  if (!force && now - a11yAt < 400) return;
+  a11yAt = now;
+  if (!mirror) {
+    mirror = createA11yMirror($("rdBox"), {
+      canvas, label: "The case rendered by RangerDOM", scale: Number(canvas.dataset.scale) || 1,
+      // (the page's focus moves the keyboard only while it is in the pane)
+      // (or the focus fell to the body because the mirror element it was on
+      // stopped being a tab stop as the page's focus moved on)
+      canMoveFocus: () => $("rdBox").contains(document.activeElement) || (paneFocus && document.activeElement === document.body),
+      onActivate: (node) => pressAtCentre(node, (x, y) => {
+        pg.input(JSON.stringify({ type: "down", x, y, button: 0 }));
+        pg.input(JSON.stringify({ type: "up", x, y, button: 0 }));
+        drain();
+        a11yDue = true;
+      }),
+      onFocus: (node) => {
+        const m = /^mfd-xd-0-(\d+)$/.exec(node.id || "");
+        if (m) { pg.input(JSON.stringify({ type: "focus", target: Number(m[1]) })); a11yDue = true; }
+      },
+    });
+  }
+  let tree;
+  try { tree = JSON.parse(pg.a11y(pg.eval(FOCUS_ID), ++a11yGen)); } catch (e) { return; }
+  mirror.update(tree);
+  // (every focusable element takes the focus, so a reader's cursor landing
+  // on one focuses it in the page; Tab still goes to the page, which keeps
+  // its own order: tabindex values, shadow trees, a modal's inside)
+  for (const n of tree.nodes) {
+    if (!n.focusable || n.disabled) continue;
+    const el = mirror.elementOf(n.id);
+    if (el && !el.hasAttribute("tabindex")) el.tabIndex = -1;
+  }
+  window.__pgA11y = tree;
+}
+window.__rdA11y = () => { a11yUpdate(true); return window.__pgA11y; };
 // between steps the page lives: its timers and animations run
 async function idle() {
   for (;;) {
@@ -835,7 +898,9 @@ async function idle() {
     if (!pg || busy) continue;
     try {
       tick();
-      if (pg.dirty()) draw();
+      const dirty = pg.dirty();
+      if (dirty) draw();
+      if (dirty || a11yDue) { a11yUpdate(a11yDue); a11yDue = false; }
       drain();
     } catch (e) {
       errors.push(String(e));

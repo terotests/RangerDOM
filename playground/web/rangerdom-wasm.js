@@ -107,6 +107,7 @@ export async function loadWasmPlayground(url, opts = {}) {
     render() { return out(x.pg_render()); }
     layout() { return out(x.pg_layout()); }
     paint() { return out(x.pg_paint()); }
+    a11y(focusId, gen) { const [a, b] = put(focusId || ""); return out(x.pg_a11y(a, b, gen)); }
     input(json) { const [a, b] = put(json); return out(x.pg_input(a, b)); }
     tick(ms) { return Number(x.pg_tick(ms)); }
     dueIn() { return x.pg_due_in(); }
