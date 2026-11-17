@@ -4,7 +4,7 @@
 // two-stop gradients, soft shadows) as triangles, text runs and filled paths
 // rasterized here into textures (ttf.rs), strokes as triangles, clips as
 // the renderer's clip rectangle, group opacity as an alpha factor. Pictures
-// (IMAGE) are not drawn yet. Every coordinate the list gives is in CSS
+// (IMAGE) are drawn when they are SVG background pictures (svgpic.rs). Every coordinate the list gives is in CSS
 // pixels; the painter works in the window's own pixels (`s` per CSS px).
 
 use std::collections::HashMap;
@@ -16,6 +16,7 @@ use ranger::cell::RefCell;
 use rangerevg::{EVGDisplayList, EVGDrawCmd};
 
 use crate::sdl::{self, Rect, Renderer, Texture, Vertex};
+use crate::svgpic::{self, Pictures};
 use crate::ttf::{self, Face, Raster};
 
 const RECT: i64 = 0;
@@ -120,6 +121,8 @@ pub struct Painter {
     fonts: Fonts,
     texts: HashMap<String, Tex>,
     paths: HashMap<u64, Tex>,
+    pics: HashMap<String, Tex>,
+    pub pictures: Pictures,
     frame: u64,
     verts: Vec<Vertex>,
     idx: Vec<c_int>,
@@ -135,7 +138,7 @@ fn col(r: i64, g: i64, b: i64, a: f64) -> [f32; 4] { [r as f32 / 255.0, g as f32
 impl Painter {
     pub fn new(ren: *mut Renderer) -> Painter {
         Painter {
-            ren, s: 1.0, top: 0.0, fonts: Fonts::load(), texts: HashMap::new(), paths: HashMap::new(), frame: 0,
+            ren, s: 1.0, top: 0.0, fonts: Fonts::load(), texts: HashMap::new(), paths: HashMap::new(), pics: HashMap::new(), pictures: Pictures::default(), frame: 0,
             verts: Vec::new(), idx: Vec::new(), clips: Vec::new(), clip: None, alphas: Vec::new(), alpha: 1.0, stats: (0, 0),
         }
     }
@@ -150,6 +153,7 @@ impl Painter {
             let keep = if self.texts.len() > 6000 { 2 } else { 90 };
             self.texts.retain(|_, t| { let k = f - t.used <= keep; if !k { unsafe { sdl::SDL_DestroyTexture(t.t) } } k });
             self.paths.retain(|_, t| { let k = f - t.used <= keep; if !k { unsafe { sdl::SDL_DestroyTexture(t.t) } } k });
+            self.pics.retain(|_, t| { let k = f - t.used <= keep; if !k { unsafe { sdl::SDL_DestroyTexture(t.t) } } k });
         }
         self.clips.clear();
         self.clip = None;
@@ -287,12 +291,16 @@ impl Painter {
                     let (sx, sy) = (c.shadow_x as f32 * self.s, c.shadow_y as f32 * self.s);
                     let sc = col(c.shadow_r, c.shadow_g, c.shadow_b, c.shadow_a);
                     let n = if b > 1.0 { 4 } else { 1 };
+                    // (CSS paints an outer shadow only outside the border box: a
+                    // ring from the grown box in to the box itself, or a field
+                    // with a transparent background shows grey)
+                    let inner = self.rrect(x, y, w, h, r, segs.max(4));
                     for i in 0..n {
-                        let e = if n == 1 { 0.0 } else { b * (1.0 - i as f32 / n as f32) - b / 2.0 };
+                        let e = if n == 1 { 0.0 } else { b * 0.6 * (n - i) as f32 / n as f32 };
                         let rr = r.map(|v| (v + e).max(0.0));
                         let pts = self.rrect(x + sx - e, y + sy - e, w + 2.0 * e, h + 2.0 * e, rr, segs.max(4));
-                        let k = [sc[0], sc[1], sc[2], sc[3] / n as f32 * if n == 1 { 1.0 } else { 1.3 }];
-                        self.tri_fan(&pts, (x + sx + w / 2.0, y + sy + h / 2.0), &|_, _| k);
+                        let k = [sc[0], sc[1], sc[2], sc[3] / n as f32 * if n == 1 { 1.0 } else { 1.2 }];
+                        self.tri_strip_ring(&pts, &inner, k);
                     }
                 }
                 if c.a > 0.0 || (c.has_grad && c.a2 > 0.0) {
@@ -336,11 +344,9 @@ impl Painter {
                 let (x0, y0) = self.px(c.x, c.y);
                 let (x1, y1) = self.px(c.x + c.w, c.y + c.h);
                 let mut n = Clip { x0, y0, x1, y1 };
-                // (a clip of a later layer, an overlay escaping the boxes it
-                // is in, starts from the page's own; inside, it narrows)
-                if c.layer == 0 {
-                    if let Some(o) = self.clip { n = Clip { x0: n.x0.max(o.x0), y0: n.y0.max(o.y0), x1: n.x1.min(o.x1), y1: n.y1.min(o.y1) }; }
-                }
+                // (every clip in force narrows, also a scroll layer's: a list
+                // built for this one paint has its layers where they are)
+                if let Some(o) = self.clip { n = Clip { x0: n.x0.max(o.x0), y0: n.y0.max(o.y0), x1: n.x1.min(o.x1), y1: n.y1.min(o.y1) }; }
                 self.set_clip(Some(n));
             }
             POP_CLIP => {
@@ -356,9 +362,34 @@ impl Painter {
             }
             PATH => self.path(c),
             STROKE => self.stroke(c),
-            IMAGE => {}
+            IMAGE => self.image(c),
             _ => {}
         }
+    }
+
+    /// a picture the page named (an SVG background), in its tile or its box
+    fn image(&mut self, c: &EVGDrawCmd) {
+        let Some(svg) = self.pictures.svgs.get(&c.src) else {
+            if c.src.starts_with("dompng-") && !self.pictures.asked.contains(&c.src) { self.pictures.missing.push(c.src.clone()); }
+            return;
+        };
+        let (bx, by, bw, bh) = match &c.tile { Some(t) => { let t = t.borrow(); (t.x, t.y, t.w, t.h) } None => (c.x, c.y, c.w, c.h) };
+        let (x, y) = self.px(bx, by);
+        let (w, h) = ((bw as f32 * self.s).round().max(1.0) as usize, (bh as f32 * self.s).round().max(1.0) as usize);
+        if w > 4096 || h > 4096 { return; }
+        let key = format!("{}|{}|{}", c.src, w, h);
+        let frame = self.frame;
+        if !self.pics.contains_key(&key) {
+            let px = svgpic::rasterize(svg, w, h);
+            let Some(t) = self.texture(w, h, &px) else { return };
+            self.pics.insert(key.clone(), Tex { t, w: w as f32, h: h as f32, ox: 0.0, oy: 0.0, used: frame });
+        }
+        let t = self.pics.get_mut(&key).unwrap();
+        t.used = frame;
+        let (tt, tw, th) = (t.t, t.w, t.h);
+        // (the command's alpha fades the picture; its colour does not tint it)
+        self.textured(tt, x, y, tw, th, [1.0, 1.0, 1.0, c.a as f32], c, false);
+        self.stats.0 += 1;
     }
 
     fn rings(&self, c: &EVGDrawCmd) -> Vec<Vec<(f32, f32)>> {
@@ -428,10 +459,12 @@ impl Painter {
                     let l = (dx * dx + dy * dy).sqrt();
                     if l < 1e-4 { continue; }
                     let (ux, uy) = (dx / l, dy / l);
-                    if c.stroke_cap == 2 {
-                        if i == 0 { a = (a.0 - ux * t / 2.0, a.1 - uy * t / 2.0); }
-                        if i == p.len() - 2 { b = (b.0 + ux * t / 2.0, b.1 + uy * t / 2.0); }
-                    }
+                    // (inner ends reach half a width on, which closes the joins
+                    // of thin curves; the line's own ends only with a square cap)
+                    let first = i == 0 && p[0] != p[p.len() - 1];
+                    let last = i == p.len() - 2 && p[0] != p[p.len() - 1];
+                    if !first || c.stroke_cap == 2 { a = (a.0 - ux * t / 2.0, a.1 - uy * t / 2.0); }
+                    if !last || c.stroke_cap == 2 { b = (b.0 + ux * t / 2.0, b.1 + uy * t / 2.0); }
                     let (nx, ny) = (-uy * t / 2.0, ux * t / 2.0);
                     self.quad([(a.0 + nx, a.1 + ny), (b.0 + nx, b.1 + ny), (b.0 - nx, b.1 - ny), (a.0 - nx, a.1 - ny)], k);
                 }

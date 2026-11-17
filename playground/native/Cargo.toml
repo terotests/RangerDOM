@@ -23,6 +23,7 @@ path = "src/main.rs"
 ranger = { path = "../../runtime/rust/ranger", features = ["shared-cell"] }
 rangerevg = { path = "../../runtime/rust/rangerevg" }
 rangerdom_pg = { path = "../rangerdom_pg" }
+rangerdom_view = { path = "../domview" }
 
 [patch."https://github.com/terotests/Ranger.git"]
 ranger = { path = "../../runtime/rust/ranger", features = ["shared-cell"] }

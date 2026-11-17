@@ -14,6 +14,7 @@
 
 mod paint;
 mod sdl;
+mod svgpic;
 mod ttf;
 
 use std::path::{Path, PathBuf};
@@ -155,6 +156,8 @@ struct App {
     times: [f64; 4],
     clock: Instant,
     buttons: Vec<(f32, f32, f32, f32, &'static str)>,
+    /// render trees (JSON) that name SVG pictures, for the painter
+    render_json: Vec<String>,
 }
 
 impl App {
@@ -182,7 +185,7 @@ impl App {
         let (w, h) = self.page_size();
         pg.start(&html, &format!("{}index.html", base), w, h);
         pg.run_scripts();
-        let started = run_sync(&mut pg, "__bench.start()");
+        let started = run_sync(&mut pg, "__bench.start()", &mut self.render_json);
         if let Some(at) = started.find("\"steps\":[") {
             let rest = &started[at + 9..];
             let end = rest.find(']').unwrap_or(rest.len());
@@ -198,7 +201,8 @@ impl App {
     fn frame_list(&mut self) {
         let Some(pg) = self.pg.as_mut() else { return };
         let t = Instant::now();
-        pg.render();
+        let tree = pg.render();
+        if tree.contains("data:image/svg") { self.render_json.push(tree); }
         let t1 = Instant::now();
         pg.layout();
         let t2 = Instant::now();
@@ -246,6 +250,7 @@ impl App {
             sdl::SDL_SetRenderDrawColor(p.ren, 255, 255, 255, 255);
             sdl::SDL_RenderClear(p.ren);
         }
+        for t in std::mem::take(&mut self.render_json) { p.pictures.scan(&t); }
         if let Some(dl) = self.list.clone() {
             p.top = BAR;
             p.clip_window(0.0, BAR, self.w, self.h - BAR);
@@ -253,6 +258,25 @@ impl App {
         }
         p.top = 0.0;
         p.unclip();
+        // (pictures the list named that no render tree showed, as a forced
+        // layout's tree never comes here: asked of the page, then drawn again)
+        if !p.pictures.missing.is_empty() {
+            let miss = std::mem::take(&mut p.pictures.missing);
+            for m in miss { p.pictures.asked.insert(m); }
+            let vals = self.pg.as_mut().map(|pg| pg.value(svgpic::PAGE_QUERY)).unwrap_or_default();
+            if p.pictures.add_values(&vals) > 0 {
+                if let Some(dl) = self.list.clone() {
+                    p.begin();
+                    unsafe { sdl::SDL_SetRenderDrawColor(p.ren, 255, 255, 255, 255); sdl::SDL_RenderClear(p.ren); }
+                    p.top = BAR;
+                    p.clip_window(0.0, BAR, self.w, self.h - BAR);
+                    p.draw_list(&dl);
+                    p.top = 0.0;
+                    p.unclip();
+                    p.pictures.missing.clear();
+                }
+            }
+        }
         self.bar(p);
         p.flush();
         self.times[3] = t.elapsed().as_secs_f64() * 1e3;
@@ -310,12 +334,12 @@ impl App {
 }
 
 /// a page promise run to its end: ticks and frames until it settles
-fn run_sync(pg: &mut Playground, call: &str) -> String {
+fn run_sync(pg: &mut Playground, call: &str, trees: &mut Vec<String>) -> String {
     pg.value(&format!("window.__pgDone=''; ({}).then(function(r){{__pgDone=JSON.stringify(r)}}, function(e){{__pgDone=JSON.stringify({{error:String(e)}})}})", call));
     let mut i = 0;
     while i < 2000 && pg.value("__pgDone").is_empty() {
         pg.tick(16.0);
-        if pg.dirty() { pg.render(); pg.layout(); }
+        if pg.dirty() { let t = pg.render(); if t.contains("data:image/svg") { trees.push(t); } pg.layout(); }
         i += 1;
     }
     pg.value("__pgDone")
@@ -328,6 +352,9 @@ pub fn run() {
     let mut case: Option<String> = None;
     let mut shot: Option<String> = None;
     let mut steps: usize = 0;
+    // (headless: script run after the steps, frames, then a value printed)
+    let mut eval: Option<String> = None;
+    let mut print: Option<String> = None;
     let (mut ww, mut wh) = (1200.0f32, 800.0f32 + BAR);
     let mut i = 1;
     while i < args.len() {
@@ -336,6 +363,8 @@ pub fn run() {
         match a {
             "--case" => { case = v; i += 1; }
             "--screenshot" => { shot = v; i += 1; }
+            "--eval" => { eval = v; i += 1; }
+            "--print" => { print = v; i += 1; }
             "--steps" => { steps = v.and_then(|s| s.parse().ok()).unwrap_or(0); i += 1; }
             "--size" => {
                 if let Some((w, h)) = v.as_deref().and_then(|s| s.split_once(',')) { ww = w.parse().unwrap_or(ww); wh = h.parse::<f32>().unwrap_or(800.0) + BAR; }
@@ -390,7 +419,7 @@ pub fn run() {
     painter.s = s0;
     let mut app = App {
         dir, cases, ci, pg: None, list: None, steps: Vec::new(), next: 0, running: None, run_all: false,
-        status: String::new(), w: w0, h: h0, times: [0.0; 4], clock: Instant::now(), buttons: Vec::new(),
+        status: String::new(), w: w0, h: h0, times: [0.0; 4], clock: Instant::now(), buttons: Vec::new(), render_json: Vec::new(),
     };
     // (the bar first, so a slow case shows that it is loading)
     app.status = "loading…".into();
@@ -402,10 +431,16 @@ pub fn run() {
         let t = Instant::now();
         for k in 0..steps.min(app.steps.len()) {
             let pg = app.pg.as_mut().unwrap();
-            let r = run_sync(pg, &format!("__bench.run({})", k));
+            let r = run_sync(pg, &format!("__bench.run({})", k), &mut app.render_json);
             println!("step {}: {}", k, r.chars().take(100).collect::<String>());
         }
         app.next = steps.min(app.steps.len());
+        if let Some(js) = &eval {
+            let pg = app.pg.as_mut().unwrap();
+            pg.value(js);
+            for _ in 0..40 { pg.tick(16.0); if pg.dirty() { let t = pg.render(); if t.contains("data:image/svg") { app.render_json.push(t); } pg.layout(); } }
+        }
+        if let Some(js) = &print { println!("{}", app.pg.as_mut().unwrap().value(js)); }
         app.frame_list();
         app.draw(&mut painter);
         println!("steps {:?}; last frame render {:.1} layout {:.1} paint {:.1} draw {:.1} ms; {} shapes {} text runs",
@@ -465,8 +500,9 @@ pub fn run() {
                     }
                 }
                 sdl::EVENT_MOUSE_WHEEL => {
-                    let flip = if ev.u32(32) == 1 { -1.0 } else { 1.0 };
-                    let (dx, dy) = (ev.f32(24) * flip, ev.f32(28) * flip);
+                    // (as the system gives it, with natural scrolling in it, as a
+                    // browser's deltaY: SDL's FLIPPED only says that it is in)
+                    let (dx, dy) = (ev.f32(24), ev.f32(28));
                     let (x, y) = (ev.f32(36), ev.f32(40));
                     if y >= BAR { app.input(format!("{{\"type\":\"wheel\",\"x\":{},\"y\":{},\"dx\":{},\"dy\":{}}}", x, y - BAR, dx * 40.0, -dy * 40.0)); }
                 }
