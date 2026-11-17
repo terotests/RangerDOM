@@ -807,7 +807,8 @@ for (const [evName, type] of [["pointerdown", "down"], ["pointerup", "up"], ["po
     // (a press keeps the pointer: its moves and its release outside the
     // canvas still come here, as a browser's own page gets them)
     if (type === "down") { try { canvas.setPointerCapture(ev.pointerId); } catch (e) {} }
-    pg.input(JSON.stringify({ type, x: p.x, y: p.y, button: ev.button > 0 ? ev.button : 0, shift: ev.shiftKey, ctrl: ev.ctrlKey, alt: ev.altKey, meta: ev.metaKey }));
+    // (t: when the press happened, the browser's own clock, for double clicks)
+    pg.input(JSON.stringify({ type, x: p.x, y: p.y, t: ev.timeStamp, button: ev.button > 0 ? ev.button : 0, shift: ev.shiftKey, ctrl: ev.ctrlKey, alt: ev.altKey, meta: ev.metaKey }));
     // (what the press asked of the host, a file chooser, in the press's own
     // task: browsers open a chooser only from a user gesture)
     if (type !== "move") { drain(); a11yDue = true; }
