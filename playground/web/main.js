@@ -179,7 +179,7 @@ function draw() {
   // (a picture of a node the delta renders did not carry, one unchanged
   // since the first render: the whole render tree is looked through once)
   if (missingPicture(list)) scanPictures(pg.eval("__render()"));
-  if (gl) paintGl(list);
+  if (gl) paintGl(withBars(list));
   const end = performance.now();
   acc.gl += end - t2;
   if (acc.counting) {
@@ -188,6 +188,23 @@ function draw() {
     acc.gaps.push(Math.round(end - acc.last));
     acc.last = end;
   }
+}
+// the page's scroll bars, shown while a box scrolls (webapi.js
+// __scrollBars), over the display list; none while the picture is checked
+let barsOn = false, noBars = false;
+function withBars(list) {
+  const s = noBars || !pg ? "" : pg.eval("__scrollBars()");
+  barsOn = !!s;
+  const bars = s ? JSON.parse(s) : [];
+  if (!bars.length) return list;
+  const cmds = list.cmds.slice();
+  for (const [x, y, w, h, a] of bars) cmds.push({ k: 0, x, y, w, h, c: [0, 0, 0, a] });
+  return Object.assign({}, list, { cmds });
+}
+// (bars fading out on a page that does not change: drawn again from the
+// last display list)
+function barsFrame() {
+  if (barsOn && gl && lastList) paintGl(withBars(lastList));
 }
 function drain() {
   let msgs = [];
@@ -244,7 +261,7 @@ async function pump(done, ms) {
   for (;;) {
     tick();
     const drew = pg.dirty();
-    if (drew) draw();
+    if (drew) draw(); else barsFrame();
     drain();
     if (done()) break;
     if (performance.now() > end) { errors.push(`timed out after ${ms} ms`); break; }
@@ -601,6 +618,8 @@ function controlsCheck(w, at, opacityOf) {
 function pictureCheck() {
   const w = iframe.contentWindow;
   if (!gl || !w || !w.document || !w.document.body) return null;
+  // (the browser's own overlay bars are not in its picture either)
+  if (barsOn && lastList) { noBars = true; paintGl(lastList); noBars = false; barsOn = true; }
   const pw = canvas.width, ph = canvas.height;
   const px = new Uint8Array(pw * ph * 4);
   gl.readPixels(0, 0, pw, ph, gl.RGBA, gl.UNSIGNED_BYTE, px);
@@ -903,7 +922,7 @@ async function idle() {
     try {
       tick();
       const dirty = pg.dirty();
-      if (dirty) draw();
+      if (dirty) draw(); else barsFrame();
       if (dirty || a11yDue) { a11yUpdate(a11yDue); a11yDue = false; }
       drain();
     } catch (e) {
