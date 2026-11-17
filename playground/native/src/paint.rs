@@ -422,6 +422,9 @@ impl Painter {
         // (the same shape moved by whole pixels is the same picture)
         let mut hs = std::collections::hash_map::DefaultHasher::new();
         c.even_odd.hash(&mut hs);
+        // (`r` on a vector: the rounded box its picture is cut to)
+        let cut = if c.radius > 0.0 { let (cx, cy) = self.px(c.x, c.y); Some((cx - bx, cy - by, c.w as f32 * self.s, c.h as f32 * self.s, c.radius as f32 * self.s)) } else { None };
+        if let Some(k) = cut { for v in [k.0, k.1, k.2, k.3, k.4] { ((v * 4.0) as i32).hash(&mut hs); } }
         for r in &rings { r.len().hash(&mut hs); for p in r { (((p.0 - bx) * 4.0) as i32).hash(&mut hs); (((p.1 - by) * 4.0) as i32).hash(&mut hs); } }
         let key = hs.finish();
         let frame = self.frame;
@@ -429,7 +432,8 @@ impl Painter {
             let mut ras = Raster::new(w, h);
             let local: Vec<Vec<(f32, f32)>> = rings.iter().map(|r| r.iter().map(|p| (p.0 - bx, p.1 - by)).collect()).collect();
             ras.rings(&local);
-            let px = ras.rgba(c.even_odd);
+            let mut px = ras.rgba(c.even_odd);
+            if let Some(k) = cut { cut_rrect(&mut px, w, h, k); }
             let Some(t) = self.texture(w, h, &px) else { return };
             self.paths.insert(key, Tex { t, w: w as f32, h: h as f32, ox: 0.0, oy: 0.0, used: frame });
         }
@@ -621,6 +625,24 @@ impl Painter {
         let face = if bold { self.fonts.bold.as_ref().or(self.fonts.sans.as_ref()) } else { self.fonts.sans.as_ref() };
         let Some(f) = face else { return text.len() as f32 * size * 0.5 };
         text.chars().map(|ch| f.advance(f.glyph(ch as u32)) * size / f.upm).sum()
+    }
+}
+
+/// Alpha outside a rounded box (x, y, w, h, r in the bitmap's pixels) taken
+/// away, with a pixel of soft edge.
+fn cut_rrect(px: &mut [u8], bw: usize, bh: usize, k: (f32, f32, f32, f32, f32)) {
+    let (x, y, w, h, r) = k;
+    let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
+    for j in 0..bh {
+        for i in 0..bw {
+            let (cx, cy) = (i as f32 + 0.5, j as f32 + 0.5);
+            // distance outside the rounded box (negative inside)
+            let qx = (cx - (x + w / 2.0)).abs() - (w / 2.0 - r);
+            let qy = (cy - (y + h / 2.0)).abs() - (h / 2.0 - r);
+            let d = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - r;
+            let cov = (0.5 - d).clamp(0.0, 1.0);
+            if cov < 1.0 { let a = &mut px[(j * bw + i) * 4 + 3]; *a = (*a as f32 * cov) as u8; }
+        }
     }
 }
 
