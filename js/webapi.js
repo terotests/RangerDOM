@@ -5320,8 +5320,34 @@
       var d = Math.abs(x0 + canvasTextWidth(line.slice(0, o), { size: fs, weight: w8 }) - m.x);
       if (d < bestD) { bestD = d; best = o; }
     }
-    if (m.shift && doc._active === el) selectRange(el, el._sd === 'backward' ? el._se : el._ss, lineStart + best);
-    else { el._ss = el._se = lineStart + best; el._sd = 'none'; }
+    var at = lineStart + best;
+    if (m.shift && doc._active === el) selectRange(el, el._sd === 'backward' ? el._se : el._ss, at);
+    else if (clickCount >= 3 || (clickCount === 2 && el.type === 'password')) {
+      // (a third press selects the line: the whole field in an input, the
+      // paragraph in a textarea; a password's second press selects it all)
+      if (el.localName === 'textarea') selectRange(el, lineStart, lineStart + line.length);
+      else selectRange(el, 0, el.value.length);
+      dispatch(el, new Event('select', { bubbles: true }));
+    } else if (clickCount === 2) {
+      // (a second press selects the word under the pointer, as Chromium:
+      // letters, digits and _ run together, a run of spaces is one, any
+      // other character is its own)
+      var kind = function (ch) { return /\s/.test(ch) ? 1 : /[A-Za-z0-9_\u00C0-\u024F\u0370-\uFFFF]/.test(ch) ? 2 : 3; };
+      var a = best, b = best;
+      if (line.length) {
+        var k = kind(line.charAt(best < line.length ? best : best - 1));
+        if (best >= line.length) a = b = line.length - 1;
+        if (k === 3) { b = a + 1; }
+        else {
+          while (a > 0 && kind(line.charAt(a - 1)) === k) a--;
+          while (b < line.length && kind(line.charAt(b)) === k) b++;
+          if (b === a) b = a + 1;
+        }
+        selectRange(el, lineStart + a, lineStart + b);
+        dispatch(el, new Event('select', { bubbles: true }));
+      } else { el._ss = el._se = at; el._sd = 'none'; }
+    }
+    else { el._ss = el._se = at; el._sd = 'none'; }
     changed();
   }
   function submitForm(btn) {
@@ -12598,7 +12624,7 @@
     if (textEntry(e)) return 'text';
     return 'default';
   };
-  var clickCount = 0, lastDown = 0, downTarget = null;
+  var clickCount = 0, lastDown = 0, downTarget = null, lastPressed = null;
   function mods(m) { return { ctrlKey: !!m.ctrl, shiftKey: !!m.shift, altKey: !!m.alt, metaKey: !!m.meta }; }
   function mouseInit(m, extra) {
     var o = mods(m);
@@ -12663,10 +12689,15 @@
     }
     if (t === 'down') {
       if (!target) return 'no target';
-      var nowT = now();
-      clickCount = nowT - lastDown < 500 && downTarget === target ? clickCount + 1 : 1;
+      // (the host's time of the press when it gives one: a frame laid out
+      // between two presses of a double click must not pull them apart)
+      var nowT = typeof m.t === 'number' ? m.t : now();
+      // (the press before on the same element, within 500 ms: a double or
+      // triple click; the release clears downTarget, so it is kept apart)
+      clickCount = nowT - lastDown < 500 && lastPressed === target ? clickCount + 1 : 1;
       lastDown = nowT;
       downTarget = target;
+      lastPressed = target;
       var wasActive = activeEl;
       activeEl = target;
       pointerStateChanged(wasActive, target);
