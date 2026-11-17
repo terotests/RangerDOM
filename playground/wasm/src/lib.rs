@@ -156,12 +156,23 @@ pub struct Playground {
     root: Option<Rc<RefCell<EVGElement>>>,
     lay: Option<Rc<RefCell<EVGLayout>>>,
     synced: Rc<std::cell::RefCell<Synced>>,
+    /// the next render sends the whole page (after a restore this host
+    /// has nothing of it)
+    whole: bool,
 }
 
 impl Playground {
     pub fn new() -> Playground {
+        let engine = Playground::tuned(Engine::new());
+        let synced = Playground::new_synced(800.0, 600.0);
+        let mut pg = Playground { engine: engine, scripts: Vec::new(), units: Vec::new(), errors: Vec::new(), w: 800.0, h: 600.0, page_json: String::new(), last_gen: String::new(), root: None, lay: None, synced: synced, whole: false };
+        pg.engine.vm.set_host_sync(Box::new(SyncLayout { s: pg.synced.clone() }));
+        pg
+    }
+    /// an engine as the playground runs it: the register machine, the
+    /// browser's time zone
+    fn tuned(mut engine: Engine) -> Engine {
         // (CEr's register machine: its default is still the stack machine)
-        let mut engine = Engine::new();
         engine.vm.regs = true;
         // Date's local time zone: the browser's (pg_set_time_zone), kept
         // over pg_reset
@@ -174,9 +185,55 @@ impl Playground {
                 engine.set_time_zone(name);
             }
         }
-        let synced = Rc::new(std::cell::RefCell::new(Synced { w: 800.0, h: 600.0, last: None, json: String::new(), boxes: String::new(), tree: None, tree_at: (0.0, 0.0), kept: Kept::new() }));
-        engine.vm.set_host_sync(Box::new(SyncLayout { s: synced.clone() }));
-        Playground { engine: engine, scripts: Vec::new(), units: Vec::new(), errors: Vec::new(), w: 800.0, h: 600.0, page_json: String::new(), last_gen: String::new(), root: None, lay: None, synced: synced }
+        engine
+    }
+    fn new_synced(w: f64, h: f64) -> Rc<std::cell::RefCell<Synced>> {
+        Rc::new(std::cell::RefCell::new(Synced { w: w, h: h, last: None, json: String::new(), boxes: String::new(), tree: None, tree_at: (0.0, 0.0), kept: Kept::new() }))
+    }
+
+    /// The page's whole state (CEr's heap snapshot: the document, its
+    /// styles, the page's scripts and timers) with the viewport, as text
+    /// for `restore`; "" while a script runs. What the host keeps (the
+    /// laid-out tree, EVG's boxes) is not in it: it is made again from
+    /// the page at the first frame after a restore.
+    pub fn snapshot(&mut self) -> String {
+        self.exec("__suspend()");
+        // (garbage left by the last frames is not kept: a collection first)
+        self.engine.vm.collect();
+        let s = self.engine.snapshot();
+        if s.is_empty() {
+            return s;
+        }
+        format!("rdsnap1 {} {}\n{}", self.w, self.h, s)
+    }
+    /// The playground in the state `snapshot` gave; false (and nothing
+    /// changed) when the text is not one.
+    pub fn restore(&mut self, text: &str) -> bool {
+        let Some(nl) = text.find('\n') else { return false };
+        let head: Vec<&str> = text[..nl].split(' ').collect();
+        if head.len() != 3 || head[0] != "rdsnap1" {
+            return false;
+        }
+        let w: f64 = head[1].parse().unwrap_or(0.0);
+        let h: f64 = head[2].parse().unwrap_or(0.0);
+        let engine = Engine::from_snapshot(&text[nl + 1..]);
+        if !engine.error.is_empty() {
+            return false;
+        }
+        self.engine = Playground::tuned(engine);
+        self.synced = Playground::new_synced(w, h);
+        self.engine.vm.set_host_sync(Box::new(SyncLayout { s: self.synced.clone() }));
+        self.w = w;
+        self.h = h;
+        self.root = None;
+        self.lay = None;
+        self.page_json = String::new();
+        // (dirty at once: the first frame asks for the whole page, as this
+        // host has none of it, __renderDelta(1))
+        self.last_gen = String::new();
+        self.whole = true;
+        self.exec("__resume(1)");
+        true
     }
 
     fn note(&mut self) -> String {
@@ -331,7 +388,7 @@ impl Playground {
     /// the render tree (webapi.js's cascade and boxes) as JSON
     pub fn render(&mut self) -> String {
         self.last_gen = self.value("__generation()");
-        self.page_json = self.value("__renderDelta()");
+        self.page_json = if self.whole { self.whole = false; self.value("__renderDelta(1)") } else { self.value("__renderDelta()") };
         self.page_json.clone()
     }
     /// EVG lays the last render out; the boxes go back to the page
@@ -1206,6 +1263,17 @@ pub extern "C" fn pg_eval(sp: *mut u8, sl: usize) -> usize {
 pub extern "C" fn pg_input(sp: *mut u8, sl: usize) -> usize {
     let s = text(sp, sl);
     answer(PG.with(|p| p.borrow_mut().input(&s)))
+}
+/// the page's state as text (Playground::snapshot)
+#[no_mangle]
+pub extern "C" fn pg_snapshot() -> usize {
+    answer(PG.with(|p| p.borrow_mut().snapshot()))
+}
+/// 1 when the text was a snapshot and the page is now in its state
+#[no_mangle]
+pub extern "C" fn pg_restore(sp: *mut u8, sl: usize) -> u32 {
+    let s = text(sp, sl);
+    PG.with(|p| if p.borrow_mut().restore(&s) { 1 } else { 0 })
 }
 #[no_mangle]
 pub extern "C" fn pg_messages() -> usize {
