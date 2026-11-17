@@ -5050,12 +5050,14 @@
     var els = it && it._pickHover ? it._pickHover : [];
     var was = picker.hover || [];
     if (was.length === els.length && was[0] === els[0]) return;
-    for (var i = 0; i < was.length; i++) { was[i].style.backgroundColor = was[i]._pickBg; was[i].style.borderColor = was[i]._pickBd; }
+    // (the whole declaration put back: a border-color read from a border
+    // shorthand reads empty, and set empty left the border currentColor)
+    for (var i = 0; i < was.length; i++) was[i].style.cssText = was[i]._pickCss;
     for (var j = 0; j < els.length; j++) {
-      var e = els[j];
-      e._pickBg = e.style.backgroundColor; e._pickBd = e.style.borderColor;
-      if (!e._pickBg) e.style.backgroundColor = 'rgb(198, 216, 252)';
-      if (els.length > 1) e.style.borderColor = e._pickBg ? '#1a4fa8' : '#333';
+      var e = els[j], bg = e.style.backgroundColor;
+      e._pickCss = e.style.cssText;
+      if (!bg) e.style.backgroundColor = 'rgb(198, 216, 252)';
+      if (els.length > 1) e.style.borderColor = bg ? '#1a4fa8' : '#333';
     }
     picker.hover = els;
   }
