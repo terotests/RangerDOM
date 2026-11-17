@@ -33,8 +33,9 @@ if [ ! -f "$SDL3_PREFIX/lib/libSDL3.a" ]; then
   cmake --build "$SRC/build" --parallel 2
   cmake --install "$SRC/build"
 fi
-# the static library's own flags (frameworks), from its pkg-config file
-SDL_FLAGS=$(sed -n 's/^Libs.private: *//p' "$SDL3_PREFIX/lib/pkgconfig/sdl3.pc" | tr '\n' ' ')
+# the static library's frameworks, from its pkg-config file (SDL 3.2 puts
+# them on the Libs: line, after -L and -lSDL3)
+SDL_FLAGS="$(sed -n 's/^Libs\(.private\)\{0,1\}: *//p' "$SDL3_PREFIX/lib/pkgconfig/sdl3.pc" | tr ' ' '\n' | grep -v -e '^-L' -e '^-lSDL3$' -e '^$' | tr '\n' ' ') -lobjc"
 
 MAIN="$OUT/main.c"
 printf 'int rangerdom_demo_main(void);\nint main(void) { return rangerdom_demo_main(); }\n' > "$MAIN"
