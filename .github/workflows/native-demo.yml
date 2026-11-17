@@ -5,12 +5,10 @@
 # keeps the zipped app, the sizes and the picture as an artifact.
 name: native-demo
 
+# Run by hand only: macOS runners do not start on this account (the job is
+# cancelled at once), so the app is made from static libraries built off
+# the Mac and linked there (build.mjs --native-lib, playground/native/mac-link.sh).
 on:
-  push:
-    branches: [main]
-    paths: [playground/**, view/**, json/**, js/**, ranger.lock, .github/workflows/native-demo.yml]
-  pull_request:
-    paths: [playground/**, view/**, json/**, js/**, ranger.lock, .github/workflows/native-demo.yml]
   workflow_dispatch:
 
 env:
