@@ -279,7 +279,7 @@ impl Painter {
     }
 
     fn cmd(&mut self, c: &EVGDrawCmd) {
-        if std::env::var_os("RANGERDOM_DUMP").is_some() { let t = c.tile.as_ref().map(|t| { let t = t.borrow(); (t.x, t.y, t.w, t.h) }); eprintln!("CMD {} {} box {} {} {} {} r {} rgba {} {} {} {} tile {:?} th {}", c.kind, c.src, c.x, c.y, c.w, c.h, c.radius, c.r, c.g, c.b, c.a, t, c.thickness); }
+        if std::env::var_os("RANGERDOM_DUMP").is_some() { let t = c.tile.as_ref().map(|t| { let t = t.borrow(); (t.x, t.y, t.w, t.h) }); eprintln!("CMD {} {}{} box {} {} {} {} r {} rgba {} {} {} {} tile {:?} th {} fs {}", c.kind, c.src, c.text, c.x, c.y, c.w, c.h, c.radius, c.r, c.g, c.b, c.a, t, c.thickness, c.font_size); }
         match c.kind {
             RECT => {
                 let start = self.verts.len();
@@ -569,7 +569,11 @@ impl Painter {
         let natural: f32 = glyphs.iter().map(|(f, g)| f.advance(*g) * size / f.upm + ls).sum();
         // stretched to the width the layout measured (the system's face is
         // not always the one EVG's table holds)
-        let fit = if natural > 0.0 && c.w > 0.0 { (c.w as f32 / natural).clamp(0.8, 1.25) } else { 1.0 };
+        // (the run stretched to the width the layout measured, when that is
+        // its own width: a field's lines all carry the field's text width,
+        // and a short line stretched to it looked a size larger)
+        let ratio = if natural > 0.0 && c.w > 0.0 { c.w as f32 / natural } else { 1.0 };
+        let fit = if (0.85..=1.15).contains(&ratio) { ratio } else { 1.0 };
         let pad = 2.0f32;
         let asc = face.asc / face.upm * size * s;
         let desc = face.desc / face.upm * size * s;

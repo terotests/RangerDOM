@@ -5281,6 +5281,31 @@
   // to the step, an input event at each change and change at the release
   // (the thumb 16px wide, Chromium's, its centre on the value)
   var rangeDrag = null;
+  // a resizable box's grip (a textarea's bottom right corner, or any box
+  // with resize and overflow other than visible): a press there and a drag
+  // set its width and height, as Chromium does, never below its padding
+  // and borders
+  var resizeDrag = null;
+  function resizePress(el, m) {
+    if (!el || el.nodeType !== 1 || m.x === undefined) return false;
+    var cs = computedOf(el), rz = cs.resize || (el.localName === 'textarea' ? 'both' : 'none');
+    if (rz === 'none' || (el.localName !== 'textarea' && (cs.overflow || 'visible') === 'visible')) return false;
+    var r = el.getBoundingClientRect();
+    if (m.x < r.right - 14 || m.x > r.right || m.y < r.bottom - 14 || m.y > r.bottom) return false;
+    var px = function (k) { return parseFloat(cs[k]) || 0; };
+    var ex = px('padding-left') + px('padding-right') + px('border-left-width') + px('border-right-width');
+    var ey = px('padding-top') + px('padding-bottom') + px('border-top-width') + px('border-bottom-width');
+    var bb = cs['box-sizing'] === 'border-box';
+    resizeDrag = { el: el, x0: m.x, y0: m.y, w0: r.width, h0: r.height, ex: ex, ey: ey, bb: bb,
+      h: rz === 'both' || rz === 'horizontal' || rz === 'inline', v: rz === 'both' || rz === 'vertical' || rz === 'block' };
+    return true;
+  }
+  function resizeAt(m) {
+    var d = resizeDrag;
+    if (!d.el.isConnected) { resizeDrag = null; return; }
+    if (d.h) { var w = Math.max(d.ex, d.w0 + m.x - d.x0); d.el.style.width = Math.round(d.bb ? w : w - d.ex) + 'px'; }
+    if (d.v) { var h = Math.max(d.ey, d.h0 + m.y - d.y0); d.el.style.height = Math.round(d.bb ? h : h - d.ey) + 'px'; }
+  }
   function rangeAt(el, x) {
     var r = el.getBoundingClientRect(), b = rangeBounds(el), f = r.width > 16 ? (x - r.left - 8) / (r.width - 16) : 0;
     f = Math.max(0, Math.min(1, f));
@@ -12745,6 +12770,7 @@
       if (picker && target && picker.kind === 'select') { var pmi = pickerItemOf(target); if (pmi && pmi._pickIndex !== undefined && pmi._pickIndex !== picker.at) pickerMark(pmi._pickIndex); }
       else if (picker && picker.kind !== 'select') pickerHover(target && pickerItemOf(target));
       if (rangeDrag && rangeDrag.el.isConnected && m.x !== undefined) rangeAt(rangeDrag.el, m.x);
+      if (resizeDrag && m.x !== undefined) resizeAt(m);
       var over = target || (doc && doc.documentElement);
       if (over !== hoverEl && !cap) {
         var old = hoverEl;
@@ -12801,6 +12827,7 @@
           if (/^(date|time|datetime-local|month|week|color)$/.test(target.type) && !target.readOnly) popOpen(target);
           else if (target.type === 'range') { rangeDrag = { el: target, from: target.value }; rangeAt(target, m.x); }
         } else if (target.isContentEditable) editPress(target, m);
+        if ((m.button || 0) === 0 && resizePress(target, m)) return 'ok';
         if (isTextControl(target) && !/^(date|time|datetime-local|month|week)$/.test(target.type) && (m.button || 0) === 0) fieldPress(target, m);
       }
       return 'ok';
@@ -12808,6 +12835,7 @@
     if (t === 'up') {
       var tgt = target || downTarget;
       if (!tgt) return 'no target';
+      resizeDrag = null;
       if (rangeDrag) { var rd = rangeDrag; rangeDrag = null; if (rd.el.isConnected && rd.el.value !== rd.from) dispatch(rd.el, new Event('change', { bubbles: true })); }
       dispatch(tgt, new PointerEvent('pointerup', mouseInit(m, { detail: clickCount })));
       dispatch(tgt, new MouseEvent('mouseup', mouseInit(m, { detail: clickCount })));
