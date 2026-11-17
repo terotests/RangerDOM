@@ -27,7 +27,7 @@ pub struct Pictures {
 
 /// the page's SVG background-image values (elements and their ::before and
 /// ::after), as a JSON array
-pub const PAGE_QUERY: &str = "(function(){var o=[];var a=document.querySelectorAll('*');function t(s){try{var b=s&&s.backgroundImage;if(b&&b.indexOf('data:image/svg')>=0)o.push(b)}catch(e){}}for(var i=0;i<a.length;i++){t(getComputedStyle(a[i]));try{t(getComputedStyle(a[i],'::before'));t(getComputedStyle(a[i],'::after'))}catch(e){}}return JSON.stringify(o)})()";
+pub const PAGE_QUERY: &str = "(function(){var o=[];var a=document.querySelectorAll('*');function t(s){try{var b=s&&s.backgroundImage;if(b&&b.indexOf('data:image/svg')>=0)o.push(b)}catch(e){}}for(var i=0;i<a.length;i++){t(getComputedStyle(a[i]));try{t(getComputedStyle(a[i],'::before'));t(getComputedStyle(a[i],'::after'))}catch(e){}}var m=window.__rdMaskPictures||[];for(var j=0;j<m.length;j++)o.push(m[j]);return JSON.stringify(o)})()";
 
 fn json_string_at(s: &str, start: usize) -> String {
     let b = s.as_bytes();

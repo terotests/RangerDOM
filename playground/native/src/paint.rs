@@ -279,6 +279,7 @@ impl Painter {
     }
 
     fn cmd(&mut self, c: &EVGDrawCmd) {
+        if std::env::var_os("RANGERDOM_DUMP").is_some() { let t = c.tile.as_ref().map(|t| { let t = t.borrow(); (t.x, t.y, t.w, t.h) }); eprintln!("CMD {} {} box {} {} {} {} r {} rgba {} {} {} {} tile {:?} th {}", c.kind, c.src, c.x, c.y, c.w, c.h, c.radius, c.r, c.g, c.b, c.a, t, c.thickness); }
         match c.kind {
             RECT => {
                 let start = self.verts.len();
@@ -373,7 +374,9 @@ impl Painter {
             if c.src.starts_with("dompng-") && !self.pictures.asked.contains(&c.src) { self.pictures.missing.push(c.src.clone()); }
             return;
         };
-        let (bx, by, bw, bh) = match &c.tile { Some(t) => { let t = t.borrow(); (t.x, t.y, t.w, t.h) } None => (c.x, c.y, c.w, c.h) };
+        // (a tile the size of the box is the box: a kept row moved down
+        // keeps the tile where it was first laid)
+        let (bx, by, bw, bh) = match &c.tile { Some(t) => { let t = t.borrow(); if (t.w - c.w).abs() < 0.01 && (t.h - c.h).abs() < 0.01 { (c.x, c.y, c.w, c.h) } else { (t.x, t.y, t.w, t.h) } } None => (c.x, c.y, c.w, c.h) };
         let (x, y) = self.px(bx, by);
         let (w, h) = ((bw as f32 * self.s).round().max(1.0) as usize, (bh as f32 * self.s).round().max(1.0) as usize);
         if w > 4096 || h > 4096 { return; }
