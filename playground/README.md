@@ -27,6 +27,16 @@ node bench/run.mjs                # headless: report + pictures in bench/out
 | `web/` | the page: `main.js` drives both sides and times them |
 | `pins.json` | the Ranger compiler and EVG commits |
 
+Save state / Load state keep the RangerDOM page's whole state in the
+page's memory (CEr's heap snapshot: the document, its styles, the page's
+scripts and timers; `pg_snapshot` / `pg_restore`) and put it back: what
+the host keeps (the laid-out tree) is made again at the first frame. A
+load also brings the browser's page to the same step. Natively,
+`cargo run --release --example snapcheck -- playground/dist/cases/<name> [step]`
+(in the staged crate) runs a case straight through and again with the
+page saved after `step` and loaded into a new playground, and fails when
+any step's probe differs.
+
 URL parameters: `?case=<name>`, `&auto=1` (run every step at once;
 `window.__pgResult` holds the result), `&size=W,H` (default 1200,800),
 `&engine=wasm|js`, `&budget=ms` (once a RangerDOM step took longer, the case's later steps run

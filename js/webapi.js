@@ -25,8 +25,11 @@
 //   __layout(json)        the boxes the host laid out: {"id": [x, y, w, h]}
 //                         and {"viewport": [w, h]}
 //   __input(json)         an event from the user, see hostInput
-//   __resume()            the realm was started from a snapshot taken
-//                         earlier: its clock (performance) starts now
+//   __suspend()           before a snapshot of a page that is to go on
+//                         later: its clock is noted
+//   __resume(keep)        the realm was started from a snapshot taken
+//                         earlier: its clock (performance) starts now, or
+//                         with keep goes on from __suspend()
 //
 // and reads the scripts to run from __scripts() after __page.
 
@@ -13649,9 +13652,15 @@
     timing: { navigationStart: t0 }, navigation: { type: 0 }
   };
   // a realm started from a snapshot of an earlier one (the host's code
-  // cache): its clock starts now, not when the snapshot was taken
-  G.__resume = function () {
-    t0 = Date.now();
+  // cache): its clock starts now, not when the snapshot was taken; with
+  // keep (a page saved and loaded again, the playground's snapshot) it
+  // goes on from where it was at __suspend(), so what the page measured
+  // from performance.now() before still holds
+  var suspendedAt = -1;
+  G.__suspend = function () { suspendedAt = Date.now() - t0; return 'ok'; };
+  G.__resume = function (keep) {
+    t0 = keep && suspendedAt >= 0 ? Date.now() - suspendedAt : Date.now();
+    suspendedAt = -1;
     performance.timeOrigin = t0;
     performance.timing.navigationStart = t0;
     return 'ok';
