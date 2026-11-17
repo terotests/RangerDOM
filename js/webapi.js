@@ -5054,6 +5054,23 @@
     pickerClose();
     if (o && !o.disabled && sel.selectedIndex !== i) { sel.selectedIndex = i; fireChange(sel); }
   }
+  // a calendar's choice under the pointer (a week field's whole week) on
+  // light blue, put back as it was when the pointer leaves it
+  function pickerHover(it) {
+    var els = it && it._pickHover ? it._pickHover : [];
+    var was = picker.hover || [];
+    if (was.length === els.length && was[0] === els[0]) return;
+    // (the whole declaration put back: a border-color read from a border
+    // shorthand reads empty, and set empty left the border currentColor)
+    for (var i = 0; i < was.length; i++) was[i].style.cssText = was[i]._pickCss;
+    for (var j = 0; j < els.length; j++) {
+      var e = els[j], bg = e.style.backgroundColor;
+      e._pickCss = e.style.cssText;
+      if (!bg) e.style.backgroundColor = 'rgb(198, 216, 252)';
+      if (els.length > 1) e.style.borderColor = bg ? '#1a4fa8' : '#333';
+    }
+    picker.hover = els;
+  }
   function pickerItemOf(t) {
     for (var n = t; n && n.nodeType === 1; n = n.parentNode) if ((n._pickIndex !== undefined || n._pickAct) && picker && picker.box.contains(n)) return n;
     return null;
@@ -5151,7 +5168,16 @@
       var chosenWeek = t === 'week' ? v : '';
       for (var w = 0; w < 6; w++) {
         var wk = formatNumberValue({ type: 'week' }, start + w * 7 * 86400000);
-        if (iso) popEl(grid2, 'height:30px;line-height:30px;text-align:center;color:#777;font-size:11px', String(+wk.split('W')[1]));
+        // (a week's number picks it too, and a pointer over any of its cells
+        // marks the whole row, as Chromium's week picker does)
+        var rowEls = [];
+        if (iso) {
+          var wkFirst = new Date(start + w * 7 * 86400000), wkKey = ymd(wkFirst.getUTCFullYear(), wkFirst.getUTCMonth(), wkFirst.getUTCDate());
+          var wn = popEl(grid2, 'height:30px;line-height:28px;text-align:center;box-sizing:border-box;border:1px solid transparent;border-radius:3px;color:#777;font-size:11px', String(+wk.split('W')[1]),
+            (function (k, wkey) { return function () { calPick(k, wkey); }; })(wkKey, wk));
+          if (wk === chosenWeek) { wn.style.background = POP_BLUE; wn.style.color = '#fff'; wn.style.fontWeight = 'bold'; }
+          rowEls.push(wn);
+        }
         for (var dd = 0; dd < 7; dd++) {
           var at = new Date(start + (w * 7 + dd) * 86400000), Y = at.getUTCFullYear(), M = at.getUTCMonth(), D = at.getUTCDate(), key2 = ymd(Y, M, D);
           var inMonth = M === vw.m, isToday = Y === td.y && M === td.m && D === td.d;
@@ -5162,8 +5188,10 @@
           else if (out) css += 'color:#c8c8c8;';
           else if (!inMonth) css += 'color:#767676;';
           if (isToday && !sel) css += 'border-color:#767676;';
-          popEl(grid2, css, String(D), out ? null : (function (k, wkey) { return function () { calPick(k, wkey); }; })(key2, wk));
+          var de = popEl(grid2, css, String(D), out ? null : (function (k, wkey) { return function () { calPick(k, wkey); }; })(key2, wk));
+          if (de._pickAct) { de._pickHover = iso ? rowEls : [de]; if (iso) rowEls.push(de); }
         }
+        if (iso && rowEls.length) rowEls[0]._pickHover = rowEls;
       }
     }
     // Clear and Today (This week, This month)
@@ -5265,6 +5293,31 @@
   // to the step, an input event at each change and change at the release
   // (the thumb 16px wide, Chromium's, its centre on the value)
   var rangeDrag = null;
+  // a resizable box's grip (a textarea's bottom right corner, or any box
+  // with resize and overflow other than visible): a press there and a drag
+  // set its width and height, as Chromium does, never below its padding
+  // and borders
+  var resizeDrag = null;
+  function resizePress(el, m) {
+    if (!el || el.nodeType !== 1 || m.x === undefined) return false;
+    var cs = computedOf(el), rz = cs.resize || (el.localName === 'textarea' ? 'both' : 'none');
+    if (rz === 'none' || (el.localName !== 'textarea' && (cs.overflow || 'visible') === 'visible')) return false;
+    var r = el.getBoundingClientRect();
+    if (m.x < r.right - 14 || m.x > r.right || m.y < r.bottom - 14 || m.y > r.bottom) return false;
+    var px = function (k) { return parseFloat(cs[k]) || 0; };
+    var ex = px('padding-left') + px('padding-right') + px('border-left-width') + px('border-right-width');
+    var ey = px('padding-top') + px('padding-bottom') + px('border-top-width') + px('border-bottom-width');
+    var bb = cs['box-sizing'] === 'border-box';
+    resizeDrag = { el: el, x0: m.x, y0: m.y, w0: r.width, h0: r.height, ex: ex, ey: ey, bb: bb,
+      h: rz === 'both' || rz === 'horizontal' || rz === 'inline', v: rz === 'both' || rz === 'vertical' || rz === 'block' };
+    return true;
+  }
+  function resizeAt(m) {
+    var d = resizeDrag;
+    if (!d.el.isConnected) { resizeDrag = null; return; }
+    if (d.h) { var w = Math.max(d.ex, d.w0 + m.x - d.x0); d.el.style.width = Math.round(d.bb ? w : w - d.ex) + 'px'; }
+    if (d.v) { var h = Math.max(d.ey, d.h0 + m.y - d.y0); d.el.style.height = Math.round(d.bb ? h : h - d.ey) + 'px'; }
+  }
   function rangeAt(el, x) {
     var r = el.getBoundingClientRect(), b = rangeBounds(el), f = r.width > 16 ? (x - r.left - 8) / (r.width - 16) : 0;
     f = Math.max(0, Math.min(1, f));
@@ -11466,7 +11519,23 @@
       s[k] = typeof v === 'string' && v.slice(0, 5) === 'calc(' ? flatCalc(v) : v;
     }
     if (!s.display) s.display = 'inline';
-    var mask = text ? '' : maskAsImage(s) || borderPicture(s, ps.color);
+    // (a masked box keeps its own size, the picture painted in it where
+    // the mask would be: its position, size and repeat as a background's)
+    var mpic = text ? '' : maskAsImage(s);
+    if (mpic) {
+      s['background-image'] = 'url("' + mpic + '")';
+      // (kept for a host that asks the page which pictures it shows: a
+      // forced layout's tree never reaches it)
+      var mpl = G.__rdMaskPictures || (G.__rdMaskPictures = []);
+      if (mpl.indexOf(s['background-image']) < 0) { mpl.push(s['background-image']); if (mpl.length > 256) mpl.shift(); }
+      var mk = ['position', 'size', 'repeat'];
+      for (var mj = 0; mj < 3; mj++) {
+        var mv = s['mask-' + mk[mj]] || s['-webkit-mask-' + mk[mj]];
+        if (mv) s['background-' + mk[mj]] = mv;
+      }
+      if (!s['background-repeat']) s['background-repeat'] = 'repeat';
+    }
+    var mask = text || mpic ? '' : borderPicture(s, ps.color);
     if (mask) { o.t = 'img'; o.a = { src: mask }; }
     o.s = s;
     if (text) o.c = ps['white-space'] === 'pre-line' && text.indexOf('\n') >= 0 ? preLineParts(o.i + 't', text) : [{ i: o.i + 't', x: text }];
@@ -12723,7 +12792,9 @@
     }
     if (t === 'move') {
       if (picker && target && picker.kind === 'select') { var pmi = pickerItemOf(target); if (pmi && pmi._pickIndex !== undefined && pmi._pickIndex !== picker.at) pickerMark(pmi._pickIndex); }
+      else if (picker && picker.kind !== 'select') pickerHover(target && pickerItemOf(target));
       if (rangeDrag && rangeDrag.el.isConnected && m.x !== undefined) rangeAt(rangeDrag.el, m.x);
+      if (resizeDrag && m.x !== undefined) resizeAt(m);
       var over = target || (doc && doc.documentElement);
       if (over !== hoverEl && !cap) {
         var old = hoverEl;
@@ -12780,6 +12851,7 @@
           if (/^(date|time|datetime-local|month|week|color)$/.test(target.type) && !target.readOnly) popOpen(target);
           else if (target.type === 'range') { rangeDrag = { el: target, from: target.value }; rangeAt(target, m.x); }
         } else if (target.isContentEditable) editPress(target, m);
+        if ((m.button || 0) === 0 && resizePress(target, m)) return 'ok';
         if (isTextControl(target) && !/^(date|time|datetime-local|month|week)$/.test(target.type) && (m.button || 0) === 0) fieldPress(target, m);
       }
       return 'ok';
@@ -12787,6 +12859,7 @@
     if (t === 'up') {
       var tgt = target || downTarget;
       if (!tgt) return 'no target';
+      resizeDrag = null;
       if (rangeDrag) { var rd = rangeDrag; rangeDrag = null; if (rd.el.isConnected && rd.el.value !== rd.from) dispatch(rd.el, new Event('change', { bubbles: true })); }
       dispatch(tgt, new PointerEvent('pointerup', mouseInit(m, { detail: clickCount })));
       dispatch(tgt, new MouseEvent('mouseup', mouseInit(m, { detail: clickCount })));
