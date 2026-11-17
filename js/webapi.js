@@ -2340,12 +2340,19 @@
   }
   // a logical longhand's physical property for an element in writing mode
   // wm and direction dir (CSS Logical 4), or null for any other name
+  // (each name's match once: the cascade asks for every declaration of
+  // every element, and nearly all names are physical ones)
+  var logicalNames = Object.create(null);
   function physicalOf(n, wm, dir) {
-    var sz = /^(min-|max-)?(inline|block)-size$/.exec(n);
+    var hit = logicalNames[n];
+    if (hit === undefined) {
+      hit = /^(min-|max-)?(inline|block)-size$/.exec(n) || /^(margin|padding|inset|border)-(inline|block)-(start|end)(-width|-style|-color)?$/.exec(n) || 0;
+      logicalNames[n] = hit;
+    }
+    if (hit === 0) return null;
     var vert = /^(vertical|sideways)/.test(wm || '');
-    if (sz) return (sz[1] || '') + ((sz[2] === 'inline') !== vert ? 'width' : 'height');
-    var m = /^(margin|padding|inset|border)-(inline|block)-(start|end)(-width|-style|-color)?$/.exec(n);
-    if (!m) return null;
+    if (hit.length === 3) return (hit[1] || '') + ((hit[2] === 'inline') !== vert ? 'width' : 'height');
+    var m = hit;
     var side;
     if (m[2] === 'block') {
       var rl = wm === 'vertical-rl' || wm === 'sideways-rl';
@@ -6740,7 +6747,7 @@
           var want = s.v, have = v;
           // (in an HTML document these attributes' values match in any
           // ASCII case, HTML 4.16.2)
-          var ci = s.i || (HTML_CI_ATTRS.test(s.n) && el.namespaceURI === HTML_NS && (el.ownerDocument || doc).contentType !== 'application/xhtml+xml');
+          var ci = s.i || ((s.hci === undefined ? (s.hci = HTML_CI_ATTRS.test(s.n)) : s.hci) && el.namespaceURI === HTML_NS && (el.ownerDocument || doc).contentType !== 'application/xhtml+xml');
           if (ci) { want = want.toLowerCase(); have = have.toLowerCase(); }
           if (s.op === '=' && have !== want) return false;
           if (s.op === '~=' && (!want || (' ' + have.replace(/\s+/g, ' ') + ' ').indexOf(' ' + want + ' ') < 0)) return false;
@@ -9658,8 +9665,20 @@
     return typeof r === 'object' ? r.num : r;
   }
   var LENGTH_PROPS = /^(width|height|min-width|min-height|max-width|max-height|top|right|bottom|left|margin-(top|right|bottom|left)|padding-(top|right|bottom|left)|border-(top|right|bottom|left)-width|border-(top|bottom)-(left|right)-radius|row-gap|column-gap|flex-basis|letter-spacing|word-spacing|text-indent|outline-width|outline-offset|line-height|gap)$/;
+  // (what computeValue asks of a name, once per name: 1 a border or
+  // outline width, 2 a length (LENGTH_PROPS), 4 a colour)
+  var valueKinds = Object.create(null);
+  function valueKind(name) {
+    var k = valueKinds[name];
+    if (k === undefined) {
+      k = (/-width$/.test(name) && /^border-|^outline-/.test(name) ? 1 : 0) | (LENGTH_PROPS.test(name) ? 2 : 0) | (name === 'color' || /-color$/.test(name) || name === 'fill' || name === 'stroke' ? 4 : 0);
+      valueKinds[name] = k;
+    }
+    return k;
+  }
   function computeValue(name, v, ctx, parent, out) {
     v = v.trim();
+    var kind = valueKind(name);
     if (name === 'line-height') {
       if (/^\+?[\d.]+$/.test(v)) return v.replace(/^\+/, '');
       // (a calc() of plain numbers is a number: Tailwind's
@@ -9670,7 +9689,7 @@
       var lh = lengthPx(v, { em: ctx.em, rem: ctx.rem, vw: ctx.vw, vh: ctx.vh, pct: ctx.em });
       return lh === null ? v : fmtPx(lh);
     }
-    if (/-width$/.test(name) && /^border-|^outline-/.test(name)) {
+    if (kind & 1) {
       if (v === 'thin') return '1px';
       if (v === 'medium') return '3px';
       if (v === 'thick') return '5px';
@@ -9688,7 +9707,7 @@
     if (name === 'border-spacing') {
       return v.trim().split(/\s+/).map(function (w) { var q = lengthPx(w, ctx); return q === null ? w : fmtPx(q); }).join(' ');
     }
-    if (LENGTH_PROPS.test(name)) {
+    if (kind & 2) {
       if (/%/.test(v) && !/^(calc|min|max|clamp)\(/.test(v)) return v;
       var px = lengthPx(v, ctx);
       if (px !== null) return fmtPx(px);
@@ -9704,7 +9723,7 @@
       if (/^auto$/i.test(v.trim())) return 'auto';
       return (v.match(/[a-z-]+\([^)]*\)|[^\s()]+/gi) || []).map(normalizeColor).join(' ');
     }
-    if (name === 'color' || /-color$/.test(name) || name === 'fill' || name === 'stroke') {
+    if (kind & 4) {
       if (/^currentcolor$/i.test(v)) return name === 'color' ? (parent ? parent.color : 'rgb(0, 0, 0)') : v;
       return normalizeColor(v);
     }
