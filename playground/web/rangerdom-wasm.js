@@ -113,6 +113,11 @@ export async function loadWasmPlayground(url, opts = {}) {
     dueIn() { return x.pg_due_in(); }
     eval(src) { const [a, b] = put(src); return out(x.pg_eval(a, b)); }
     messages() { return out(x.pg_messages()); }
+    // the page's whole state as text, and the page put back in it (false:
+    // not a snapshot); a module built before them has neither
+    snapshot() { return x.pg_snapshot ? out(x.pg_snapshot()) : ""; }
+    restore(text) { if (!x.pg_restore) return false; const [a, b] = put(text); return x.pg_restore(a, b) !== 0; }
+    get canSnapshot() { return !!x.pg_snapshot; }
     memoryBytes() { return memory.buffer.byteLength; }
   }
   return WasmPlayground;

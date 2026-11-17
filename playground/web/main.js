@@ -731,6 +731,10 @@ function showErrors() {
 function setStatus(s) { $("status").textContent = s; }
 function buttons(on) {
   for (const id of ["run", "step", "reload", "all"]) $(id).disabled = !on;
+  const snap = !!(pg && pg.canSnapshot);
+  $("save").hidden = $("load").hidden = !snap;
+  $("save").disabled = !on || !snap;
+  $("load").disabled = !on || !snap || !saved.has(current && current.name);
   if (on && state && state.next >= state.steps.length) $("step").disabled = $("run").disabled = true;
 }
 
@@ -792,6 +796,61 @@ async function step() {
   buttons(true);
   return r;
 }
+// Saved states (Save state / Load state), by case, in this page's memory:
+// the RangerDOM page's CEr heap snapshot and how many steps had run. A load
+// puts the RangerDOM page back as it was, whatever was done to it since
+// (steps, pointer and keys on the canvas), and the browser's page is
+// loaded again and given the same steps, so the two compare again; what
+// was done by hand in the browser's pane is not repeated.
+const saved = new Map();
+async function saveState() {
+  if (!pg || !pg.canSnapshot || busy) return;
+  busy = true;
+  buttons(false);
+  const t = performance.now();
+  const snap = pg.snapshot();
+  const ms = performance.now() - t;
+  if (snap) {
+    saved.set(current.name, { snap, next: state ? state.next : 0, rows: state ? state.rows.length : 0, over: !!(state && state.over) });
+    setStatus(`State saved: ${(snap.length / 1048576).toFixed(1)} MB in ${Math.round(ms)} ms`);
+  } else setStatus("The page is running a script: nothing saved");
+  busy = false;
+  buttons(true);
+  return { bytes: snap.length, ms };
+}
+async function loadState() {
+  const s = saved.get(current.name);
+  if (!pg || !s || busy) return;
+  busy = true;
+  buttons(false);
+  const t = performance.now();
+  const ok = pg.restore(s.snap);
+  const ms = performance.now() - t;
+  if (!ok) { setStatus("Not a saved state"); busy = false; buttons(true); return; }
+  resetAcc();
+  draw();
+  const drawn = performance.now() - t;
+  if (state) {
+    // (the browser's side to the same step)
+    if (state.next !== s.next) {
+      setStatus("Loading the browser's page to the same step…");
+      await nativeLoad(current.name);
+      await nativeRun((b) => b.start());
+      for (let k = 0; k < s.next; k++) await nativeRun((b) => b.run(k));
+    }
+    state.next = s.next;
+    state.over = s.over;
+    const body = $("steps").tBodies[0];
+    while (state.rows.length > s.rows) { state.rows.pop(); if (body.lastElementChild) body.removeChild(body.lastElementChild); }
+  }
+  setStatus(`State loaded in ${Math.round(ms)} ms, drawn in ${Math.round(drawn)} ms`);
+  busy = false;
+  buttons(true);
+  return { ms, drawn };
+}
+window.__rdSave = saveState;
+window.__rdLoad = loadState;
+
 async function runAll() {
   while (state && state.next < state.steps.length) await step();
   return { case: current.name, rows: state.rows, errors: [...new Set(errors)] };
@@ -935,6 +994,8 @@ $("run").onclick = () => runAll();
 $("step").onclick = () => step();
 $("reload").onclick = () => open(current.name);
 $("all").onclick = () => everyCase();
+$("save").onclick = () => saveState();
+$("load").onclick = () => loadState();
 
 (async function main() {
   fit();
