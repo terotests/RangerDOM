@@ -18,10 +18,7 @@ impl DomText {
 
     /// byte index of the first `key` in `text`, -1 when there is none
     pub fn index_of(text: &str, key: &str) -> int {
-        if let Some(p) = text.find(key) {
-            return p as int;
-        }
-        -1
+        DomText::index_of_from(text, key, 0)
     }
 
     /// byte index of the first `key` at or after `from`, -1 when none
@@ -29,8 +26,44 @@ impl DomText {
         if from < 0 || from as usize > text.as_bytes().len() {
             return -1;
         }
+        if key.as_bytes().len() <= 16 {
+            return DomText::find_short(text, key, from);
+        }
         if let Some(p) = text[from as usize..].find(key) {
             return p as int + from;
+        }
+        -1
+    }
+
+    /// `index_of_from` for a short key by comparing bytes: str::find sets
+    /// up a two-way searcher on every call, which costs more than the
+    /// search itself for keys like "url(" or ")" (DomView::style calls it
+    /// about a million times in the shadcn case). A byte match of UTF-8
+    /// starts on a character boundary, so the index is the same.
+    fn find_short(text: &str, key: &str, from: int) -> int {
+        let t = text.as_bytes();
+        let k = key.as_bytes();
+        let m: usize = k.len();
+        let n: usize = t.len();
+        let mut i: usize = from as usize;
+        if m == 0 {
+            return from;
+        }
+        if m > n {
+            return -1;
+        }
+        let first = k[0];
+        while i + m <= n {
+            if t[i] == first {
+                let mut j: usize = 1;
+                while j < m && t[i + j] == k[j] {
+                    j += 1;
+                }
+                if j == m {
+                    return i as int;
+                }
+            }
+            i += 1;
         }
         -1
     }
