@@ -1017,10 +1017,42 @@
     generation++;
     scrollBumps++;
     textStamp++;
+    barShow(n);
     if (shadowCount) { stampUp(n); return; }
     for (; n; n = n.parentNode) n._rv = textStamp;
     if (virts.length) virtCheck(false);
   }
+  // scroll bars: shown while a box scrolls and a moment after, over its
+  // content at its right and bottom edges, as overlay scroll bars are
+  // (__scrollBars: the thumbs the host draws over the page)
+  var barEls = [];
+  function barShow(n) {
+    if (!n || n._attrs === undefined) return;
+    n._sAt = Date.now();
+    if (barEls.indexOf(n) < 0) barEls.push(n);
+  }
+  G.__scrollBars = function () {
+    var now = Date.now(), out = [];
+    for (var i = barEls.length - 1; i >= 0; i--) {
+      var el = barEls[i], age = now - (el._sAt || 0);
+      if (age > 1000 || !el.isConnected) { barEls.splice(i, 1); continue; }
+      var cs = computedOf(el);
+      if (/none/.test(cs['scrollbar-width'] || '')) continue;
+      var root = el === doc.documentElement, a = age < 700 ? 0.5 : 0.5 * (1000 - age) / 300;
+      var x0, y0, cw = sizeNow(el, 'cw'), ch = sizeNow(el, 'ch'), sw = sizeNow(el, 'sw'), sh = sizeNow(el, 'sh');
+      if (root) { x0 = 0; y0 = 0; }
+      else { var r = rectOf(el), e = edgesOf(el); x0 = r.left + e.bl; y0 = r.top + e.bt; }
+      if (sh > ch + 0.5 && ch > 20) {
+        var th = Math.max(36, ch * ch / sh), st = el.scrollTop || 0;
+        out.push([x0 + cw - 9, y0 + 2 + (ch - 4 - th) * Math.min(1, st / (sh - ch)), 6, th - 4 > 10 ? th - 4 : th, a]);
+      }
+      if (sw > cw + 0.5 && cw > 20) {
+        var tw = Math.max(36, cw * cw / sw), sl = el.scrollLeft || 0;
+        out.push([x0 + 2 + (cw - 4 - tw) * Math.min(1, sl / (sw - cw)), y0 + ch - 9, tw - 4 > 10 ? tw - 4 : tw, 6, a]);
+      }
+    }
+    return out.length || barEls.length ? JSON.stringify(out) : '';
+  };
   // a text changed under n: n and its ancestors render again
   function textChanged(n) {
     // a style sheet's text is its rules
@@ -5720,6 +5752,7 @@
   }
   function sizeOf(el, what) {
     if (!sizesStand()) reflow();
+    if (virts.length && !boxes[el.__id]) virtNeed(el);
     return sizeNow(el, what);
   }
   // (as the boxes have it now, no layout)
@@ -12214,6 +12247,11 @@
   }
   // an element a script asks the geometry of, in a child left out: that
   // child renders (true: a layout is due)
+  // el's box, where virtual rows left out the child el is in: that child
+  // rendered where it stands, and the page laid out
+  function virtNeed(el) {
+    if (virts.length && el.isConnected && !boxes[el.__id] && virtPin(el)) reflow();
+  }
   function virtPin(el) {
     for (var q = el; q && q.parentNode && q.parentNode.nodeType === 1; q = q.parentNode) {
       var st = q.parentNode._virt;
@@ -12804,7 +12842,7 @@
     // (where it is now: cmdk scrolls its selected item into view in the
     // layout effect after Radix's accordion set its open height, and the
     // page came out 36 px short of the browser's)
-    if (el.isConnected) reflow();
+    if (el.isConnected) { reflow(); virtNeed(el); }
     var b = el.isConnected ? boxes[el.__id] : null;
     if (!b) return;
     var o = arg === false ? { block: 'end', inline: 'nearest' } : arg && typeof arg === 'object' ? arg : {};
