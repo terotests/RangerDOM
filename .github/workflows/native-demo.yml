@@ -1,0 +1,94 @@
+# The playground as a desktop program (playground/native): RangerDOM's
+# engine (CEr + webapi.js + view + EVG, the same crate as the WebAssembly
+# build) in an SDL3 window. Builds a universal macOS app (arm64 + x86_64)
+# with SDL3 linked in statically, opens one case headless as a check, and
+# keeps the zipped app, the sizes and the picture as an artifact.
+name: native-demo
+
+# Run by hand only: macOS runners do not start on this account (the job is
+# cancelled at once), so the app is made from static libraries built off
+# the Mac and linked there (build.mjs --native-lib, playground/native/mac-link.sh).
+on:
+  workflow_dispatch:
+
+env:
+  SDL_VERSION: 3.2.24
+
+jobs:
+  macos:
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      # the libraries under test and esbuild (the cases)
+      - run: npm ci
+        working-directory: bench
+      - name: SDL3 (static, universal, video + render only)
+        id: sdl
+        uses: actions/cache@v4
+        with:
+          path: ~/sdl3
+          key: sdl3-${{ env.SDL_VERSION }}-macos-universal-v1
+      - if: steps.sdl.outputs.cache-hit != 'true'
+        run: |
+          git clone -q --depth 1 -b release-$SDL_VERSION https://github.com/libsdl-org/SDL "$RUNNER_TEMP/sdl"
+          cmake -S "$RUNNER_TEMP/sdl" -B "$RUNNER_TEMP/sdl/build" -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_INSTALL_PREFIX="$HOME/sdl3" \
+            -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TEST_LIBRARY=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
+            -DSDL_AUDIO=OFF -DSDL_JOYSTICK=OFF -DSDL_HAPTIC=OFF -DSDL_HIDAPI=OFF -DSDL_SENSOR=OFF \
+            -DSDL_CAMERA=OFF -DSDL_POWER=OFF -DSDL_GPU=OFF -DSDL_DIALOG=OFF
+          cmake --build "$RUNNER_TEMP/sdl/build" --parallel 4
+          cmake --install "$RUNNER_TEMP/sdl/build"
+      - run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          which pkg-config || brew install pkgconf
+      - name: Build the app
+        env:
+          PKG_CONFIG_PATH: ${{ env.HOME }}/sdl3/lib/pkgconfig
+          NATIVE_TARGETS: aarch64-apple-darwin,x86_64-apple-darwin
+        run: |
+          export PKG_CONFIG_PATH="$HOME/sdl3/lib/pkgconfig"
+          pkg-config --static --libs sdl3
+          node playground/build.mjs --no-wasm --native --out dist
+      - name: Package RangerDOM Demo.app
+        run: |
+          APP="out/RangerDOM Demo.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp dist/native/rangerdom-demo "$APP/Contents/MacOS/"
+          cp -R dist/cases "$APP/Contents/Resources/cases"
+          cp playground/native/Info.plist "$APP/Contents/Info.plist"
+          codesign --force --deep -s - "$APP"
+          (cd out && ditto -c -k --keepParent "RangerDOM Demo.app" RangerDOM-Demo-macos.zip)
+          cp dist/native/rangerdom-demo out/
+      - name: Open a case headless
+        run: |
+          out/rangerdom-demo dist/cases --case bootstrap --steps 2 --screenshot out/bootstrap.bmp
+          out/rangerdom-demo dist/cases --case shadcn --steps 1 --screenshot out/shadcn.bmp
+      - name: Sizes
+        run: |
+          B=out/rangerdom-demo
+          lipo -thin arm64 $B -output out/rangerdom-demo-arm64
+          lipo -thin x86_64 $B -output out/rangerdom-demo-x86_64
+          {
+            echo "universal binary: $(stat -f %z $B) bytes"
+            echo "arm64 binary:     $(stat -f %z out/rangerdom-demo-arm64) bytes"
+            echo "x86_64 binary:    $(stat -f %z out/rangerdom-demo-x86_64) bytes"
+            echo "arm64 gzip -9:    $(gzip -9c out/rangerdom-demo-arm64 | wc -c | tr -d ' ') bytes"
+            echo "cases (23 pages): $(du -sk dist/cases | cut -f1) KB"
+            echo "app zip:          $(stat -f %z out/RangerDOM-Demo-macos.zip) bytes"
+            echo "libSDL3.a (universal): $(stat -f %z $HOME/sdl3/lib/libSDL3.a) bytes"
+            size -m out/rangerdom-demo-arm64 | head -20 || true
+          } | tee out/sizes.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rangerdom-demo-macos
+          path: |
+            out/RangerDOM-Demo-macos.zip
+            out/rangerdom-demo-arm64
+            out/sizes.txt
+            out/*.bmp

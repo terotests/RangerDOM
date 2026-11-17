@@ -8138,6 +8138,23 @@ impl DomView {
                 EVGElement::set_attribute(&thumb, "flex-shrink", "0".to_string());
                 EVGElement::set_attribute(&thumb, "border-radius", "8px".to_string());
                 EVGElement::set_attribute(&thumb, "background-color", accent.clone());
+                // (the thumb is painted last, over both parts of the track:
+                // laid out of the row at the value's share of the room it
+                // leaves (as the two flex parts with their -2px margins put it),
+                // where a gap of its size keeps the place in the row)
+                EVGElement::set_attribute(&thumb, "position", "absolute".to_string());
+                EVGElement::set_attribute(&thumb, "left", format!("{}%", DomView::fmt(rf * 100.0)));
+                EVGElement::set_attribute(&thumb, "margin-left", format!("{}px", DomView::fmt(-rf * 12.0 - 2.0)));
+                EVGElement::set_attribute(&thumb, "top", "50%".to_string());
+                EVGElement::set_attribute(&thumb, "margin-top", "-8px".to_string());
+                let rpos: String = s.borrow().getText("position");
+                if rpos.is_empty() || rpos == "static" {
+                    EVGElement::set_attribute(&e, "position", "relative".to_string());
+                }
+                let gap: Rc<RefCell<EVGElement>> = EVGElement::create_div();
+                EVGElement::set_attribute(&gap, "width", "16px".to_string());
+                EVGElement::set_attribute(&gap, "height", "16px".to_string());
+                EVGElement::set_attribute(&gap, "flex-shrink", "0".to_string());
                 let rest: Rc<RefCell<EVGElement>> = EVGElement::create_div();
                 EVGElement::set_attribute(&rest, "height", "4px".to_string());
                 EVGElement::set_attribute(&rest, "flex-basis", "0px".to_string());
@@ -8149,8 +8166,9 @@ impl DomView {
                 EVGElement::set_attribute(&rest, "border-radius", "2px".to_string());
                 EVGElement::set_attribute(&rest, "background-color", "rgb(239, 239, 239)".to_string());
                 EVGElement::add_child(&e, Rc::clone(&fill));
-                EVGElement::add_child(&e, Rc::clone(&thumb));
+                EVGElement::add_child(&e, Rc::clone(&gap));
                 EVGElement::add_child(&e, Rc::clone(&rest));
+                EVGElement::add_child(&e, Rc::clone(&thumb));
                 e.borrow_mut().role = "slider".to_string();
                 self.outlineBox(&e, &s, &inh, &display);
                 return e;
