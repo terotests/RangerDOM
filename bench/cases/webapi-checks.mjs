@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 export default {
   area: "Web API behaviour",
-  about: "One step per Web API fix found by the battery, each a probe compared with Chromium: custom element upgrade at define + whenDefined, scrollIntoView, :invalid with required, getComputedStyle shorthands, style.transform serialisation, CSS @keyframes animations (fill-mode, iterations, events), template attribute parsing, elementFromPoint inside a translate + scale viewport (React Flow), Shadow DOM (:host, ::slotted, slots, composed events, slotchange).",
+  about: "One step per Web API fix found by the battery, each a probe compared with Chromium: custom element upgrade at define + whenDefined, scrollIntoView, :invalid with required, getComputedStyle shorthands, style.transform serialisation, CSS @keyframes animations (fill-mode, iterations, events), template attribute parsing, elementFromPoint inside a translate + scale viewport (React Flow), Shadow DOM (:host, ::slotted, slots, composed events, slotchange), Range contents and comparisons, Selection direction, FormData, ElementInternals with :state(), ARIA reflection, manual slots, getHTML and declarative shadow roots, @property / CSS.registerProperty, event, media and SVG members.",
   page: (ctx) => ({
     css: "body{margin:0;font:14px Arial}#list{height:200px;overflow:auto;border:1px solid #888;width:300px}#list div{height:30px}" +
       "input{border:2px solid rgb(0,128,0)}input:invalid{border-color:rgb(220,0,0)}#sh{margin:1px 2px 3px 4px;padding:5px;border:3px solid rgb(10,20,30)}" +

@@ -152,7 +152,7 @@ fs.writeFileSync(path.join(OUT, "rangerdom_pg.js"),
   `// GENERATED from playground/src/Playground.rgr by playground/build.mjs - do not edit.\n(function () {\n${code}\n;globalThis.RangerDomPg = ${exportsJs};\n})();\n`);
 
 for (const f of fs.readdirSync(path.join(HERE, "web"))) fs.cpSync(path.join(HERE, "web", f), path.join(OUT, f), { recursive: true });
-for (const f of ["evg-webgl.js", "evg-measure.js"]) fs.copyFileSync(path.join(EVG, "gl", f), path.join(OUT, f));
+for (const f of ["evg-webgl.js", "evg-measure.js", "evg-a11y.js"]) fs.copyFileSync(path.join(EVG, "gl", f), path.join(OUT, f));
 fs.writeFileSync(path.join(OUT, ".nojekyll"), "");
 
 if (withWasm) {

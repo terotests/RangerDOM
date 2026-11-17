@@ -119,7 +119,9 @@ fn compare(a: &mut Playground, b: &mut Playground, at: &str) -> bool {
 
 fn scroll_to(pg: &mut Playground, y: &str) {
     let sel = std::env::var("VC_SCROLL").unwrap_or_default();
-    pg.value(&format!("(function(){{var de={};de.scrollTop={};return de.scrollTop}})()", if sel.is_empty() { "document.documentElement".to_string() } else { format!("document.querySelector({:?})", sel) }, y));
+    // ("+n" / "-n": by n from where it is)
+    let to = if y.starts_with('+') || y.starts_with('-') { format!("de.scrollTop{}", y) } else { y.to_string() };
+    pg.value(&format!("(function(){{var de={};de.scrollTop={};return de.scrollTop}})()", if sel.is_empty() { "document.documentElement".to_string() } else { format!("document.querySelector({:?})", sel) }, to));
     // (a script's scroll is drawn at the next frame, with its scroll event)
     pg.tick(16.0);
     settle(pg);
@@ -145,10 +147,18 @@ fn main() {
             scroll_to(&mut virt, y);
             if !compare(&mut full, &mut virt, &format!("step {} {} scroll {}", k, &r.chars().take(30).collect::<String>(), y)) { bad += 1; }
         }
+        // small steps down and up, as a wheel turns: the rows rendered are
+        // kept while they cover the viewport, then move
+        for y in ["2000"].iter().chain(["+130"; 14].iter()).chain(["-170"; 8].iter()) {
+            scroll_to(&mut full, y);
+            scroll_to(&mut virt, y);
+            if !compare(&mut full, &mut virt, &format!("step {} {} scroll {}", k, &r.chars().take(30).collect::<String>(), y)) { bad += 1; }
+        }
         // the window resized, narrower and lower, and back
         for (rw, rh) in [(760.0, 560.0), (W, H)] {
-            full.resize(rw, rh);
-            virt.resize(rw, rh);
+            // (laid out at the new size even where nothing marks the page
+            // changed)
+            for pg in [&mut full, &mut virt] { pg.resize(rw, rh); pg.render(); pg.layout(); }
             settle(&mut full);
             settle(&mut virt);
             for y in ["0", "1500", "de.scrollHeight/2"].iter() {

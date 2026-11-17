@@ -11,7 +11,7 @@
   },
   "evg": {
     "git": "https://github.com/terotests/evg.git",
-    "rev": "11188d738f68ade2b1830118b47953690a394432",
+    "rev": "74afb113406b37d048adbf901ac528501f63256f",
     "sparse": [
       "storm"
     ]

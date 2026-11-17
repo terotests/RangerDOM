@@ -73,7 +73,7 @@ async function oneCase(name) {
   await page.goto(`${base}?case=${encodeURIComponent(name)}&auto=1${opts.budget ? "&budget=" + opts.budget : ""}${opts.units ? "&units=" + opts.units : ""}${opts.query ? "&" + opts.query : ""}`);
   let r;
   try {
-    await page.waitForFunction(() => window.__pgResult, null, { timeout: 180000, polling: 250 });
+    await page.waitForFunction(() => window.__pgResult, null, { timeout: CASE_MS - 60000, polling: 250 });
     r = await page.evaluate(() => window.__pgResult);
   } catch (e) {
     r = { case: name, error: "timed out" };

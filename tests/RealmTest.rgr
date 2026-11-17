@@ -60,6 +60,8 @@ class RealmTest {
         this.check("no change since the snapshot" ((r.changed()) == false))
         r.eval("document.querySelector('h1').setAttribute('data-x', '1')")
         this.check("an attribute change is a change" (r.changed()))
+        ; (the class list keeps its tokens per attribute value, attribute names their lower case)
+        this.check("classList and attribute names after changes from both sides" ((r.eval("(function(){ var e=document.createElement('div'); var c=e.classList; var o=[]; c.add('a','b'); o.push(e.className); e.className='x  y z'; o.push(c.length, c.contains('y')); c.toggle('y'); o.push(e.className); c.toggle('q', true); c.toggle('q', true); o.push(e.className); e.setAttribute('class','m'); c.remove('m'); o.push(e.getAttribute('class')); e.removeAttribute('class'); c.add(); o.push(e.getAttribute('class')); c.add('k'); var l=[]; c.forEach(function(t){l.push(t)}); o.push(l.join()); e.setAttribute('DATA-X','1'); o.push(e.getAttribute('data-x'), e.getAttribute('Data-X')); try { c.add('a b'); o.push('no'); } catch (x) { o.push(x.name); } try { e.setAttribute('a b', 1); o.push('no'); } catch (x) { o.push(x.name); } var s=document.createElementNS('http://www.w3.org/2000/svg','svg'); s.setAttribute('viewBox','0 0 1 1'); o.push(s.getAttribute('viewBox'), s.getAttribute('viewbox')); return o.join('|'); })()")) == "a b|3|true|x z|x z q|||k|1|1|InvalidCharacterError|InvalidCharacterError|0 0 1 1|"))
     }
 
     fn react:void () {
@@ -198,6 +200,25 @@ class RealmTest {
         def got (r.eval("var p = document.getElementById('p'), o = [], k = function () { __render(); o.push(getComputedStyle(p).color + '/' + (__styleCheck() === '')); }; k(); var s = document.createElement('style'); document.head.appendChild(s); k(); s.textContent = 'p{color:rgb(1,2,3)}'; k(); s.textContent = 'p{color:rgb(1,2,3)}'; k(); s.textContent = ''; k(); s.appendChild(document.createTextNode('p{color:rgb(4,5,6)}')); k(); document.head.removeChild(s); k(); document.head.appendChild(s); k(); o.join(';')"))
         this.check("a <style> put in empty, given its text, emptied, taken out and put back" (got == "rgb(0, 0, 0)/true;rgb(0, 0, 0)/true;rgb(1, 2, 3)/true;rgb(1, 2, 3)/true;rgb(0, 0, 0)/true;rgb(4, 5, 6)/true;rgb(0, 0, 0)/true;rgb(4, 5, 6)/true"))
     }
+    ; a <style> whose rules can match only some elements styles only them
+    ; again (styleSheetChanged), an inherited change goes down by the kept
+    ; rules (inheritDown), a :has() restyles only the ancestors it can be
+    ; on, an escaped ':' in a class name is no pseudo-class: each step as
+    ; the page styled anew (__styleCheck)
+    fn scopedStyles:void () {
+        def r:DomRealm (this.realm("<html><head><style>.u{padding-left:var(--gap,1px)}.\\[\\&_tr\\:last-child\\]\\:c tr:last-child{color:rgb(7,7,7)}.hx:has(>b){padding-top:5px}</style></head><body><div id=app><p class=u id=u>u</p><table class='[&_tr:last-child]:c'><tbody id=tb><tr><td>1</td></tr></tbody></table><div class=hx id=hx><i>i</i></div><span class=lock-x id=lx>x</span></div></body></html>"))
+        r.runScripts()
+        def got (r.eval("var o = [], b = document.body, $ = function (i) { return document.getElementById(i); }, cs = function (i, p) { return getComputedStyle($(i)).getPropertyValue(p); }, k = function () { __render(); o.push(__styleCheck() === ''); }; k(); var s = document.createElement('style'); s.textContent = 'body[data-lock]{overflow:hidden;--gap:4px}.lock-x{color:rgb(2,2,2)}[data-v]::-webkit-scrollbar{display:none}'; document.head.appendChild(s); k(); o.push(cs('lx', 'color'), cs('u', 'padding-left')); b.setAttribute('data-lock', ''); k(); o.push(cs('u', 'padding-left')); b.style.pointerEvents = 'none'; k(); o.push(cs('lx', 'pointer-events')); b.style.pointerEvents = ''; b.removeAttribute('data-lock'); k(); o.push(cs('lx', 'pointer-events'), cs('u', 'padding-left')); var tr = document.createElement('tr'); tr.id = 'tr2'; tr.innerHTML = '<td>2</td>'; $('tb').appendChild(tr); k(); o.push(cs('tr2', 'color'), $('tb').firstChild.style.color === '' && getComputedStyle($('tb').firstChild).color); $('hx').appendChild(document.createElement('b')); k(); o.push(cs('hx', 'padding-top')); document.head.removeChild(s); k(); o.push(cs('lx', 'color')); document.documentElement.style.color = 'rgb(3,3,3)'; k(); o.push(cs('u', 'color')); o.join()"))
+        this.check(("a <style> for some elements, an inherited change, :has() ancestors, an escaped class name (" + got + ")") (got == "true,true,rgb(2, 2, 2),1px,true,4px,true,none,true,auto,1px,true,rgb(7, 7, 7),rgb(0, 0, 0),true,5px,true,rgb(0, 0, 0),true,rgb(3, 3, 3)"))
+    }
+    fn detachedImage:void () {
+        def r:DomRealm (this.realm("<html><body><p>i</p></body></html>"))
+        r.runScripts()
+        r.eval("window.__img = []; var svg = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'64\\' height=\\'48\\'/>'); var i = new Image(); i.onload = function () { __img.push('load', i.complete, i.naturalWidth, i.naturalHeight); }; i.src = svg; __img.push(i.complete); var v = new Image(); v.src = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns=\\'http://www.w3.org/2000/svg\\' viewBox=\\'0 0 20 10\\'/>'); __img.push(v.naturalWidth, v.naturalHeight)")
+        r.tick(0.0)
+        def got (r.eval("__img.join()"))
+        this.check(("an image out of the page loads, with its picture's own size (" + got + ")") (got == "false,20,10,load,true,64,48"))
+    }
     fn movedRender:void () {
         def r:DomRealm (this.realm("<html><head><style>.b{position:absolute;width:40px;height:30px}.red{color:rgb(9,0,0)}</style></head><body><div id=w><div class=b id=a style='transform:translate(1px,2px)'>a</div><div class=b id=b style='transform:rotate(3deg);opacity:0.5'><span id=in>in</span>t</div></div></body></html>"))
         r.runScripts()
@@ -209,6 +230,18 @@ class RealmTest {
         r.runScripts()
         def got (r.eval((this.file("tests/controls.js"))))
         this.check(("form controls by pointer and keys: pickers, range drag, list box, editing caret, file chooser (" + got + ")") (got == "i50 i100 c100,90,1,13,34,Xbc,true,2,12,true,2026-11-20,true,15:30,true,true,#000000,true,a.txt:2"))
+    }
+    fn focus:void () {
+        def r:DomRealm (this.realm("<html><body style='margin:0;font:10px Arial'><a id=a href='#x'>a</a><div id=h><input id=lin></div><input id=t><div id=d></div><button id=last>last</button><dialog id=dlg><button id=d1>1</button><button id=d2>2</button></dialog></body></html>"))
+        r.runScripts()
+        def got (r.eval((this.file("tests/focus.js"))))
+        this.check(("focus: Tab through shadow trees and slots, delegatesFocus, modal dialog, :focus-visible, UA ring, pointer leave, cursor (" + got + ")") (got == "a in1 lin t inner last,inner,inner,auto 1px,false,t:true,d1,d2 d1 d2,false:t,true:pointer,false:default"))
+    }
+    fn a11y:void () {
+        def r:DomRealm (this.realm("<html><body><nav aria-label='Main'><a href='/a'>Home</a> <a>no href</a></nav><main><h1>Title <span aria-hidden=true>*</span></h1><h3 aria-level=4>Sub</h3><p>Some text</p><button>Save <img src='x.png' alt='disk'></button><button aria-label='Close'>x</button><button aria-pressed=true>Bold</button><label for=n>Name</label><input id=n value=Ann required><label><input type=checkbox checked> Agree</label><input type=range min=0 max=10 value=3 aria-label=Volume><select aria-label=Fruit><option>Apple<option selected>Pear</select><div role=tablist><div role=tab aria-selected=true tabindex=0>One</div><div role=tab aria-selected=false tabindex=-1>Two</div></div><div role=button aria-expanded=false aria-haspopup=menu tabindex=0>Menu</div><span id=lbl>Search box</span><input aria-labelledby=lbl placeholder=Find aria-describedby=hint><span id=hint hidden>type here</span><div hidden><button>gone</button></div><div style='display:none'><button>gone2</button></div><div aria-hidden=true><button>gone3</button></div><ul><li>One</li></ul><table><tr><th>H</th></tr><tr><td>C</td></tr></table></main></body></html>"))
+        r.runScripts()
+        def got (r.eval((this.file("tests/a11y.js"))))
+        this.check(("a11y: roles, names and states from HTML and ARIA (" + got + ")") (got == "navigation:Main|link:Home|text:no href|main:|heading:Title:lv=1|heading:Sub:lv=4|paragraph:Some text|button:Save disk|img:disk|button:Close|button:Bold:pr=2|text:Name|textbox:Name:v=Ann,rq=1|text:Agree|checkbox:Agree:ck=2|slider:Volume:vn=3|combobox:Fruit:hp=listbox,v=Pear|option:Apple|option:Pear:se=2|tablist:|tab:One:se=2|tab:Two|button:Menu:ex=1,hp=menu|text:Search box|textbox:Search box:d=type here|list:|listitem:One|table:|rowgroup:|row:|columnheader:H|row:|cell:C"))
     }
     fn run:void () {
         this.plainDom()
@@ -223,8 +256,12 @@ class RealmTest {
         this.hasAboveSubject()
         this.hasSibling()
         this.styleElement()
+        this.scopedStyles()
+        this.detachedImage()
         this.movedRender()
         this.controls()
+        this.focus()
+        this.a11y()
         print ("passed " + (to_string passes) + ", failed " + (to_string fails))
     }
 

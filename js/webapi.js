@@ -48,7 +48,26 @@
   var viewport = { w: 1024, h: 768 };
   var doc = null;
 
-  function changed() { generation++; styleGen++; ancEpoch++; sigEpoch++; }
+  function changed() { generation++; styleGen++; sheetGen++; ancEpoch++; sigEpoch++; }
+  // bumped with styleGen, and alone when a <style> came, went or changed
+  // with rules that only some elements can match (styleSheetChanged): what
+  // is read from the sheets (their list, rule sets, selectorReach, the
+  // features, keyframes) is kept per sheetGen, a computed style per styleGen
+  var sheetGen = 1;
+  // registered custom properties (@property, CSS.registerProperty): name ->
+  // { inh, init }; the first registration of a name stands, the API's over
+  // a rule's
+  var regProps = null, regNoInherit = false;
+  function registerProp(name, inh, init, api) {
+    var had = regProps && regProps[name], iv = init === undefined || init === null ? undefined : String(init).trim();
+    if (had && had.api && !api) return false;
+    if (had && had.inh === !!inh && had.init === iv) { had.api = had.api || !!api; return false; }
+    (regProps || (regProps = {}))[name] = { inh: !!inh, init: iv, api: !!api };
+    regNoInherit = false;
+    for (var k in regProps) if (!regProps[k].inh) regNoInherit = true;
+    changed();
+    return true;
+  }
   // moves when any attribute but style, or the tree, changes: an element's
   // signature (sigOf) is as of one value of it
   var sigEpoch = 1;
@@ -80,17 +99,21 @@
   function attrChanged(el, name, was, now) {
     if (name === 'class' || name === 'id' || name === undefined) ancEpoch++;
     if (name !== 'style') sigEpoch++;
-    if (shadowCount && el.isConnected && inShadowScope(el)) { changed(); if (name === 'slot' || name === 'name') scheduleSlots(name === 'slot' ? assignedSlotOf(el) : null); return; }
+    var conn = el.isConnected;
+    if (shadowCount && conn && inShadowScope(el)) { changed(); if (name === 'slot' || name === 'name') scheduleSlots(name === 'slot' ? assignedSlotOf(el) : null); return; }
     // an element not in the page (React sets a new element's attributes
     // before it inserts it): nothing shown changes; what it kept goes
-    if (!el.isConnected && doc && el.ownerDocument === doc) {
+    if (!conn && doc && el.ownerDocument === doc) {
       // (el._es: el or something under it was styled at some time, see
       // computedOf. A grid builds each row out of the page, attribute by
       // attribute: nothing there is kept, and each change walked the row.)
       if (computedCache.gen === styleGen && (el._es || shadowCount)) { dropStyle(el); eachElement(el, dropStyle); }
       return;
     }
-    var reach = el.isConnected && doc && el.ownerDocument === doc && el !== doc.documentElement ? selectorReach() : 0;
+    // (the root's inline style too: what matches stays, what its children
+    // take from it is inheritDown's. vaul sets the root's style for each
+    // drawer that opens or closes.)
+    var reach = conn && doc && el.ownerDocument === doc && (el !== doc.documentElement || name === 'style') ? selectorReach() : 0;
     if (!reach) { changed(); return; }
     generation++;
     textStamp++;
@@ -129,11 +152,18 @@
       // (and the same rules match them as before, unless a selector reads
       // the style attribute: AG Grid sets a custom property on its
       // viewport after the first layout, which matched 210 elements again)
-      if (!(old && (ownStyleOnly(old, computedOf(el), el) || kidsKept(el, old, computedOf(el), fxCache.styleRead ? dropStyle : dropComputed)))) eachElement(el, fxCache.styleRead ? dropStyle : dropComputed);
-    } else if (!old || !(sameBelow(el, old, computedOf(el)) || kidsKept(el, old, computedOf(el), dropStyle))) eachElement(el, dropStyle);
+      if (!(old && (ownStyleOnly(old, computedOf(el), el) || kidsKept(el, old, computedOf(el), fxCache.styleRead ? dropStyle : dropComputed)))) {
+        if (old && !fxCache.styleRead) inheritDown(el, old, computedOf(el));
+        else eachElement(el, fxCache.styleRead ? dropStyle : dropComputed);
+      }
+    }
     // :lang() and :dir() follow the attribute down the tree, a disabled
     // fieldset's :disabled its controls
     else if (name === 'lang' || name === 'dir' || name === 'xml:lang' || (name === 'disabled' && /^(fieldset|optgroup)$/.test(el.localName))) eachElement(el, dropStyle);
+    // (what the attribute does to the selectors under el is the features'
+    // part below: here only what they take from el's style)
+    else if (!old) eachElement(el, dropStyle);
+    else if (!(sameBelow(el, old, computedOf(el)) || kidsKept(el, old, computedOf(el), dropStyle))) inheritDown(el, old, computedOf(el));
     // what the features' sets reach: the descendants that can be a
     // selector's subject under el, the following siblings
     if (name !== 'style') invalidateFeatures(el, changedFeatures(name, was, now));
@@ -153,18 +183,52 @@
   // it is in (_es), so a subtree never styled is known by its root
   function styledNow(e) { for (; e && !e._es; e = e.parentNode) e._es = true; }
   // (and not from its style without animations: e._abKeep, animRestyle)
-  function dropStyle(e) { delete computedCache.map[e.__id]; e._rj = null; e._hm = null; e._pc = null; e._abKeep = false; }
+  function dropStyle(e) { keepOld(e); delete computedCache.map[e.__id]; e._rj = null; e._hm = null; e._pc = null; e._abKeep = false; }
+  // the style e had when it was dropped, until it has one again: what is
+  // under it was styled from that one (styling a child styles its parent
+  // first), so restyle and inheritDown compare with it. Without it, an
+  // element dropped on its own (its inline style, an attribute) and then
+  // restyled for a :has() or a child put in took all under it along.
+  function keepOld(e) { var o = computedCache.map[e.__id]; if (o && computedCache.gen === styleGen) { e._ocs = o; e._ocg = styleGen; } }
+  function oldStyle(e) { return computedCache.map[e.__id] || (e._ocg === styleGen ? e._ocs : undefined); }
   // e's computed style goes, the rules that matched it stay (cascade1's
   // _hm): for a change that alters no selector's answer for e
-  function dropComputed(e) { delete computedCache.map[e.__id]; e._rj = null; e._pc = null; e._abKeep = false; }
+  function dropComputed(e) { keepOld(e); delete computedCache.map[e.__id]; e._rj = null; e._pc = null; e._abKeep = false; }
   // e styled again; what is under it too unless e's style changed only in
   // what its children do not take from it
   function restyle(e) {
-    var old = computedCache.map[e.__id];
+    var old = oldStyle(e);
     dropStyle(e);
     if (old && (sameBelow(e, old, computedOf(e)) || kidsKept(e, old, computedOf(e), dropStyle))) return true;
-    eachElement(e, dropStyle);
+    if (old) inheritDown(e, old, computedOf(e));
+    else eachElement(e, dropStyle);
     return false;
+  }
+  // el's style went from a to b and what matches under el is as it was
+  // (the change was el's own: its inline style, an attribute whose
+  // selectors the features reach, a :has() of it, its place): each
+  // child's style is found again from the rules it matched (its _hm kept),
+  // and one that comes out alike keeps its style object and all under it,
+  // the others pass the question on. Radix sets body's pointer-events and
+  // react-remove-scroll's data-scroll-locked on every dialog and menu:
+  // each matched all 2 500 elements of the page again.
+  function inheritDown(el, a, b) {
+    var kids = el._sr ? null : el._c;
+    if (!kids || shadowCount) { eachElement(el, dropStyle); return; }
+    for (var i = 0; i < kids.length; i++) {
+      var c = kids[i];
+      if (c._attrs === undefined) continue;
+      var cc = oldStyle(c), pc = c._pc;
+      if (!cc || pc || c._ab) { dropStyle(c); eachElement(c, dropStyle); continue; }
+      dropComputed(c);
+      var nc = computedOf(c);
+      // (alike: what is under c keeps its styles, and its renders take
+      // c's new style object as their parent's, sameStyle. c's own render
+      // goes: it writes what c inherits as it differs from el's, which
+      // changed)
+      if (nc === cc || sameStyle(cc, nc, c)) continue;
+      inheritDown(c, cc, nc);
+    }
   }
   // e's animations moved on (a frame): when nothing else dropped its style
   // since, the style it has without them is kept (e._ab) and only the
@@ -316,7 +380,7 @@
     // not in the page (a fragment, a parsed document): nothing shown
     if (!doc || (p !== doc && (p.ownerDocument !== doc || !p.isConnected))) { generation++; return; }
     // (a style sheet's text is its rules)
-    if (p.localName === 'style') { changed(); return; }
+    if (p.localName === 'style') { if (p.isConnected) styleSheetChanged(p, p._sheet); else changed(); return; }
     var reach = p !== doc && p !== doc.documentElement ? selectorReach() : 0;
     if (!reach) { changed(); return; }
     generation++;
@@ -397,7 +461,7 @@
     if (computedCache.gen === styleGen) for (var n = 0; n < list.length; n++) {
       var r = list[n], p = r.p;
       if (p !== doc && !p.isConnected) continue;
-      var st = reachCache.gen === styleGen ? reachCache.struct : (selectorReach(), reachCache.struct);
+      var st = reachCache.gen === sheetGen ? reachCache.struct : (selectorReach(), reachCache.struct);
       if (p.nodeType === 1) restyle(p);
       var kids = p._c;
       // Monaco's view lines and overlays: dozens of children, a line in or
@@ -513,7 +577,12 @@
   // blink of its cursor styled and rendered the whole page again.
   function hasReached(el) {
     if (!reachCache.has || computedCache.gen !== styleGen) return;
-    for (var a = el; a && a.nodeType === 1; a = a.parentNode) restyle(a);
+    // (only an ancestor that a :has() rule's subject can be: by the rules'
+    // keys, hasSubj. Tailwind's `has-[>svg]:px-3` is on buttons; every
+    // ancestor of each change was styled again, and one whose style had
+    // been dropped took everything under it along: the page)
+    var hs = reachCache.hasAll ? null : reachCache.hasSubj;
+    for (var a = el; a && a.nodeType === 1; a = a.parentNode) if (!hs || keyedBy(a, hs)) restyle(a);
     hasAbove(el);
   }
   // :has() above a selector's subject (PrimeReact's
@@ -676,8 +745,8 @@
     }
   }
   function selectorReach() {
-    if (reachCache.gen === styleGen) return reachCache.reach;
-    var reach = 1, struct = 0, hover = 0, focus = 0, within = 0, has = 0, counted = 0, sib = [];
+    if (reachCache.gen === sheetGen) return reachCache.reach;
+    var reach = 1, struct = 0, hover = 0, focus = 0, within = 0, has = 0, counted = 0, sib = [], hasSubj = {}, hasAll = false;
     var hasKeys = { cls: {}, id: {}, tag: {}, sibOn: false, sib: { cls: {}, id: {}, tag: {} } };
     var sheets = [ua()].concat(cascadeSheets(doc));
     for (var i = 0; i < sheets.length && reach; i++) {
@@ -695,8 +764,10 @@
         if (hks.sibOn) hasKeys.sibOn = true;
       }
       if (sr.counted) counted = 1;
+      if (sr.hasAll) hasAll = true;
+      for (var hsk in sr.hasSubj) hasSubj[hsk] = 1;
     }
-    reachCache = { gen: styleGen, reach: reach, struct: struct, hover: hover, focus: focus, focusWithin: within, has: has, counted: counted, sib: sib, hasKeys: hasKeys };
+    reachCache = { gen: sheetGen, reach: reach, struct: struct, hover: hover, focus: focus, focusWithin: within, has: has, counted: counted, sib: sib, hasKeys: hasKeys, hasSubj: hasSubj, hasAll: hasAll };
     return reach;
   }
   // one sheet's part of selectorReach, read from its rules once (until
@@ -706,14 +777,22 @@
   function sheetReach(sheet) {
     var rules = sheet._rules || [];
     if (sheet._reach && sheet._reachOf === rules) return sheet._reach;
-    var reach = 1, struct = 0, hover = 0, focus = 0, within = 0, has = 0, counted = 0, sib = [], last = null;
+    var reach = 1, struct = 0, hover = 0, focus = 0, within = 0, has = 0, counted = 0, sib = [], last = null, hasSubj = {}, hasAll = false;
     var hasKeys = { cls: {}, id: {}, tag: {}, sibOn: false, sib: { cls: {}, id: {}, tag: {} } };
     for (var j = 0; j < rules.length; j++) {
       var t = rules[j].text;
+      // (the subjects a :has() can be, hasReached: each selector of a
+      // list, so before the list's text is passed over)
+      if (t && t.indexOf(':has(') >= 0 && !hasAll) { var hk0 = ruleKeys(rules[j]); if (!hk0) hasAll = true; else for (var hq = 0; hq < hk0.length; hq++) hasSubj[hk0[hq]] = 1; }
       // (the selectors of one list follow each other with the list's text)
       if (t === last) continue;
       last = t;
-      t = String(t || '');
+      var traw = String(t || '');
+      // (an escaped character is a name's: Tailwind's
+      // `.\[\&_tr\:last-child\]\:border-0 tr:last-child` has a
+      // :last-child in its class name, which read as one above the subject
+      // had every child put in or taken out restyle its siblings whole)
+      t = traw.indexOf('\\') >= 0 ? traw.replace(/\\[0-9a-fA-F]{1,6}\s?|\\[^]/g, '_') : traw;
       // (every test below needs a pseudo-class or a + or ~)
       if (t.indexOf(':') < 0 && t.indexOf('+') < 0 && t.indexOf('~') < 0) continue;
       if (/\sof\s/i.test(t)) { reach = 0; break; }
@@ -725,7 +804,7 @@
         if (sibHas || pseudoPlace(t, /:has\(/i) === 2) {
           // (above the subject: what is under the compound it is in; with
           // a + or ~ first in it: what is under the compound's parent)
-          var an = hasAnchors(t, sibHas), into = sibHas ? hasKeys.sib : hasKeys;
+          var an = hasAnchors(traw, sibHas), into = sibHas ? hasKeys.sib : hasKeys;
           if (!an) { reach = 0; break; }
           if (sibHas) hasKeys.sibOn = true;
           for (var ai = 0; ai < an.length; ai++) {
@@ -736,7 +815,7 @@
           has = 2;
         } else if (!has) has = 1;
       }
-      if (/[+~]/.test(t)) { var sl = siblingLefts(t); if (sl.length) { reach = 2; sib = sib.concat(sl); } }
+      if (/[+~]/.test(t)) { var sl = siblingLefts(traw); if (sl.length) { reach = 2; sib = sib.concat(sl); } }
       if (struct < 2 && STRUCT.test(t)) struct = Math.max(struct, pseudoPlace(t, STRUCT));
       if (!counted && COUNTED.test(t)) counted = 1;
       if (hover < 2 && HOVER.test(t)) hover = Math.max(hover, pseudoPlace(t, HOVER));
@@ -744,7 +823,7 @@
       if (within < 2 && FOCUS_WITHIN.test(t)) within = Math.max(within, pseudoPlace(t, FOCUS_WITHIN));
     }
     sheet._reachOf = rules;
-    sheet._reach = { reach: reach, struct: struct, hover: hover, focus: focus, focusWithin: within, has: has, counted: counted, sib: sib, hasKeys: hasKeys };
+    sheet._reach = { reach: reach, struct: struct, hover: hover, focus: focus, focusWithin: within, has: has, counted: counted, sib: sib, hasKeys: hasKeys, hasSubj: hasSubj, hasAll: hasAll };
     return sheet._reach;
   }
   // Invalidation sets (as Blink's): what a change of one feature of an
@@ -778,7 +857,7 @@
     }
   }
   function featureIndex() {
-    if (fxCache.gen === styleGen) return fxCache.fx;
+    if (fxCache.gen === sheetGen) return fxCache.fx;
     var fx = {}, sibs = [], styleRead = false;
     var sheets = [ua()].concat(cascadeSheets(doc));
     function entry(f) { return fx[f] || (fx[f] = { desc: [], sib: [] }); }
@@ -824,7 +903,7 @@
         }
       }
     }
-    fxCache = { gen: styleGen, fx: fx, sibs: sibs, styleRead: styleRead };
+    fxCache = { gen: sheetGen, fx: fx, sibs: sibs, styleRead: styleRead };
     return fx;
   }
   // an attribute's value by its stored name (class, id, style: the same in
@@ -945,7 +1024,7 @@
   // a text changed under n: n and its ancestors render again
   function textChanged(n) {
     // a style sheet's text is its rules
-    if (n && n.localName === 'style') { changed(); return; }
+    if (n && n.localName === 'style') { if (n.isConnected) styleSheetChanged(n, n._sheet); else changed(); return; }
     generation++;
     textStamp++;
     if (shadowCount) { stampUp(n); return; }
@@ -982,7 +1061,7 @@
       this.currentTarget = null;
       this.srcElement = null;
       this.eventPhase = 0;
-      this.isTrusted = false;
+      this.isTrusted = !!init._host;
       this.timeStamp = now();
       this._stop = false;
       this._stopNow = false;
@@ -1023,6 +1102,16 @@
       this.movementX = 0; this.movementY = 0;
     }
     getModifierState(k) { return (k === 'Shift' && this.shiftKey) || (k === 'Control' && this.ctrlKey) || (k === 'Alt' && this.altKey) || (k === 'Meta' && this.metaKey); }
+    get x() { return this.clientX; }
+    get y() { return this.clientY; }
+    get layerX() { return this.pageX; }
+    get layerY() { return this.pageY; }
+    get which() { return this.button + 1; }
+    initMouseEvent(type, bubbles, cancelable, view, detail, sx, sy, cx, cy, ctrl, alt, shift, meta, button, related) {
+      this.initEvent(type, bubbles, cancelable); this.view = view || null; this.detail = detail || 0;
+      this.screenX = sx || 0; this.screenY = sy || 0; this.clientX = this.pageX = cx || 0; this.clientY = this.pageY = cy || 0;
+      this.ctrlKey = !!ctrl; this.altKey = !!alt; this.shiftKey = !!shift; this.metaKey = !!meta; this.button = button || 0; this.relatedTarget = related || null;
+    }
   }
   class PointerEvent extends MouseEvent {
     constructor(type, init) {
@@ -1030,8 +1119,14 @@
       init = init || {};
       this.pointerId = init.pointerId || 1; this.pointerType = init.pointerType || 'mouse';
       this.isPrimary = init.isPrimary !== undefined ? !!init.isPrimary : true;
-      this.width = 1; this.height = 1; this.pressure = init.pressure || 0;
+      this.width = init.width || 1; this.height = init.height || 1; this.pressure = init.pressure || 0;
+      this.tangentialPressure = init.tangentialPressure || 0; this.tiltX = init.tiltX || 0; this.tiltY = init.tiltY || 0; this.twist = init.twist || 0;
+      this.altitudeAngle = init.altitudeAngle !== undefined ? init.altitudeAngle : Math.PI / 2; this.azimuthAngle = init.azimuthAngle || 0;
+      this._coalesced = init.coalescedEvents || null; this._predicted = init.predictedEvents || null;
     }
+    // (a page's own event has none; one from the host is its own only one)
+    getCoalescedEvents() { return this._coalesced ? this._coalesced.slice() : this.isTrusted && (this.type === 'pointermove' || this.type === 'pointerrawupdate') ? [this] : []; }
+    getPredictedEvents() { return this._predicted ? this._predicted.slice() : []; }
   }
   class WheelEvent extends MouseEvent {
     constructor(type, init) { super(type, init); init = init || {}; this.deltaX = init.deltaX || 0; this.deltaY = init.deltaY || 0; this.deltaZ = 0; this.deltaMode = init.deltaMode || 0; }
@@ -1065,6 +1160,38 @@
   }
   class AnimationEvent extends Event {}
   class TransitionEvent extends Event {}
+  class PopStateEvent extends Event {
+    constructor(type, init) { super(type, init); this.state = init && init.state !== undefined ? init.state : null; this.hasUAVisualTransition = false; }
+  }
+  class HashChangeEvent extends Event {
+    constructor(type, init) { super(type, init); init = init || {}; this.oldURL = init.oldURL || ''; this.newURL = init.newURL || ''; }
+  }
+  class PageTransitionEvent extends Event {
+    constructor(type, init) { super(type, init); this.persisted = !!(init && init.persisted); }
+  }
+  class StorageEvent extends Event {
+    constructor(type, init) {
+      super(type, init); init = init || {};
+      this.key = init.key === undefined ? null : init.key; this.oldValue = init.oldValue === undefined ? null : init.oldValue;
+      this.newValue = init.newValue === undefined ? null : init.newValue; this.url = init.url || ''; this.storageArea = init.storageArea || null;
+    }
+  }
+  class Touch {
+    constructor(init) {
+      init = init || {};
+      this.identifier = init.identifier || 0; this.target = init.target || null;
+      this.clientX = init.clientX || 0; this.clientY = init.clientY || 0; this.screenX = init.screenX || 0; this.screenY = init.screenY || 0;
+      this.pageX = init.pageX || this.clientX; this.pageY = init.pageY || this.clientY;
+      this.radiusX = init.radiusX || 0; this.radiusY = init.radiusY || 0; this.rotationAngle = init.rotationAngle || 0; this.force = init.force || 0;
+    }
+  }
+  class TouchEvent extends UIEvent {
+    constructor(type, init) {
+      super(type, init); init = init || {};
+      this.touches = init.touches || []; this.targetTouches = init.targetTouches || []; this.changedTouches = init.changedTouches || [];
+      this.ctrlKey = !!init.ctrlKey; this.shiftKey = !!init.shiftKey; this.altKey = !!init.altKey; this.metaKey = !!init.metaKey;
+    }
+  }
   class ClipboardEvent extends Event {
     constructor(type, init) { super(type, init); this.clipboardData = (init && init.clipboardData) || null; }
   }
@@ -1347,7 +1474,16 @@
       var i = indexIn(this); return i > 0 ? p._c[i - 1] : null;
     }
     get isConnected() {
-      for (var n = this; n; n = n.nodeType === 11 && n.host ? n.host : n.parentNode) if (n.nodeType === 9) return true;
+      // (up to the top of the tree: the document, or a shadow root, from
+      // whose host it goes on. Asked at every attribute change)
+      for (var n = this; n;) {
+        var p = n.parentNode;
+        if (p) { n = p; continue; }
+        var t = n.nodeType;
+        if (t === 9) return true;
+        if (t !== 11 || !n.host) return false;
+        n = n.host;
+      }
       return false;
     }
     get assignedSlot() { return shadowCount ? assignedSlotOf(this) : null; }
@@ -1744,11 +1880,13 @@
   function assignedSlotOf(n) {
     var p = n.parentNode;
     if (!p || !p._sr || (n.nodeType !== 1 && n.nodeType !== 3)) return null;
+    if (p._sr._slotMode === 'manual') { var ms = n._manualSlot; return ms && shadowRootOf(ms) === p._sr && ms.isConnected && (ms._manual || []).indexOf(n) >= 0 ? ms : null; }
     return slotsOf(p._sr)[slotNameOf(n)] || null;
   }
   function slotted(slot) {
     var sr = shadowRootOf(slot);
     if (!sr) return [];
+    if (sr._slotMode === 'manual') { var host = sr.host; return (slot._manual || []).filter(function (n) { return n.parentNode === host && n._manualSlot === slot; }); }
     var nm = attrOf(slot, 'name') || '';
     if (slotsOf(sr)[nm] !== slot) return [];
     var out = [], kids = sr.host._c;
@@ -1876,28 +2014,45 @@
     });
   }
 
+  var attrLower = Object.create(null), attrLowerN = 0, attrValid = Object.create(null), attrValidN = 0;
   class DOMTokenList {
-    constructor(el, attr) { this._el = el; this._attr = attr; }
-    _list() { var v = this._el.getAttribute(this._attr); return v ? v.split(/[ \t\n\f\r]+/).filter(Boolean) : []; }
-    _set(l) { this._el.setAttribute(this._attr, l.join(' ')); }
-    get length() { return this._list().length; }
+    constructor(el, attr) { this._el = el; this._attr = attr; this._tv = undefined; this._tl = null; }
+    // (the attribute's tokens, split once per value it has: a grid toggles
+    // a few classes on every cell it shows, and each toggle split the
+    // text twice. The list is kept as it is; a change works on a copy)
+    _tok() {
+      var v = attrOf(this._el, this._attr);
+      if (v === this._tv && this._tl) return this._tl;
+      var l = v ? (v.indexOf(' ') < 0 && !/[\t\n\f\r]/.test(v) ? [v] : v.split(/[ \t\n\f\r]+/).filter(Boolean)) : [];
+      this._tv = v;
+      this._tl = l;
+      return l;
+    }
+    _list() { return this._tok().slice(); }
+    _set(l) {
+      var s = l.join(' ');
+      this._el.setAttribute(this._attr, s);
+      // (what was set, when no hook made it something else)
+      if (attrOf(this._el, this._attr) === s) { this._tv = s; this._tl = l; }
+    }
+    get length() { return this._tok().length; }
     get value() { return this._el.getAttribute(this._attr) || ''; }
     set value(v) { this._el.setAttribute(this._attr, v); }
-    item(i) { var l = this._list(); return i < l.length ? l[i] : null; }
-    contains(t) { return this._list().indexOf(String(t)) >= 0; }
+    item(i) { var l = this._tok(); return i < l.length ? l[i] : null; }
+    contains(t) { return this._tok().indexOf(String(t)) >= 0; }
     add() {
-      var l = this._list(), before = l.length;
-      for (var i = 0; i < arguments.length; i++) { var t = String(arguments[i]); checkToken(t); if (l.indexOf(t) < 0) l.push(t); }
-      if (l.length !== before || this._el.getAttribute(this._attr) === null) this._set(l);
+      var cur = this._tok(), l = null;
+      for (var i = 0; i < arguments.length; i++) { var t = String(arguments[i]); checkToken(t); if ((l || cur).indexOf(t) < 0) { if (!l) l = cur.slice(); l.push(t); } }
+      if (l || attrOf(this._el, this._attr) === null) this._set(l || cur.slice());
     }
     remove() {
-      var l = this._list(), before = l.length;
-      for (var i = 0; i < arguments.length; i++) { var t = String(arguments[i]); checkToken(t); var k = l.indexOf(t); while (k >= 0) { l.splice(k, 1); k = l.indexOf(t); } }
-      if (l.length !== before) this._set(l);
+      var cur = this._tok(), l = null;
+      for (var i = 0; i < arguments.length; i++) { var t = String(arguments[i]); checkToken(t); var k = (l || cur).indexOf(t); while (k >= 0) { if (!l) l = cur.slice(); l.splice(k, 1); k = l.indexOf(t); } }
+      if (l) this._set(l);
     }
     toggle(t, force) {
       t = String(t);
-      var has = this.contains(t);
+      var has = this._tok().indexOf(t) >= 0;
       if (force === undefined ? has : !force) { if (has) this.remove(t); return false; }
       if (!has) this.add(t);
       return true;
@@ -1911,9 +2066,13 @@
     toString() { return this.value; }
   }
   DOMTokenList.prototype[Symbol.iterator] = function () { return this._list()[Symbol.iterator](); };
+  // (tokens that passed: the same few class names come again and again)
+  var tokenOk = Object.create(null), tokenOkN = 0;
   function checkToken(t) {
+    if (tokenOk[t] === true) return;
     if (t === '') throw DOMException('The token provided must not be empty.', 'SyntaxError');
     if (/\s/.test(t)) throw DOMException("The token provided ('" + t + "') contains HTML space characters, which are not valid in tokens.", 'InvalidCharacterError');
+    if (tokenOkN < 4096) { tokenOkN++; tokenOk[t] = true; }
   }
 
   // ---- style declarations --------------------------------------------------
@@ -2277,7 +2436,7 @@
       var w = 'medium', st = 'none', c = 'currentcolor';
       var toks = splitValue(v);
       for (var t = 0; t < toks.length; t++) {
-        if (BORDER_STYLES.test(toks[t])) st = toks[t];
+        if (BORDER_STYLES.test(toks[t]) || (n === 'outline' && toks[t] === 'auto')) st = toks[t];
         else if (isLength(toks[t])) w = toks[t];
         else c = toks[t];
       }
@@ -2359,9 +2518,10 @@
     // sends it (TanStack Virtual's scrollToIndex waits for it)
     // (a scrolled box's offset is clamped by a layout: read after its
     // content shrank, it is laid out first)
-    get scrollTop() { if (this._scl) scrollRead(this); return this._sTop; }
+    // (an offset of 0 stays 0 whatever the range has become: no layout for it)
+    get scrollTop() { if (this._scl && this._sTop) scrollRead(this); return this._sTop; }
     set scrollTop(v) { v = Math.max(0, +v || 0); if (this === (doc && doc.documentElement) && doc.body && boxes[doc.body.__id]) v = Math.min(v, Math.max(0, Math.round(pageHeight()) - viewport.h)); if (v === this._sTop) return; this._sTop = v; keptScroll(this); scriptScrolled(this); }
-    get scrollLeft() { if (this._scl) scrollRead(this); return this._sLeft; }
+    get scrollLeft() { if (this._scl && this._sLeft) scrollRead(this); return this._sLeft; }
     set scrollLeft(v) { v = +v || 0; if (v === this._sLeft) return; this._sLeft = v; keptScroll(this); scriptScrolled(this); }
     get nodeName() { return this.tagName; }
     get tagName() { return this.namespaceURI === HTML_NS ? this._qname.toUpperCase() : this._qname; }
@@ -2373,9 +2533,18 @@
     get classList() { return this._cl || (this._cl = new DOMTokenList(this, 'class')); }
     get slot() { return this.getAttribute('slot') || ''; }
     set slot(v) { this.setAttribute('slot', v); }
-    _norm(n) { n = String(n); return this.namespaceURI === HTML_NS ? n.toLowerCase() : n; }
+    // (attribute names as HTML takes them, lower case, and the names that
+    // are valid ones: both kept for the names seen, a page uses a few
+    // dozen and reads or sets them all the time)
+    _norm(n) {
+      if (typeof n !== 'string') n = String(n);
+      if (this.namespaceURI !== HTML_NS) return n;
+      var l = attrLower[n];
+      if (l === undefined) { l = n.toLowerCase(); if (attrLowerN < 4096) { attrLowerN++; attrLower[n] = l; } }
+      return l;
+    }
     _find(n) { for (var i = 0; i < this._attrs.length; i++) if (this._attrs[i].name === n) return i; return -1; }
-    getAttribute(n) { var i = this._find(this._norm(n)); return i < 0 ? null : this._attrs[i]._v; }
+    getAttribute(n) { n = this._norm(n); var a = this._attrs; for (var i = 0; i < a.length; i++) if (a[i].name === n) return a[i]._v; return null; }
     getAttributeNS(ns, n) { return this.getAttribute(n); }
     getAttributeNode(n) { var i = this._find(this._norm(n)); return i < 0 ? null : this._attrs[i]; }
     getAttributeNames() { return this._attrs.map(function (a) { return a.name; }); }
@@ -2384,8 +2553,11 @@
     hasAttributes() { return this._attrs.length > 0; }
     setAttribute(n, v) {
       n = this._norm(n);
-      if (!/^[^\s"'>\/=\0]+$/.test(n)) throw DOMException("Failed to execute 'setAttribute' on 'Element': '" + n + "' is not a valid attribute name.", 'InvalidCharacterError');
-      v = String(v);
+      if (attrValid[n] !== true) {
+        if (!/^[^\s"'>\/=\0]+$/.test(n)) throw DOMException("Failed to execute 'setAttribute' on 'Element': '" + n + "' is not a valid attribute name.", 'InvalidCharacterError');
+        if (attrValidN < 4096) { attrValidN++; attrValid[n] = true; }
+      }
+      if (typeof v !== 'string') v = String(v);
       var i = this._find(n);
       var old = i < 0 ? null : this._attrs[i]._v;
       if (i < 0) this._attrs.push(new Attr(n, v, this)); else this._attrs[i]._v = v;
@@ -2500,9 +2672,22 @@
     // (the relevant ones: running, paused or filling, Web Animations 1 5.6)
     getAnimations() { return (this._waapi || []).filter(animationRelevant); }
     requestPointerLock() {}
-    setPointerCapture(id) { this._capture = id; }
-    releasePointerCapture(id) { this._capture = undefined; }
-    hasPointerCapture(id) { return this._capture === id; }
+    // (pointer capture, Pointer Events 3 9: the pointer's moves and its
+    // release go to this element wherever the pointer is, until it is
+    // released or the pointer goes up; hostInput routes them)
+    setPointerCapture(id) {
+      if (!this.isConnected) throw new DOMException('The element is not connected', 'InvalidStateError');
+      var d = this.ownerDocument;
+      if (d._cap && d._cap.el !== this) { var was = d._cap.el; d._cap = null; was._capture = undefined; dispatch(was, new PointerEvent('lostpointercapture', { bubbles: true, composed: true, pointerId: id })); }
+      this._capture = id;
+      if (!d._cap) { d._cap = { el: this, id: id }; dispatch(this, new PointerEvent('gotpointercapture', { bubbles: true, composed: true, pointerId: id })); }
+    }
+    releasePointerCapture(id) {
+      var d = this.ownerDocument;
+      this._capture = undefined;
+      if (d._cap && d._cap.el === this) { d._cap = null; dispatch(this, new PointerEvent('lostpointercapture', { bubbles: true, composed: true, pointerId: id })); }
+    }
+    hasPointerCapture(id) { return this._capture === id && !!this.ownerDocument._cap && this.ownerDocument._cap.el === this; }
     toString() { return '[object ' + (this.constructor.name || 'Element') + ']'; }
   }
   mixin(Element, ParentNode);
@@ -2691,8 +2876,8 @@
     // (one with no text yet has no rules: PrimeReact puts each component's
     // <style> in empty and gives it its text after, and an empty one for
     // its focus trap when a dialog opens: the whole page was styled again)
-    _connected() { if (this._c.length) changed(); }
-    _disconnected() { if (this._c.length) changed(); }
+    _connected() { if (this._c.length) styleSheetChanged(this, null); }
+    _disconnected() { if (this._c.length) styleSheetChanged(this, this._sheet); }
   }
   reflect(HTMLStyleElement, ['media', 'type']);
   class HTMLLinkElement extends HTMLElement {
@@ -2721,8 +2906,10 @@
   });
   class HTMLImageElement extends HTMLElement {
     constructor(q) { super(q); this.complete = true; }
-    get naturalWidth() { return this.width; }
-    get naturalHeight() { return this.height; }
+    // (the picture's own size where its data says it, a data: URL's SVG,
+    // PNG or GIF; else the laid-out box)
+    get naturalWidth() { var n = intrinsicOf(this.getAttribute('src')); return n ? n[0] : this.width; }
+    get naturalHeight() { var n = intrinsicOf(this.getAttribute('src')); return n ? n[1] : this.height; }
     get width() { var a = this.getAttribute('width'); return a !== null ? parseInt(a, 10) || 0 : rectOf(this).width; }
     set width(v) { this.setAttribute('width', v); }
     get height() { var a = this.getAttribute('height'); return a !== null ? parseInt(a, 10) || 0 : rectOf(this).height; }
@@ -2736,6 +2923,51 @@
   }
   reflect(HTMLImageElement, ['alt', 'srcset', 'sizes', 'crossOrigin', 'useMap', 'loading', 'decoding', 'referrerPolicy']);
   urlProp(HTMLImageElement, ['src']);
+  // an image out of the page loads all the same (new Image(), as Radix's
+  // Avatar does to know whether to show the picture or its fallback)
+  (function () {
+    var d = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+    Object.defineProperty(HTMLImageElement.prototype, 'src', {
+      get: d.get,
+      set: function (v) {
+        d.set.call(this, v);
+        if (this.isConnected || !String(v)) return;
+        var self = this;
+        self.complete = false;
+        setTimeout(function () { self.complete = true; dispatch(self, new Event('load')); }, 0);
+      },
+      configurable: true, enumerable: true
+    });
+  })();
+  var intrinsicMemo = { src: null, v: null };
+  function intrinsicOf(src) {
+    if (!src || src.slice(0, 5) !== 'data:') return null;
+    if (intrinsicMemo.src === src) return intrinsicMemo.v;
+    var v = null;
+    try {
+      var comma = src.indexOf(','), head = src.slice(5, comma), body = src.slice(comma + 1);
+      var b64 = /;base64$/i.test(head);
+      if (/^image\/svg\+xml/i.test(head)) {
+        var t = b64 ? atob(body) : decodeURIComponent(body);
+        var m = /<svg\b[^>]*>/i.exec(t);
+        if (m) {
+          var w = /\swidth\s*=\s*["']?([\d.]+)(px)?["'\s>]/i.exec(m[0]), h = /\sheight\s*=\s*["']?([\d.]+)(px)?["'\s>]/i.exec(m[0]);
+          var vb = /viewBox\s*=\s*["']\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)/i.exec(m[0]);
+          var W = w ? +w[1] : 0, H = h ? +h[1] : 0;
+          if (vb && (!W || !H)) { var vw = +vb[1], vh = +vb[2]; if (!W && !H) { W = vw; H = vh; } else if (!W) W = vh ? H * vw / vh : 0; else H = vw ? W * vh / vw : 0; }
+          if (!W && !H) { W = 300; H = 150; }
+          v = [Math.round(W), Math.round(H)];
+        }
+      } else if (b64) {
+        var bin = atob(body.slice(0, 64));
+        var u8 = function (i) { return bin.charCodeAt(i) & 255; };
+        if (bin.slice(1, 4) === 'PNG') v = [(u8(16) << 24 | u8(17) << 16 | u8(18) << 8 | u8(19)) >>> 0, (u8(20) << 24 | u8(21) << 16 | u8(22) << 8 | u8(23)) >>> 0];
+        else if (bin.slice(0, 3) === 'GIF') v = [u8(6) | u8(7) << 8, u8(8) | u8(9) << 8];
+      }
+    } catch (e) { v = null; }
+    intrinsicMemo.src = src; intrinsicMemo.v = v;
+    return v;
+  }
   class HTMLIFrameElement extends HTMLElement {
     get contentWindow() { return null; }
     get contentDocument() { return null; }
@@ -3474,8 +3706,17 @@
   }
   class HTMLDialogElement extends HTMLElement {
     show() { this.open = true; }
-    showModal() { this.open = true; this._modal = true; topAdd(this); }
-    close(rv) { if (!this.open) return; if (this._modal) { this._modal = false; topRemove(this); } this.open = false; this.returnValue = rv === undefined ? this.returnValue : String(rv); dispatch(this, new Event('close')); }
+    showModal() {
+      if (this.open && this._modal) return;
+      this.open = true; this._modal = true; topAdd(this);
+      this._returnFocus = doc && doc._active;
+      // dialog focusing steps: autofocus, else the first focusable, else the dialog
+      var inside = [];
+      tabWalk(this, inside, true);
+      var af = inside.filter(function (e) { return e.hasAttribute('autofocus'); })[0] || inside[0];
+      if (af) focusElement(af); else if (doc && doc._active && !composedContains(this, doc._active)) focusElement(null);
+    }
+    close(rv) { if (!this.open) return; if (this._modal) { this._modal = false; topRemove(this); } this.open = false; this.returnValue = rv === undefined ? this.returnValue : String(rv); var rf = this._returnFocus; this._returnFocus = null; if (rf && rf.isConnected && doc && (!doc._active || composedContains(this, doc._active))) focusElement(rf, { preventScroll: true }); var self = this; setTimeout(function () { dispatch(self, new Event('close')); }, 0); }
   }
   reflectBool(HTMLDialogElement, ['open']);
   class HTMLDetailsElement extends HTMLElement {}
@@ -3494,7 +3735,8 @@
   reflectBool(HTMLFieldSetElement, ['disabled']);
   class HTMLLegendElement extends HTMLElement {}
   class HTMLFormElement extends HTMLElement {
-    get elements() { return this.querySelectorAll('input,select,textarea,button,fieldset,output,object'); }
+    // (and the form-associated custom elements in it, HTML 4.13.7)
+    get elements() { var out = []; eachElement(this, function (e) { if (LISTED_RE.test(e.localName) || (e._internals && e.constructor.formAssociated)) out.push(e); }); return NodeList(out); }
     get length() { return this.elements.length; }
     submit() {}
     requestSubmit() {
@@ -3523,6 +3765,7 @@
   urlProp(HTMLFormElement, ['action']);
   reflectBool(HTMLFormElement, ['noValidate']);
 
+  var LISTED_RE = /^(input|select|textarea|button|fieldset|output|object)$/;
   function formOf(el) {
     var f = el.getAttribute('form');
     if (f) return (el.ownerDocument || doc).getElementById(f);
@@ -3642,7 +3885,9 @@
   // (a select event is queued, as a task, for each change of the selection
   // by the API: HTML 4.10.5.2.10)
   function selectionChanged(el) {
-    if (doc && doc._active === el) changed();
+    // (the focused control renders again with its caret and selection; no
+    // style follows from where they are)
+    if (doc && doc._active === el) textChanged(el);
     if (el._selQueued) return;
     el._selQueued = true;
     setTimeout(function () { el._selQueued = false; dispatch(el, new Event('select', { bubbles: true })); }, 0);
@@ -4331,22 +4576,64 @@
     detach() {}
   }
 
-  class Range {
-    constructor(d) { this.startContainer = d; this.startOffset = 0; this.endContainer = d; this.endOffset = 0; }
+  // ---- ranges (DOM 5) -------------------------------------------------------
+  function nodeLen(n) { return n.nodeType === 10 ? 0 : n._c && n.nodeType !== 3 && n.nodeType !== 4 && n.nodeType !== 8 && n.nodeType !== 7 ? n._c.length : (n.data || '').length; }
+  function isChars(n) { return n.nodeType === 3 || n.nodeType === 4 || n.nodeType === 8 || n.nodeType === 7; }
+  function idxOf(n) { return n.parentNode ? n.parentNode._c.indexOf(n) : 0; }
+  // the position of (a, ao) against (b, bo): -1 before, 0 equal, 1 after
+  function bpCompare(a, ao, b, bo) {
+    if (a === b) return ao === bo ? 0 : ao < bo ? -1 : 1;
+    if (a.compareDocumentPosition(b) & 2) return -bpCompare(b, bo, a, ao);
+    if (a.contains(b)) {
+      var ch = b;
+      while (ch.parentNode !== a) ch = ch.parentNode;
+      if (idxOf(ch) < ao) return 1;
+    }
+    return -1;
+  }
+  function rangeRoot(n) { while (n.parentNode) n = n.parentNode; return n; }
+  class AbstractRange {
     get collapsed() { return this.startContainer === this.endContainer && this.startOffset === this.endOffset; }
+  }
+  class Range extends AbstractRange {
+    constructor(d) { super(); d = d || doc; this.startContainer = d; this.startOffset = 0; this.endContainer = d; this.endOffset = 0; }
     get commonAncestorContainer() { var a = this.startContainer; while (a && !a.contains(this.endContainer)) a = a.parentNode; return a; }
-    setStart(n, o) { this.startContainer = n; this.startOffset = o; }
-    setEnd(n, o) { this.endContainer = n; this.endOffset = o; }
-    setStartBefore(n) { this.setStart(n.parentNode, n.parentNode._c.indexOf(n)); }
-    setStartAfter(n) { this.setStart(n.parentNode, n.parentNode._c.indexOf(n) + 1); }
-    setEndBefore(n) { this.setEnd(n.parentNode, n.parentNode._c.indexOf(n)); }
-    setEndAfter(n) { this.setEnd(n.parentNode, n.parentNode._c.indexOf(n) + 1); }
-    selectNode(n) { this.setStartBefore(n); this.setEndAfter(n); }
-    selectNodeContents(n) { this.setStart(n, 0); this.setEnd(n, n.nodeType === 3 ? n.data.length : n._c.length); }
-    collapse(toStart) { if (toStart) this.setEnd(this.startContainer, this.startOffset); else this.setStart(this.endContainer, this.endOffset); }
-    cloneRange() { var r = new Range(doc); r.setStart(this.startContainer, this.startOffset); r.setEnd(this.endContainer, this.endOffset); return r; }
+    _check(n, o) {
+      if (n.nodeType === 10) throw DOMException("The node provided is a doctype.", 'InvalidNodeTypeError');
+      if (o > nodeLen(n)) throw DOMException("The offset " + o + " is larger than the node's length (" + nodeLen(n) + ").", 'IndexSizeError');
+    }
+    setStart(n, o) {
+      o = o >>> 0; this._check(n, o);
+      this.startContainer = n; this.startOffset = o;
+      if (rangeRoot(n) !== rangeRoot(this.endContainer) || bpCompare(n, o, this.endContainer, this.endOffset) > 0) { this.endContainer = n; this.endOffset = o; }
+    }
+    setEnd(n, o) {
+      o = o >>> 0; this._check(n, o);
+      this.endContainer = n; this.endOffset = o;
+      if (rangeRoot(n) !== rangeRoot(this.startContainer) || bpCompare(n, o, this.startContainer, this.startOffset) < 0) { this.startContainer = n; this.startOffset = o; }
+    }
+    setStartBefore(n) { this.setStart(n.parentNode, idxOf(n)); }
+    setStartAfter(n) { this.setStart(n.parentNode, idxOf(n) + 1); }
+    setEndBefore(n) { this.setEnd(n.parentNode, idxOf(n)); }
+    setEndAfter(n) { this.setEnd(n.parentNode, idxOf(n) + 1); }
+    selectNode(n) { var p = n.parentNode, i = idxOf(n); this.startContainer = this.endContainer = p; this.startOffset = i; this.endOffset = i + 1; }
+    selectNodeContents(n) { this.startContainer = this.endContainer = n; this.startOffset = 0; this.endOffset = nodeLen(n); }
+    collapse(toStart) { if (toStart) { this.endContainer = this.startContainer; this.endOffset = this.startOffset; } else { this.startContainer = this.endContainer; this.startOffset = this.endOffset; } }
+    cloneRange() { var r = new Range(doc); r.startContainer = this.startContainer; r.startOffset = this.startOffset; r.endContainer = this.endContainer; r.endOffset = this.endOffset; return r; }
     detach() {}
-    toString() { var s = this.startContainer; if (s === this.endContainer && s.nodeType === 3) return s.data.slice(this.startOffset, this.endOffset); return s.textContent || ''; }
+    toString() {
+      var s = this.startContainer, e = this.endContainer;
+      if (s === e && (s.nodeType === 3 || s.nodeType === 4)) return s.data.slice(this.startOffset, this.endOffset);
+      var out = '';
+      if (s.nodeType === 3 || s.nodeType === 4) out += s.data.slice(this.startOffset);
+      var self = this;
+      eachNodeIn(this.commonAncestorContainer, function (n) {
+        if ((n.nodeType === 3 || n.nodeType === 4) && n !== s && n !== e && self._contains(n)) out += n.data;
+      });
+      if (e.nodeType === 3 || e.nodeType === 4) out += e.data.slice(0, this.endOffset);
+      return out;
+    }
+    _contains(n) { return rangeRoot(n) === rangeRoot(this.startContainer) && bpCompare(n, 0, this.startContainer, this.startOffset) > 0 && bpCompare(n, nodeLen(n), this.endContainer, this.endOffset) < 0; }
     getBoundingClientRect() {
       var a = pointX(this.startContainer, this.startOffset), b = pointX(this.endContainer, this.endOffset);
       if (a && b) { var l = Math.min(a.x, b.x), t = Math.min(a.y, b.y); return DOMRect(l, t, Math.abs(b.x - a.x), Math.max(a.y + a.h, b.y + b.h) - t); }
@@ -4354,41 +4641,160 @@
     }
     getClientRects() { return [this.getBoundingClientRect()]; }
     createContextualFragment(html) { return parseFragment(String(html), this.startContainer.nodeType === 1 ? this.startContainer : null); }
-    deleteContents() {}
-    extractContents() { return doc.createDocumentFragment(); }
-    insertNode(n) { var c = this.startContainer; if (c.nodeType === 3) { var rest = c.splitText(this.startOffset); c.parentNode.insertBefore(n, rest); } else c.insertBefore(n, c._c[this.startOffset] || null); }
-    surroundContents(n) { this.insertNode(n); }
-    compareBoundaryPoints() { return 0; }
-    intersectsNode() { return false; }
-    isPointInRange() { return false; }
+    // DOM 5.5: clone, extract (mode 1) or delete (mode 2) what the range holds
+    _contents(mode) {
+      var od = this.startContainer.ownerDocument || this.startContainer, frag = (od.nodeType === 9 ? od : doc).createDocumentFragment();
+      if (this.collapsed) return frag;
+      var sn = this.startContainer, so = this.startOffset, en = this.endContainer, eo = this.endOffset, c;
+      if (sn === en && isChars(sn)) {
+        c = sn.cloneNode(false); c.data = sn.data.slice(so, eo); if (mode !== 2) frag.appendChild(c);
+        if (mode) sn.replaceData(so, eo - so, '');
+        return frag;
+      }
+      var common = sn;
+      while (!common.contains(en)) common = common.parentNode;
+      var first = null, last = null, kids = common._c.slice(), i;
+      if (!sn.contains(en)) for (i = 0; i < kids.length; i++) if (kids[i].contains(sn)) { first = kids[i]; break; }
+      if (!en.contains(sn)) for (i = kids.length - 1; i >= 0; i--) if (kids[i].contains(en)) { last = kids[i]; break; }
+      var self = this, contained = kids.filter(function (k) { return self._contains(k); });
+      for (i = 0; i < contained.length; i++) if (contained[i].nodeType === 10) throw DOMException('A doctype in the range.', 'HierarchyRequestError');
+      var newNode, newOffset;
+      if (sn.contains(en)) { newNode = sn; newOffset = so; }
+      else { var ref = sn; while (ref.parentNode && !ref.parentNode.contains(en)) ref = ref.parentNode; newNode = ref.parentNode; newOffset = idxOf(ref) + 1; }
+      var sub;
+      if (first && isChars(first)) {
+        c = first.cloneNode(false); c.data = sn.data.slice(so); if (mode !== 2) frag.appendChild(c);
+        if (mode) sn.replaceData(so, sn.data.length - so, '');
+      } else if (first) {
+        c = first.cloneNode(false); if (mode !== 2) frag.appendChild(c);
+        sub = new Range(doc); sub.startContainer = sn; sub.startOffset = so; sub.endContainer = first; sub.endOffset = nodeLen(first);
+        var sf = sub._contents(mode); if (mode !== 2) c.appendChild(sf);
+      }
+      for (i = 0; i < contained.length; i++) {
+        if (mode === 0) frag.appendChild(contained[i].cloneNode(true));
+        else if (mode === 1) frag.appendChild(contained[i]);
+        else common.removeChild(contained[i]);
+      }
+      if (last && isChars(last)) {
+        c = last.cloneNode(false); c.data = en.data.slice(0, eo); if (mode !== 2) frag.appendChild(c);
+        if (mode) en.replaceData(0, eo, '');
+      } else if (last) {
+        c = last.cloneNode(false); if (mode !== 2) frag.appendChild(c);
+        sub = new Range(doc); sub.startContainer = last; sub.startOffset = 0; sub.endContainer = en; sub.endOffset = eo;
+        var lf = sub._contents(mode); if (mode !== 2) c.appendChild(lf);
+      }
+      if (mode) { this.startContainer = this.endContainer = newNode; this.startOffset = this.endOffset = newOffset; }
+      return frag;
+    }
+    cloneContents() { return this._contents(0); }
+    extractContents() { return this._contents(1); }
+    deleteContents() { this._contents(2); }
+    insertNode(n) {
+      var c = this.startContainer, so = this.startOffset, wasCollapsed = this.collapsed, p, ref;
+      if (c.nodeType === 3) { var rest = c.splitText(so); p = c.parentNode; ref = rest; }
+      else { p = c; ref = c._c[so] || null; }
+      if (n.parentNode) n.parentNode.removeChild(n);
+      var at = ref ? p._c.indexOf(ref) : p._c.length, count = n.nodeType === 11 ? n._c.length : 1;
+      p.insertBefore(n, ref);
+      if (c.nodeType === 3) { if (wasCollapsed) { this.endContainer = p; this.endOffset = at + count; } }
+      else if (wasCollapsed) { this.endContainer = p; this.endOffset = at + count; }
+      else if (this.endContainer === p && this.endOffset >= at) this.endOffset += count;
+    }
+    surroundContents(n) {
+      var frag = this.extractContents();
+      while (n.firstChild) n.removeChild(n.firstChild);
+      this.insertNode(n);
+      n.appendChild(frag);
+      this.selectNode(n);
+    }
+    compareBoundaryPoints(how, src) {
+      if (how === 0) return bpCompare(this.startContainer, this.startOffset, src.startContainer, src.startOffset);
+      if (how === 1) return bpCompare(this.endContainer, this.endOffset, src.startContainer, src.startOffset);
+      if (how === 2) return bpCompare(this.endContainer, this.endOffset, src.endContainer, src.endOffset);
+      if (how === 3) return bpCompare(this.startContainer, this.startOffset, src.endContainer, src.endOffset);
+      throw DOMException('The comparison method provided must be one of START_TO_START, START_TO_END, END_TO_END, or END_TO_START.', 'NotSupportedError');
+    }
+    comparePoint(n, o) {
+      if (rangeRoot(n) !== rangeRoot(this.startContainer)) throw DOMException('The node provided and the Range are not in the same tree.', 'WrongDocumentError');
+      this._check(n, o);
+      if (bpCompare(n, o, this.startContainer, this.startOffset) < 0) return -1;
+      if (bpCompare(n, o, this.endContainer, this.endOffset) > 0) return 1;
+      return 0;
+    }
+    isPointInRange(n, o) {
+      if (rangeRoot(n) !== rangeRoot(this.startContainer)) return false;
+      this._check(n, o);
+      return bpCompare(n, o, this.startContainer, this.startOffset) >= 0 && bpCompare(n, o, this.endContainer, this.endOffset) <= 0;
+    }
+    intersectsNode(n) {
+      if (rangeRoot(n) !== rangeRoot(this.startContainer)) return false;
+      var p = n.parentNode;
+      if (!p) return true;
+      var i = idxOf(n);
+      return bpCompare(p, i, this.endContainer, this.endOffset) < 0 && bpCompare(p, i + 1, this.startContainer, this.startOffset) > 0;
+    }
   }
   Range.START_TO_START = 0; Range.START_TO_END = 1; Range.END_TO_END = 2; Range.END_TO_START = 3;
-  class StaticRange extends Range {}
+  class StaticRange extends AbstractRange {
+    constructor(init) {
+      super();
+      if (!init || !init.startContainer || !init.endContainer) throw new TypeError("Failed to construct 'StaticRange': required member startContainer is undefined.");
+      this.startContainer = init.startContainer; this.startOffset = init.startOffset >>> 0; this.endContainer = init.endContainer; this.endOffset = init.endOffset >>> 0;
+    }
+  }
+  function eachNodeIn(root, fn) { var st = [root]; while (st.length) { var n = st.pop(); fn(n); if (n._c) for (var i = n._c.length - 1; i >= 0; i--) st.push(n._c[i]); } }
 
-  var selection = {
-    _ranges: [],
-    get rangeCount() { return this._ranges.length; },
-    get anchorNode() { return this._ranges.length ? this._ranges[0].startContainer : null; },
-    get anchorOffset() { return this._ranges.length ? this._ranges[0].startOffset : 0; },
-    get focusNode() { return this._ranges.length ? this._ranges[0].endContainer : null; },
-    get focusOffset() { return this._ranges.length ? this._ranges[0].endOffset : 0; },
-    get isCollapsed() { return !this._ranges.length || this._ranges[0].collapsed; },
-    get type() { return !this._ranges.length ? 'None' : this._ranges[0].collapsed ? 'Caret' : 'Range'; },
-    getRangeAt: function (i) { if (!this._ranges[i]) throw DOMException('The index provided is invalid.', 'IndexSizeError'); return this._ranges[i]; },
-    addRange: function (r) { this._ranges = [r]; },
-    removeRange: function () { this._ranges = []; },
-    removeAllRanges: function () { this._ranges = []; },
-    empty: function () { this._ranges = []; },
-    collapse: function (n, o) { if (!n) { this._ranges = []; return; } var r = new Range(doc); r.setStart(n, o || 0); r.collapse(true); this._ranges = [r]; },
-    collapseToStart: function () {}, collapseToEnd: function () {},
-    extend: function (n, o) { if (this._ranges.length) this._ranges[0].setEnd(n, o || 0); },
-    setBaseAndExtent: function (a, ao, f, fo) { var r = new Range(doc); r.setStart(a, ao); r.setEnd(f, fo); this._ranges = [r]; },
-    selectAllChildren: function (n) { var r = new Range(doc); r.selectNodeContents(n); this._ranges = [r]; },
-    containsNode: function () { return false; },
-    deleteFromDocument: function () {},
-    modify: function () {},
-    toString: function () { return this._ranges.length ? this._ranges[0].toString() : ''; }
-  };
+  class Selection {
+    constructor() { this._ranges = []; this._back = false; }
+    get rangeCount() { return this._ranges.length; }
+    get anchorNode() { var r = this._ranges[0]; return r ? (this._back ? r.endContainer : r.startContainer) : null; }
+    get anchorOffset() { var r = this._ranges[0]; return r ? (this._back ? r.endOffset : r.startOffset) : 0; }
+    get focusNode() { var r = this._ranges[0]; return r ? (this._back ? r.startContainer : r.endContainer) : null; }
+    get focusOffset() { var r = this._ranges[0]; return r ? (this._back ? r.startOffset : r.endOffset) : 0; }
+    get isCollapsed() { return !this._ranges.length || this._ranges[0].collapsed; }
+    get type() { return !this._ranges.length ? 'None' : this._ranges[0].collapsed ? 'Caret' : 'Range'; }
+    get direction() { return !this._ranges.length || this._ranges[0].collapsed ? 'none' : this._back ? 'backward' : 'forward'; }
+    getRangeAt(i) { if (!this._ranges[i]) throw DOMException('The index provided is invalid.', 'IndexSizeError'); return this._ranges[i]; }
+    getComposedRanges() { return this._ranges.map(function (r) { return new StaticRange(r); }); }
+    addRange(r) { if (!this._ranges.length) { this._ranges = [r]; this._back = false; } }
+    removeRange(r) { if (this._ranges[0] === r) this._ranges = []; }
+    removeAllRanges() { this._ranges = []; }
+    empty() { this._ranges = []; }
+    collapse(n, o) { if (!n) { this._ranges = []; return; } var r = new Range(doc); r.setStart(n, o || 0); r.collapse(true); this._ranges = [r]; this._back = false; }
+    setPosition(n, o) { this.collapse(n, o); }
+    collapseToStart() { var r = this._ranges[0]; if (!r) throw DOMException('There is no selection to collapse.', 'InvalidStateError'); this.collapse(r.startContainer, r.startOffset); }
+    collapseToEnd() { var r = this._ranges[0]; if (!r) throw DOMException('There is no selection to collapse.', 'InvalidStateError'); this.collapse(r.endContainer, r.endOffset); }
+    extend(n, o) {
+      var r = this._ranges[0];
+      if (!r) throw DOMException('This Selection object doesn\'t have any Ranges.', 'InvalidStateError');
+      o = o || 0;
+      var an = this.anchorNode, ao = this.anchorOffset, nr = new Range(doc);
+      if (bpCompare(n, o, an, ao) < 0) { nr.setStart(n, o); nr.setEnd(an, ao); this._back = true; }
+      else { nr.setStart(an, ao); nr.setEnd(n, o); this._back = false; }
+      this._ranges = [nr];
+    }
+    setBaseAndExtent(a, ao, f, fo) {
+      var r = new Range(doc);
+      if (bpCompare(f, fo, a, ao) < 0) { r.setStart(f, fo); r.setEnd(a, ao); this._back = true; }
+      else { r.setStart(a, ao); r.setEnd(f, fo); this._back = false; }
+      this._ranges = [r];
+    }
+    selectAllChildren(n) { var r = new Range(doc); r.selectNodeContents(n); this._ranges = [r]; this._back = false; }
+    containsNode(n, partial) {
+      var r = this._ranges[0];
+      if (!r || rangeRoot(n) !== rangeRoot(r.startContainer)) return false;
+      if (partial) return r.intersectsNode(n);
+      var p = n.parentNode;
+      if (!p) return false;
+      var i = idxOf(n);
+      return bpCompare(p, i, r.startContainer, r.startOffset) >= 0 && bpCompare(p, i + 1, r.endContainer, r.endOffset) <= 0;
+    }
+    deleteFromDocument() { if (this._ranges[0]) this._ranges[0].deleteContents(); }
+    modify() {}
+    toString() { return this._ranges.length ? this._ranges[0].toString() : ''; }
+  }
+  var selection = new Selection();
+
 
   // ---- focus ---------------------------------------------------------------
 
@@ -4402,17 +4808,57 @@
     if (!el || el.nodeType !== 1 || !el.isConnected) return false;
     if (el.disabled) return false;
     if (el.hasAttribute('tabindex') || focusableByDefault(el)) {
-      for (var n = el; n && n.nodeType === 1; n = n.parentNode) {
+      for (var n = el; n && n.nodeType === 1; n = composedParent(n)) {
         if (n.hasAttribute('inert')) return false;
         if (computedOf(n).display === 'none') return false;
       }
+      if (blockedByModal(el)) return false;
       return computedOf(el).visibility !== 'hidden';
     }
     return false;
   }
+  // the parent in the composed tree: a shadow root's child goes on to its host
+  function composedParent(n) {
+    var p = n.parentNode;
+    return p && p.nodeType === 11 && p.host ? p.host : p;
+  }
+  function composedContains(a, n) {
+    for (; n; n = composedParent(n)) if (n === a) return true;
+    return false;
+  }
+  // an open modal dialog makes everything outside it inert (HTML 6.2,
+  // "blocked by a modal dialog"): the topmost one in the top layer
+  function topModal() {
+    for (var i = topLayer.length - 1; i >= 0; i--) { var t = topLayer[i]; if (t._modal && t.isConnected) return t; }
+    return null;
+  }
+  function blockedByModal(el) {
+    var m = topModal();
+    if (!m) return false;
+    if (composedContains(m, el)) return false;
+    // (what a popover or another top-layer box above the dialog holds is not blocked)
+    for (var i = topLayer.indexOf(m) + 1; i < topLayer.length; i++) if (composedContains(topLayer[i], el)) return false;
+    return true;
+  }
+  // a host whose shadow root delegates focus: the first focusable element
+  // in its shadow tree, in sequential order, takes the focus (HTML 6.6.4)
+  function delegateTarget(host) {
+    var out = [];
+    tabWalk(host._sr, out, true);
+    for (var i = 0; i < out.length; i++) if (out[i].hasAttribute('autofocus')) return out[i];
+    return out[0] || null;
+  }
   function focusElement(el, opts) {
     if (!doc) return;
+    if (el && el._sr && el._sr.delegatesFocus) {
+      var a = doc._active;
+      // (the focus already in its shadow tree stays where it is)
+      if (a && a !== el && composedContains(el, a)) return;
+      var dt = delegateTarget(el);
+      if (dt) el = dt;
+    }
     if (el && !focusable(el)) return;
+    if (opts && opts.focusVisible !== undefined) doc._focusVisible = !!opts.focusVisible;
     var old = doc._active && doc._active.isConnected ? doc._active : null;
     if (old === el) return;
     if (old) {
@@ -4426,14 +4872,37 @@
     doc._active = el;
     if (el) el._dirty = false;
     pointerStateChanged(old, el, true);
+    // (the focused element is scrolled into view unless the caller says
+    // not to; Chromium centers it when it is not already in view)
+    if (el && !(opts && opts.preventScroll)) { try { scrollIntoView(el, { block: 'if-needed', inline: 'if-needed' }); } catch (e) {} }
     if (el) {
       dispatch(el, new FocusEvent('focus', { relatedTarget: old, view: G }));
       dispatch(el, new FocusEvent('focusin', { bubbles: true, relatedTarget: old, view: G }));
     }
   }
+  // sequential focus order (HTML 6.6.3): the flat tree, a host's shadow
+  // tree where the host is, a slot's assigned nodes where the slot is; a
+  // host that delegates focus is not a stop of its own
+  function tabWalk(n, out, all) {
+    var kids = n._c;
+    for (var i = 0; i < kids.length; i++) {
+      var k = kids[i];
+      if (k._attrs === undefined) continue;
+      if (k.localName === 'slot' && shadowRootOf(k)) {
+        var f = flatten(k, []);
+        for (var j = 0; j < f.length; j++) if (f[j]._attrs !== undefined) tabVisit(f[j], out, all);
+        continue;
+      }
+      tabVisit(k, out, all);
+    }
+  }
+  function tabVisit(e, out, all) {
+    if (!(e._sr && e._sr.delegatesFocus) && focusable(e) && (all || e.tabIndex >= 0)) out.push(e);
+    tabWalk(e._sr || e, out, all);
+  }
   function tabOrder() {
     var out = [];
-    if (doc) eachElement(doc, function (e) { if (focusable(e) && e.tabIndex >= 0) out.push(e); });
+    if (doc) tabWalk(doc, out, false);
     var pos = out.filter(function (e) { return e.tabIndex > 0; }).sort(function (a, b) { return a.tabIndex - b.tabIndex; });
     return pos.concat(out.filter(function (e) { return e.tabIndex === 0; }));
   }
@@ -4790,7 +5259,7 @@
     if (!host || host.nodeType !== 1) return;
     var c = caretIn(t, m.x) || caretIn(host, m.x);
     if (c) selection.collapse(c[0], c[1]);
-    else { var rr = new Range(doc); rr.selectNodeContents(t); rr.collapse(false); selection.addRange(rr); }
+    else { var rr = new Range(doc); rr.selectNodeContents(t); rr.collapse(false); selection.removeAllRanges(); selection.addRange(rr); }
     changed();
   }
   var caretDrawn = null;
@@ -5112,6 +5581,10 @@
     }
   }
   function reflow() {
+    // (a script's scroll is drawn at the next frame, but what it reads now
+    // is where the scroll took the box: rows left out that the viewport
+    // reaches now render before the read)
+    if (virts.length && scrollQueue.length && !reflowing) virtCheck(false);
     if (!syncLayout || reflowing || layoutGen === generation || !doc || !doc.documentElement) return;
     reflowing = true;
     try {
@@ -5418,7 +5891,11 @@
       var b = boxes[n.__id];
       if (b) { els.push(n); ls.push(b[0] - sx); ts.push(b[1] - sy); ws.push(b[2]); hs.push(b[3]); }
       var kx = sx + (n._sLeft || 0), ky = sy + (n._sTop || 0), kids = n._c;
-      for (var j = kids.length - 1; j >= 0; j--) { stack.push(kids[j]); sxs.push(kx); sys.push(ky); }
+      // (children left out by virtual rows have no box drawn: none of
+      // their elements is hit, and a box left from an earlier render is
+      // not where they are now)
+      var vp = n._virt && n._virt.plan, von = vp && vp.src.length === kids.length ? vp.on : null;
+      for (var j = kids.length - 1; j >= 0; j--) { if (von && !von[j] && vp.src[j] === kids[j]) continue; stack.push(kids[j]); sxs.push(kx); sys.push(ky); }
     }
     hitFlat = { g: generation, b: boxSeq, s: scrollBumps, d: doc, els: els, ls: ls, ts: ts, ws: ws, hs: hs, orderOf: orderOf };
     return hitFlat;
@@ -6245,7 +6722,7 @@
       case 'target': return false;
       case 'defined': return true;
       case 'focus': return !!doc && (doc._active === el || (shadowCount && !!el._sr && focusInShadow(el)));
-      case 'focus-visible': return !!doc && doc._active === el && doc._focusVisible !== false;
+      case 'focus-visible': return !!doc && doc._active === el && (doc._focusVisible !== false || textEntry(el));
       case 'focus-within':
         if (!doc || !doc._active) return false;
         if (!shadowCount) return el.contains(doc._active);
@@ -6272,6 +6749,7 @@
       case 'open': return el.hasAttribute('open');
       case 'modal': return !!el._modal;
       case 'popover-open': return !!el._popOpen;
+      case 'state': return !!el._internals && el._internals.states.has(String(s.arg));
       case 'fullscreen': return false;
       case 'autofill': case '-webkit-autofill': return false;
       case 'host': case 'host-context': {
@@ -6590,7 +7068,7 @@
     constructor(cond, rules) { super(4, ''); this.conditionText = cond; this.media = { mediaText: cond, length: 1 }; this.cssRules = rules; }
   }
   class CSSStyleSheet {
-    constructor(owner) { this.ownerNode = owner || null; this.cssRules = []; this._disabled = false; this.href = null; this.type = 'text/css'; this.title = null; this.media = { mediaText: '', length: 0 }; this._rules = []; this._order = sheetOrder++; }
+    constructor(owner) { var opts = owner && !(owner instanceof Node) ? owner : null; if (opts) owner = null; this._opts = opts; this.ownerNode = owner || null; this.cssRules = []; this._disabled = false; this.href = null; this.type = 'text/css'; this.title = null; this.media = { mediaText: '', length: 0 }; this._rules = []; this._order = sheetOrder++; if (opts) { if (opts.media) this.media = typeof opts.media === 'string' ? opts.media : opts.media.mediaText || ''; if (opts.disabled) this._disabled = true; } }
     get rules() { return this.cssRules; }
     // (a sheet switched off or on restyles the page, CSSOM 6.1)
     get disabled() { return this._disabled; }
@@ -6624,7 +7102,7 @@
         }
       })(this.cssRules, '');
       indexSheet(this);
-      changed();
+      if (!sheetQuiet) changed();
     }
   }
 
@@ -6695,6 +7173,17 @@
           var lr = new CSSRule(at === 'layer' ? 18 : 0, '');
           lr.cssRules = sub3; lr._layer = at === 'layer' || at === 'scope';
           rules.push(lr);
+        } else if (at === 'property' && cond.slice(0, 2) === '--') {
+          // (CSS Properties and Values API 1, 3: a registered custom
+          // property; ignored without syntax and inherits, or without an
+          // initial value when its syntax is not "*")
+          var pd = {}, pm, PDRE = /(syntax|inherits|initial-value)\s*:\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^;]*)/gi;
+          while ((pm = PDRE.exec(body))) pd[pm[1].toLowerCase()] = pm[2].trim();
+          var psyn = pd.syntax ? pd.syntax.replace(/^["']|["']$/g, '') : null, pinh = pd.inherits ? pd.inherits.toLowerCase() : null;
+          var prule = new CSSRule(0, prelude + '{' + body + '}');
+          prule.name = cond; prule.syntax = psyn || ''; prule.inherits = pinh === 'true'; prule.initialValue = pd['initial-value'] !== undefined ? pd['initial-value'] : null;
+          if (psyn !== null && (pinh === 'true' || pinh === 'false') && (psyn === '*' || pd['initial-value'] !== undefined)) registerProp(cond, pinh === 'true', pd['initial-value'], false);
+          rules.push(prule);
         } else {
           var other = new CSSRule(at === 'font-face' ? 5 : at === 'keyframes' || at === '-webkit-keyframes' ? 7 : 0, prelude + '{' + body + '}');
           other.name = cond;
@@ -6913,11 +7402,91 @@
     return '*';
   }
 
+  var sheetQuiet = 0;
+  // A <style> came into the page, went, or got a new text: when every rule
+  // of its sheet, before and after, is a plain style rule (no at-rule but
+  // @media, no pseudo-element) whose subject has a key (a tag, an id, a
+  // class, an attribute), only the elements with one of those keys can
+  // match one, so only they are styled again (and what is under them when
+  // their style changed in what it hands down, restyle); else the whole
+  // page. react-remove-scroll's <style> (body[data-scroll-locked], four
+  // class names) came and went with every Radix dialog, sheet, select and
+  // menu, and restyled 2 500 elements twice each time.
+  function styleSheetChanged(el, was) {
+    if (!doc || el.ownerDocument !== doc || shadowCount || el.namespaceURI !== HTML_NS) { changed(); return; }
+    var keys = {}, any = false;
+    function take(sh) {
+      if (!sh) return true;
+      if (sh.disabled) return true;
+      if (!plainRules(sh.cssRules)) return false;
+      for (var k in sh._index) { if (k === '*') return false; keys[k] = 1; any = true; }
+      // (a pseudo-element's rules by the keys of their elements: Radix
+      // Select's `[data-radix-select-viewport]::-webkit-scrollbar`)
+      for (var pn in sh._pindex) for (var pk in sh._pindex[pn]) { if (pk === '*') return false; keys[pk] = 1; any = true; }
+      return true;
+    }
+    // (the keys of the rules it had before its new text is read: the sheet
+    // object is the same one, sheetOfStyle)
+    if (!take(was)) { changed(); return; }
+    if (!take(el.isConnected ? sheetOfStyle(el) : null)) { changed(); return; }
+    sheetGen++;
+    generation++;
+    lastPseudo = NO_PSEUDO;
+    if (!any || computedCache.gen !== styleGen) return;
+    textStamp++;
+    var hit = [];
+    eachElement(doc, function (e) { if (keyedBy(e, keys)) hit.push(e); });
+    for (var i = 0; i < hit.length; i++) {
+      var e = hit[i];
+      for (var p = e; p && p._rv !== textStamp; p = p.parentNode) p._rv = textStamp;
+      // (each one: one above it whose style came out the same kept what
+      // is under it)
+      restyle(e);
+    }
+  }
+  function plainRules(rules) {
+    for (var i = 0; i < rules.length; i++) {
+      var r = rules[i];
+      if (r.type === 1) continue;
+      if (r.type === 4 && !r._layer && plainRules(r.cssRules)) continue;
+      return false;
+    }
+    return true;
+  }
+  // the index keys of a rule's subject (as indexSheet files it), null for
+  // one with none
+  function ruleKeys(r) {
+    var k = r.sel && r.sel.key;
+    if (!k) return null;
+    if (k !== '*') return [k];
+    var keys = subjectKeys(r.sel.parts[0].c, 0);
+    if (keys) return keys;
+    k = attrKey(r.sel.parts[0].c);
+    return k === '*' ? null : [k];
+  }
+  // e has one of the index keys (indexSheet): its tag, #id, .class, [attr,
+  // :root
+  function keyedBy(e, keys) {
+    if (keys[e.localName] || (e === doc.documentElement && keys[':root'])) return true;
+    var id = e.getAttribute('id');
+    if (id && keys['#' + id]) return true;
+    var at = e._attrs;
+    for (var i = 0; i < at.length; i++) {
+      var n = at[i].name;
+      if (keys['[' + n]) return true;
+      if (n === 'class') { var cl = String(at[i].value).split(/\s+/); for (var j = 0; j < cl.length; j++) if (cl[j] && keys['.' + cl[j]]) return true; }
+    }
+    return false;
+  }
   function sheetOfStyle(el) {
     if (el._sheet && el._sheetText === el.textContent) return el._sheet;
     var s = el._sheet || new CSSStyleSheet(el);
     s.cssRules = parseSheetText(el.textContent, s).cssRules;
-    s._rebuild();
+    // (the change that gave it this text has been told: its coming, its
+    // text, styleSheetChanged. Told again here, in the middle of a cascade
+    // that asked for the sheets, every style found so far was thrown away.)
+    sheetQuiet++;
+    try { s._rebuild(); } finally { sheetQuiet--; }
     el._sheet = s;
     el._sheetText = el.textContent;
     return s;
@@ -6927,10 +7496,10 @@
   // style change (styleGen) rather than by a walk of the page per element
   var sheetsCache = { gen: -1, d: null, list: null };
   function cascadeSheets(d) {
-    if (sheetsCache.gen !== styleGen || sheetsCache.d !== d) {
+    if (sheetsCache.gen !== sheetGen || sheetsCache.d !== d) {
       // without the adopted sheets: assigning the list is no change
       var all = styleSheetsOf(d);
-      sheetsCache = { gen: styleGen, d: d, list: all.slice(0, all.length - (d.adoptedStyleSheets || []).length) };
+      sheetsCache = { gen: sheetGen, d: d, list: all.slice(0, all.length - (d.adoptedStyleSheets || []).length) };
     }
     return sheetsCache.list.concat(d.adoptedStyleSheets || []);
   }
@@ -7095,6 +7664,7 @@
     'input,textarea,select{background-color:rgb(255,255,255);border:2px inset rgb(118,118,118)}input{padding:1px 2px}textarea{padding:2px;white-space:pre-wrap}button,input[type=button],input[type=submit],input[type=reset]{padding:1px 6px;border:2px outset rgb(118,118,118);background-color:rgb(239,239,239);text-align:center;cursor:default}input[type=hidden]{display:none}input[type=color]{width:50px;height:27px;padding:1px 2px;border:1px solid rgb(118,118,118);border-radius:2px;background-color:rgb(239,239,239)}input[type=range]{width:129px;height:16px;margin:2px;padding:0;border:0;background-color:transparent}input[type=file]{padding:0;border:0;background-color:transparent}input[type=checkbox]{margin:3px 3px 3px 4px}input[type=radio]{margin:3px 3px 0 5px}button:disabled,input[type=button]:disabled,input[type=submit]:disabled,input[type=reset]:disabled{color:rgba(16,16,16,0.3);border-color:rgba(118,118,118,0.3);background-color:rgba(239,239,239,0.3)}button,select,input[type=button],input[type=submit],input[type=reset],input[type=color],input[type=checkbox],input[type=radio]{box-sizing:border-box}',
     'img,svg,video,canvas,iframe,embed,object{display:inline-block}svg:not(:root){overflow:hidden}iframe{border:2px inset rgb(118,118,118)}fieldset{margin-left:2px;margin-right:2px;padding:.35em .75em .625em;border:2px groove rgb(192,192,192)}legend{padding-left:2px;padding-right:2px}',
     '[dir=rtl]{direction:rtl}[dir=ltr]{direction:ltr}',
+    ':focus-visible{outline:auto 1px rgb(16,16,16)}',
     '[popover]:not(:popover-open):not(dialog[open]){display:none}[popover]{position:fixed;inset:0;width:fit-content;height:fit-content;margin:auto;border:solid;padding:.25em;overflow:auto;color:black;background-color:white}dialog:modal{position:fixed;top:0;bottom:0;max-width:calc(100% - 6px - 2em);max-height:calc(100% - 6px - 2em);overflow:auto}',
     'dialog:not([open]){display:none}dialog{position:absolute;left:0;right:0;width:fit-content;height:fit-content;margin:auto;border:solid;padding:1em;background-color:white;color:black}mark{background-color:yellow;color:black}center{text-align:center}'
   ].join('\n');
@@ -7148,12 +7718,12 @@
   }
   // a shadow root's sheets: its <style>s, then its adopted ones
   function shadowSheets(sr) {
-    if (sr._sheetGen === styleGen && sr._sheets) return sr._sheets;
+    if (sr._sheetGen === sheetGen && sr._sheets) return sr._sheets;
     var out = [];
     eachElement(sr, function (e) { if (e.localName === 'style' && e.namespaceURI === HTML_NS) out.push(sheetOfStyle(e)); });
     for (var i = 0; i < sr._adopted.length; i++) out.push(sr._adopted[i]);
     out = out.filter(function (x) { return x && !x.disabled; });
-    sr._sheets = out; sr._sheetGen = styleGen;
+    sr._sheets = out; sr._sheetGen = sheetGen;
     return out;
   }
   // the rules of a shadow tree's sheets for the tree's host (:host) and
@@ -7253,11 +7823,11 @@
   var docRuleSet = { gen: -1, d: null, rs: null };
   function scopeRuleSet(d, esr) {
     if (esr) {
-      if (esr._rsGen !== styleGen || !esr._rs) { esr._rs = ruleSetOf([ua()].concat(shadowSheets(esr)), esr._rs); esr._rsGen = styleGen; }
+      if (esr._rsGen !== sheetGen || !esr._rs) { esr._rs = ruleSetOf([ua()].concat(shadowSheets(esr)), esr._rs); esr._rsGen = sheetGen; }
       return esr._rs;
     }
-    if (docRuleSet.gen !== styleGen || docRuleSet.d !== d) {
-      docRuleSet = { gen: styleGen, d: d, rs: ruleSetOf([ua()].concat(d === doc ? cascadeSheets(d).filter(function (x) { return !x.disabled; }) : []), docRuleSet.rs) };
+    if (docRuleSet.gen !== sheetGen || docRuleSet.d !== d) {
+      docRuleSet = { gen: sheetGen, d: d, rs: ruleSetOf([ua()].concat(d === doc ? cascadeSheets(d).filter(function (x) { return !x.disabled; }) : []), docRuleSet.rs) };
     }
     return docRuleSet.rs;
   }
@@ -7769,7 +8339,7 @@
   // animationstart, animationiteration and animationend are dispatched.
   var keyframesCache = { gen: -1, map: {} };
   function keyframesNamed(name) {
-    if (keyframesCache.gen !== styleGen) {
+    if (keyframesCache.gen !== sheetGen) {
       var map = {};
       var walk = function (rules) {
         for (var i = 0; i < rules.length; i++) {
@@ -7779,7 +8349,7 @@
         }
       };
       if (doc) { var sheets = cascadeSheets(doc); for (var si = 0; si < sheets.length; si++) walk(sheets[si].cssRules || sheets[si]._rules || []); }
-      keyframesCache = { gen: styleGen, map: map, parsed: {} };
+      keyframesCache = { gen: sheetGen, map: map, parsed: {} };
     }
     if (keyframesCache.parsed[name] !== undefined) return keyframesCache.parsed[name];
     var rule = keyframesCache.map[name], out = null;
@@ -8508,6 +9078,7 @@
     } else el._ab = null;
     if (!cssAnim && el._anims) el._anims = null;
     computedCache.map[el.__id] = c;
+    el._ocs = null;
     el._trOut = c;
     // (styled: its ancestors are noted with it, so one never styled has
     // nothing styled under it; treeChanged keeps that true for a move)
@@ -8635,6 +9206,9 @@
     // none; Bootstrap's 200 --bs-* were copied to every element)
     var vars, ownVar = false;
     for (var n0 in spec) if (n0.charCodeAt(0) === 45 && n0.charCodeAt(1) === 45) { ownVar = true; break; }
+    // (a registered property that does not inherit starts again at its
+    // initial value: the parent's object only when it has those)
+    if (regNoInherit && parent && parent._vars && !ownVar) for (var rn0 in regProps) { var rp0 = regProps[rn0]; if (!rp0.inh && parent._vars[rn0] !== rp0.init) { ownVar = true; break; } }
     if (parent && !ownVar && parent._vars) vars = parent._vars;
     else {
       // (the same parent's properties and the same own ones: the same
@@ -8649,6 +9223,7 @@
       vars = {};
       if (varsMemo.n < 20000) { varsMemo.map[vkey] = vars; varsMemo.n++; }
       if (parent) for (var pv in parent._vars) vars[pv] = parent._vars[pv];
+      if (regProps) for (var rn in regProps) { var rp = regProps[rn]; if (!parent || !rp.inh || !parent._vars) { if (rp.init === undefined) delete vars[rn]; else vars[rn] = rp.init; } }
       for (var n in spec) if (n.slice(0, 2) === '--') vars[n] = spec[n];
       // custom properties may use each other
       // (one that refers to an unset property with no fallback is
@@ -8714,6 +9289,17 @@
       if (kw === 'unset') { out[name] = INHERITED[name] && parent ? parent[name] : INITIAL[name]; continue; }
       out[name] = computeValue(name, v, ctx, parent, out);
     }
+    // (the animation shorthand and its longhands, kept apart: the one set
+    // later wins. Radix's Collapsible sets animation-name: none inline over
+    // tw-animate's animation: accordion-down to measure its open height,
+    // which came out 0 while the class's animation ran on)
+    if (spec.animation !== undefined) {
+      for (var an in spec) {
+        if (an.slice(0, 10) !== 'animation-' || spec[an] === undefined) continue;
+        if ((sq[an] || 0) < (sq.animation || 0)) delete out[an];
+        else if (an === 'animation-name' && out[an] === 'none') out.animation = 'none';
+      }
+    }
     if (out.display === undefined) out.display = 'inline';
     // the transition shorthand's longhands, as getComputedStyle gives them
     // (Bootstrap waits transitionDuration for a modal's fade)
@@ -8764,7 +9350,7 @@
     return out;
   }
   function individualTransforms(el, cs) {
-    var parts = [], sp = function (v) { return String(v).trim().split(/\s+/); };
+    var parts = [], sp = function (v) { return splitValue(String(v).trim()); };
     if (cs.translate && cs.translate !== 'none') { var tv = sp(cs.translate); parts.push(tv.length > 2 ? 'translate3d(' + tv[0] + ', ' + tv[1] + ', ' + tv[2] + ')' : 'translate(' + tv[0] + ', ' + (tv[1] || '0px') + ')'); }
     if (cs.rotate && cs.rotate !== 'none') {
       var rv = sp(cs.rotate), ang = rv[rv.length - 1];
@@ -8797,13 +9383,24 @@
       el._pctBox = w + ',' + h;
       if (pctTransforms.indexOf(el) < 0) pctTransforms.push(el);
     }
-    return out.transform.replace(/(translate[XY3d]*)\(([^)]*)\)/g, function (m, fn, args) {
-      var k = 0;
-      return fn + '(' + args.split(',').map(function (a) {
+    // (each argument's percentages of the box, then its calc() in px:
+    // Tailwind's translate-x-[calc(100%-2px)] and -translate-x-1/2,
+    // calc(calc(1 / 2 * 100%) * -1), were left as they were)
+    var t = out.transform, res = '', i = 0, re = /(translate(?:X|Y|3d)?)\(/g, m;
+    var ctx = { em: parseFloat(out['font-size']) || 16, rem: rootFontPx(), vw: viewport.w / 100, vh: viewport.h / 100 };
+    while ((m = re.exec(t)) !== null) {
+      var open = m.index + m[1].length, close = findClose(t, open, '(', ')');
+      if (close < 0) break;
+      var fn = m[1], k = 0;
+      var args = splitTop(t.slice(open + 1, close), ',').map(function (a) {
         var axis = fn === 'translateY' ? 'y' : fn === 'translateX' ? 'x' : k++ === 0 ? 'x' : 'y';
-        return a.replace(/(-?[\d.]+)%/, function (q, n) { return fmtPx(parseFloat(n) / 100 * (axis === 'x' ? w : h)); });
-      }).join(',') + ')';
-    });
+        a = a.trim().replace(/(-?[\d.]+(?:e-?\d+)?)%/g, function (q, n) { return fmtPx(parseFloat(n) / 100 * (axis === 'x' ? w : h)); });
+        return /calc\(|min\(|max\(|clamp\(/i.test(a) ? calcLengths(a, ctx) : a;
+      });
+      res += t.slice(i, m.index) + fn + '(' + args.join(', ') + ')';
+      i = close + 1; re.lastIndex = i;
+    }
+    return res + t.slice(i);
   }
   function rootFontPx() {
     var r = doc && doc.documentElement;
@@ -9298,6 +9895,254 @@
   // what the host lays out: each element {i, t, s: computed style (the
   // properties that differ from the initial value), a: attributes the host
   // shows, c: children}, each text {i, x}
+  // ACCESSIBILITY. What each element is to a screen reader (WAI-ARIA 1.2,
+  // HTML-AAM, Accessible Name and Description 1.2), computed where the
+  // element renders and sent with it as `ax`: r role, n name, d
+  // description and the states. The host's view puts them on its boxes
+  // (DomView: EVG's a11y fields), from which EVGA11yFromTree builds the tree
+  // a host mirrors (evg-a11y.js) or hands to the platform. Only elements
+  // with a role a reader stops on carry one; text in a box with none is a
+  // "text" node (static text). Roles are the ones EVGA11yFromTree knows: an
+  // ARIA role it lacks is mapped to the nearest it has.
+  var AX_ROLES = /^(group|text|heading|button|checkbox|radio|textbox|img|link|navigation|form|rowgroup|log|combobox|listbox|option|grid|tabpanel|tablist|tab|toolbar|menu|menubar|menuitem|menuitemcheckbox|menuitemradio|separator|dialog|alertdialog|tooltip|status|region|banner|main|paragraph|list|listitem|table|row|columnheader|rowheader|cell|gridcell|switch|radiogroup|slider|spinbutton|progressbar|tree|treeitem)$/;
+  var AX_ALIAS = { searchbox: 'textbox', image: 'img', alert: 'status', timer: 'status', marquee: 'status', meter: 'progressbar', treegrid: 'grid', scrollbar: 'slider',
+    article: 'group', complementary: 'region', contentinfo: 'region', search: 'region', figure: 'group', document: 'group', application: 'group', feed: 'group', note: 'group', blockquote: 'group', definition: 'group', term: 'group', directory: 'list', caption: 'text', math: 'img' };
+  // roles named by their content (accname 4.3.2, step 2F)
+  var AX_FROM_CONTENT = /^(button|cell|checkbox|columnheader|gridcell|heading|link|menuitem|menuitemcheckbox|menuitemradio|option|radio|rowheader|switch|tab|tooltip|treeitem)$/;
+  function axImplicit(n) {
+    var t = n.localName;
+    if (n.namespaceURI !== HTML_NS) return t === 'svg' && (n.getAttribute('aria-label') || n.getAttribute('aria-labelledby')) ? 'img' : '';
+    switch (t) {
+      case 'a': case 'area': return n.hasAttribute('href') ? 'link' : '';
+      case 'button': case 'summary': return 'button';
+      case 'h1': case 'h2': case 'h3': case 'h4': case 'h5': case 'h6': return 'heading';
+      case 'img': return n.getAttribute('alt') === '' ? '' : 'img';
+      case 'input':
+        var ty = n.type;
+        if (ty === 'hidden') return '';
+        if (/^(button|submit|reset|image)$/.test(ty)) return 'button';
+        if (ty === 'checkbox') return n.hasAttribute('switch') ? 'switch' : 'checkbox';
+        if (ty === 'radio') return 'radio';
+        if (ty === 'range') return 'slider';
+        if (ty === 'number') return 'spinbutton';
+        if (/^(color|file|date|time|datetime-local|month|week)$/.test(ty)) return ty === 'file' ? 'button' : 'textbox';
+        return n.hasAttribute('list') ? 'combobox' : 'textbox';
+      case 'textarea': return 'textbox';
+      case 'select': return n.multiple || n.size > 1 ? 'listbox' : 'combobox';
+      case 'option': return 'option';
+      case 'ul': case 'ol': case 'menu': return 'list';
+      case 'li': return 'listitem';
+      case 'nav': return 'navigation';
+      case 'main': return 'main';
+      case 'header': return axInSection(n) ? '' : 'banner';
+      case 'footer': return axInSection(n) ? '' : 'region';
+      case 'aside': return 'region';
+      case 'section': return axHasName(n) ? 'region' : '';
+      case 'form': return axHasName(n) ? 'form' : '';
+      case 'article': case 'fieldset': case 'details': case 'figure': case 'blockquote': return 'group';
+      case 'dialog': return 'dialog';
+      case 'p': return 'paragraph';
+      case 'hr': return 'separator';
+      case 'table': return 'table';
+      case 'thead': case 'tbody': case 'tfoot': return 'rowgroup';
+      case 'tr': return 'row';
+      case 'td': return axGridTable(n) ? 'gridcell' : 'cell';
+      case 'th': var sc = n.getAttribute('scope'); return sc === 'row' || sc === 'rowgroup' ? 'rowheader' : 'columnheader';
+      case 'progress': case 'meter': return 'progressbar';
+      case 'output': return 'status';
+    }
+    return '';
+  }
+  function axInSection(n) { for (var p = n.parentNode; p && p.nodeType === 1; p = p.parentNode) if (/^(article|aside|main|nav|section)$/.test(p.localName)) return true; return false; }
+  function axHasName(n) { return !!(n.getAttribute('aria-label') || n.getAttribute('aria-labelledby') || n.getAttribute('title')); }
+  function axGridTable(n) { for (var p = n.parentNode; p && p.nodeType === 1; p = p.parentNode) if (p.localName === 'table') { var r = (p.getAttribute('role') || '').trim(); return r === 'grid' || r === 'treegrid'; } return false; }
+  function axRoleOf(n) {
+    var ra = n.getAttribute('role');
+    if (ra === null && n._internals && n._internals.role) ra = String(n._internals.role);
+    if (ra !== null) {
+      var toks = ra.trim().toLowerCase().split(/\s+/);
+      for (var i = 0; i < toks.length; i++) {
+        var r = toks[i];
+        // (none/presentation is ignored on a focusable element, ARIA 9.2)
+        if (r === 'none' || r === 'presentation') { if (focusableByDefault(n) || n.hasAttribute('tabindex')) continue; return ''; }
+        if (r === 'generic') return '';
+        if (AX_ROLES.test(r)) return r;
+        if (AX_ALIAS[r]) return AX_ALIAS[r];
+      }
+    }
+    return axImplicit(n);
+  }
+  function axAttr(n, a) {
+    var v = n.getAttribute(a);
+    if (v === null && n._internals) { var p = 'aria' + a.slice(5).replace(/(^|-)([a-z])/g, function (m, d, c) { return c.toUpperCase(); }); var iv = n._internals[p]; if (iv !== null && iv !== undefined) v = String(iv); }
+    return v;
+  }
+  function axHidden(n) {
+    if (n.getAttribute('aria-hidden') === 'true' || n.hasAttribute('hidden') && n.getAttribute('hidden') !== 'until-found') return true;
+    var cs = computedOf(n);
+    return cs.display === 'none' || cs.visibility === 'hidden';
+  }
+  function axSquash(t) { return t.replace(/\s+/g, ' ').trim(); }
+  // the text of an element as a name (accname 4.3.2 steps 2B-2G): what
+  // it holds, each child by its own name, hidden parts left out
+  function axText(n, depth, seen) {
+    if (depth > 30) return '';
+    var out = '';
+    for (var i = 0; i < n._c.length; i++) {
+      var k = n._c[i];
+      if (k.nodeType === 3) { out += k.data; continue; }
+      if (k.nodeType !== 1 || seen.indexOf(k) >= 0) continue;
+      if (axHidden(k)) continue;
+      var lab = axAttr(k, 'aria-label');
+      if (lab && lab.trim()) { out += ' ' + lab + ' '; continue; }
+      var t = k.localName;
+      if (t === 'img' || (t === 'input' && k.type === 'image') || t === 'area') { out += ' ' + (k.getAttribute('alt') || '') + ' '; continue; }
+      if (t === 'input' || t === 'textarea') { out += ' ' + (k.type === 'password' ? '' : /^(checkbox|radio)$/.test(k.type) ? '' : k.value) + ' '; continue; }
+      if (t === 'select') { out += ' ' + (k.selectedOptions && k.selectedOptions[0] ? k.selectedOptions[0].text : '') + ' '; continue; }
+      if (t === 'script' || t === 'style' || t === 'template') continue;
+      // (a slot: what is assigned to it, else its own content)
+      if (t === 'slot' && shadowRootOf(k)) { var fl = flatten(k, []), ft = ''; for (var fi = 0; fi < fl.length; fi++) ft += fl[fi].nodeType === 3 ? fl[fi].data : fl[fi].nodeType === 1 && !axHidden(fl[fi]) ? ' ' + axText(fl[fi], depth + 1, seen) + ' ' : ''; out += ft; continue; }
+      var cs = computedOf(k), inl = !cs.display || /^inline/.test(cs.display) || cs.display === 'contents';
+      var bt = k._sr ? axText(k._sr, depth + 1, seen) : axText(k, depth + 1, seen);
+      out += inl ? bt : ' ' + bt + ' ';
+    }
+    return out;
+  }
+  function axRefs(n, attr) {
+    var ids = (n.getAttribute(attr) || '').trim();
+    if (!ids) return '';
+    var root = n.getRootNode ? n.getRootNode() : doc, out = [];
+    ids.split(/\s+/).forEach(function (id) {
+      var e = root.getElementById ? root.getElementById(id) : doc.getElementById(id);
+      if (!e) return;
+      var l = axAttr(e, 'aria-label');
+      out.push(l && l.trim() ? l : axSquash(axText(e, 0, [n])));
+    });
+    return axSquash(out.join(' '));
+  }
+  function axLabelText(n) {
+    // <label for=id> and an enclosing <label>, the control's own text left out
+    var out = [];
+    var id = n.getAttribute('id'), root = n.getRootNode ? n.getRootNode() : doc;
+    if (id && root.querySelectorAll) { var ls = root.querySelectorAll('label[for]'); for (var i = 0; i < ls.length; i++) if (ls[i].getAttribute('for') === id) out.push(axText(ls[i], 0, [n])); }
+    for (var p = n.parentNode; p && p.nodeType === 1; p = p.parentNode) if (p.localName === 'label' && !p.hasAttribute('for')) { out.push(axText(p, 0, [n])); break; }
+    return axSquash(out.join(' '));
+  }
+  function axName(n, role) {
+    var v = axRefs(n, 'aria-labelledby');
+    if (v) return v;
+    v = axAttr(n, 'aria-label');
+    if (v && v.trim()) return axSquash(v);
+    var t = n.localName;
+    if (t === 'input' || t === 'textarea' || t === 'select' || t === 'meter' || t === 'progress' || t === 'output') {
+      if (t === 'input' && /^(button|submit|reset)$/.test(n.type)) return n.value || (n.type === 'submit' ? 'Submit' : n.type === 'reset' ? 'Reset' : '');
+      if (t === 'input' && n.type === 'image') return n.getAttribute('alt') || 'Submit';
+      v = axLabelText(n);
+      if (v) return v;
+    }
+    if (t === 'img' || t === 'area') { v = n.getAttribute('alt'); if (v) return axSquash(v); }
+    if (t === 'fieldset' || t === 'figure' || t === 'table') {
+      var cap = t === 'fieldset' ? 'legend' : t === 'figure' ? 'figcaption' : 'caption';
+      for (var i = 0; i < n._c.length; i++) if (n._c[i].localName === cap) return axSquash(axText(n._c[i], 0, []));
+    }
+    if (t === 'svg') { for (var j = 0; j < n._c.length; j++) if (n._c[j].localName === 'title') return axSquash(n._c[j].textContent); }
+    if (AX_FROM_CONTENT.test(role)) { v = axSquash(axText(n._sr || n, 0, [])); if (v) return v.length > 400 ? v.slice(0, 400) : v; }
+    v = n.getAttribute('title');
+    if (v && v.trim()) return axSquash(v);
+    if ((role === 'textbox' || role === 'combobox' || role === 'spinbutton') && n.getAttribute('placeholder')) return axSquash(n.getAttribute('placeholder'));
+    return '';
+  }
+  function axTri(v) { return v === 'true' ? 2 : v === 'false' ? 1 : v === 'mixed' ? 3 : 0; }
+  // the render tree's `ax` for an element, or null (no role, nothing to say)
+  function axOf(n) {
+    if (n.getAttribute('aria-hidden') === 'true') return { h: 1 };
+    var role = axRoleOf(n), o = null;
+    if (!role) {
+      // static text: a box with text of its own and no role, outside a
+      // role that is named by its content (it is that role's name already)
+      var own = '';
+      for (var i = 0; i < n._c.length; i++) if (n._c[i].nodeType === 3) own += n._c[i].data;
+      if (!own.trim()) return null;
+      for (var p = composedParent(n); p && p.nodeType === 1; p = composedParent(p)) {
+        var pr = axRoleOf(p);
+        if (pr && AX_FROM_CONTENT.test(pr)) return null;
+        if (pr) break;
+      }
+      return { r: 'text', n: axSquash(own).slice(0, 2000) };
+    }
+    o = { r: role };
+    var nm = axName(n, role);
+    // (a paragraph's or list item's text as its name: EVG's tree has no
+    // static text under a role, so what it holds is said as its name)
+    if (!nm && (role === 'paragraph' || role === 'listitem')) { nm = axSquash(axText(n, 0, [])); if (nm.length > 2000) nm = nm.slice(0, 2000); }
+    if (nm) o.n = nm;
+    var ds = axRefs(n, 'aria-describedby') || axAttr(n, 'aria-description') || (nm !== axSquash(n.getAttribute('title') || '') ? axSquash(n.getAttribute('title') || '') : '');
+    if (ds) o.d = ds;
+    var t = n.localName;
+    // states
+    var ch = axTri(axAttr(n, 'aria-checked'));
+    if (t === 'input' && (n.type === 'checkbox' || n.type === 'radio')) ch = n.indeterminate ? 3 : n.checked ? 2 : 1;
+    else if (!ch && /^(checkbox|radio|switch|menuitemcheckbox|menuitemradio)$/.test(role)) ch = 1;
+    if (ch) o.ck = ch;
+    var pr2 = axTri(axAttr(n, 'aria-pressed')); if (pr2 && role === 'button') o.pr = pr2;
+    var ex = axTri(axAttr(n, 'aria-expanded'));
+    if (t === 'details') ex = n.open ? 2 : 1;
+    else if (t === 'summary' && n.parentNode && n.parentNode.localName === 'details') ex = n.parentNode.open ? 2 : 1;
+    if (ex) o.ex = ex;
+    var se = axTri(axAttr(n, 'aria-selected'));
+    if (t === 'option') se = n.selected ? 2 : 1;
+    if (se === 2) o.se = 2;
+    if (n.disabled || axAttr(n, 'aria-disabled') === 'true') o.di = 1;
+    if (focusableByDefault(n) || n.hasAttribute('tabindex')) o.fo = 1;
+    if ((t === 'dialog' && n._modal) || axAttr(n, 'aria-modal') === 'true') o.mo = 1;
+    var lv = parseInt(axAttr(n, 'aria-level'), 10);
+    if (!(lv > 0) && role === 'heading' && /^h[1-6]$/.test(t)) lv = +t.charAt(1);
+    if (!(lv > 0) && role === 'heading') lv = 2;
+    if (lv > 0) o.lv = lv;
+    var hp = axAttr(n, 'aria-haspopup'); if (hp && hp !== 'false') o.hp = hp === 'true' ? 'menu' : hp;
+    if (t === 'select' && role === 'combobox') o.hp = 'listbox';
+    var cu = axAttr(n, 'aria-current'); if (cu && cu !== 'false') o.cu = cu;
+    if (n.required || axAttr(n, 'aria-required') === 'true') o.rq = 1;
+    if (axAttr(n, 'aria-invalid') && axAttr(n, 'aria-invalid') !== 'false') o.iv = 1;
+    if (n.readOnly || axAttr(n, 'aria-readonly') === 'true') o.ro = 1;
+    var or = axAttr(n, 'aria-orientation'); if (or) o.or = or;
+    var rd = axAttr(n, 'aria-roledescription'); if (rd) o.rd = rd;
+    var ps = parseInt(axAttr(n, 'aria-posinset'), 10), sz = parseInt(axAttr(n, 'aria-setsize'), 10);
+    if (ps > 0) o.ps = ps;
+    if (sz > 0) o.sz = sz;
+    // value: a field's text, a select's choice, a range's number
+    if (role === 'textbox' || role === 'combobox' || role === 'spinbutton') {
+      var val = t === 'select' ? (n.selectedOptions && n.selectedOptions[0] ? n.selectedOptions[0].text : '') : (t === 'input' || t === 'textarea') ? (n.type === 'password' ? n.value.replace(/./g, '•') : n.value) : '';
+      if (val) o.v = val;
+    }
+    if (role === 'slider' || role === 'spinbutton' || role === 'progressbar' || role === 'separator' && o.fo) {
+      var vn = parseFloat(axAttr(n, 'aria-valuenow')), vmin = parseFloat(axAttr(n, 'aria-valuemin')), vmax = parseFloat(axAttr(n, 'aria-valuemax'));
+      if (t === 'input') { vn = parseFloat(n.value); var rb = n.type === 'range' ? rangeBounds(n) : null; if (rb) { vmin = rb[0]; vmax = rb[1]; } }
+      if ((t === 'progress' || t === 'meter') && n.hasAttribute('value')) { vn = parseFloat(n.getAttribute('value')); vmin = parseFloat(n.getAttribute('min')) || 0; vmax = parseFloat(n.getAttribute('max')) || 1; }
+      if (!isNaN(vn)) o.vn = vn;
+      if (!isNaN(vmin) && !isNaN(vmax)) { o.vmin = vmin; o.vmax = vmax; }
+      var vt = axAttr(n, 'aria-valuetext'); if (vt) o.v = vt;
+    }
+    return o;
+  }
+  // every element's ax in document order, for a host without a view and for
+  // tests against Chromium's accessibility tree
+  G.__axTree = function () {
+    var out = [];
+    function walk(n, depth) {
+      for (var i = 0; i < n._c.length; i++) {
+        var k = n._c[i];
+        if (k._attrs === undefined) continue;
+        if (axHidden(k)) continue;
+        var ax = axOf(k);
+        if (ax && ax.h) continue;
+        if (ax) { var e = { depth: depth }; for (var q in ax) e[q] = ax[q]; out.push(e); }
+        walk(k._sr || k, depth + (ax ? 1 : 0));
+      }
+    }
+    if (doc && doc.body) walk(doc.body, 0);
+    return JSON.stringify(out);
+  };
   var RENDER_ATTRS = { src: 1, alt: 1, href: 1, placeholder: 1, type: 1, role: 1, 'aria-label': 1, 'aria-hidden': 1, 'aria-expanded': 1, 'aria-selected': 1, 'aria-checked': 1, title: 1, viewBox: 1, d: 1, points: 1, cx: 1, cy: 1, r: 1, rx: 1, ry: 1, x: 1, y: 1, x1: 1, y1: 1, x2: 1, y2: 1, width: 1, height: 1, transform: 1, 'fill-rule': 1, 'clip-rule': 1, 'stroke-linecap': 1, 'stroke-linejoin': 1, tabindex: 1, contenteditable: 1, id: 1, class: 1, style: 1, rows: 1, clear: 1, colspan: 1, rowspan: 1, span: 1 };
   // a grid-lanes container goes to the layout as a grid that says which
   // axis its lanes are across (grid-lanes: column | row, fill-reverse,
@@ -9415,6 +10260,8 @@
       // the padding box over the background: the host draws no shadows, so
       // it is the background it makes
       if (s['box-shadow'] && s['box-shadow'].indexOf('inset') >= 0) insetFill(s);
+      // the outer layers as the host draws them: rings and one drop shadow
+      if (s['box-shadow'] && s['box-shadow'] !== 'none') shadowLayers(s, cs.color);
       var own = {};
       for (var ok in s) own[ok] = s[ok];
       Object.defineProperty(cs, '_own', { value: own, enumerable: false, configurable: true, writable: true });
@@ -9505,6 +10352,8 @@
     // in them is dropped above)
     if (cs.display === 'table-cell' && n._colCut) { if (!a) a = {}; a.colspan = String(n._colCut); }
     if (a) o.a = a;
+    var ax = axOf(n);
+    if (ax) o.ax = ax;
     if (n._ia) o.ia = 1;
     if (n.scrollTop || n.scrollLeft) o.sc = [n.scrollLeft, n.scrollTop];
     if (o.t === 'svg:svg') {
@@ -9554,7 +10403,12 @@
       return o;
     }
     if (n.localName === 'textarea') src = [];
-    src = paintOrder(src);
+    // (the children far from the viewport, virtWindow, first: their
+    // styles are not looked at for the painting order, they are of a
+    // signature that is not positioned)
+    var vw0 = asJson ? virtWindow(n, cs, src) : null, src0 = src;
+    src = paintOrder(src, vw0);
+    if (vw0 && src !== src0) { virtDrop(n); vw0 = null; }
     // (a replaced element has no ::before or ::after box)
     var leaf = /^(input|textarea|select|img|br|hr|iframe|video|audio)$/.test(n.localName) || !!picUrl;
     if (cs.display !== 'none') ctrApply(cs, n.parentNode, n);
@@ -9576,7 +10430,7 @@
       if (kdj) for (kn0 = 0; kn0 < kids.length; kn0++) kdj.push(kids[kn0]);
       // (the children far from the viewport: runs of them as boxes of
       // their height, virtWindow)
-      var vw = virtWindow(n, cs, src), vrun = -1;
+      var vw = vw0, vrun = -1;
       for (var jj = 0; jj < src.length; jj++) {
         if (vw) {
           if (!vw.on[jj]) { if (vrun < 0) vrun = jj; continue; }
@@ -10360,6 +11214,33 @@
   // calc() of % and px terms only, with numbers multiplying them, as one
   // value: `calc(50% - 30%*.5)` is 35% (the host reads one % and one px
   // term at most); anything else as it was
+  // box-shadow's outer layers for the host (it draws no CSS shadows):
+  // "box-ring" the layers with no offset and no blur but a spread, as a
+  // focus ring is (Bootstrap's 0 0 0 .25rem, Tailwind's ring-*), "spread
+  // rgba(...)" by ", " topmost first; "box-drop" the first blurred or
+  // offset one, "dx dy blur rgba(...)" (EVG has one shadow per box)
+  function shadowLayers(s, color) {
+    var layers = splitComma(s['box-shadow']), rings = [], drop = null;
+    for (var i = 0; i < layers.length; i++) {
+      var toks = splitValue(layers[i]), lens = [], col = null, inset = false;
+      for (var j = 0; j < toks.length; j++) {
+        var t = toks[j];
+        if (t === 'inset') { inset = true; continue; }
+        if (/^calc\(/.test(t)) t = flatCalc(t);
+        if (/^-?[\d.]+(px)?$/.test(t)) { lens.push(parseFloat(t)); continue; }
+        col = t;
+      }
+      if (inset || lens.length < 2) continue;
+      var c = colorRGBA(!col || col === 'currentcolor' ? color || 'rgb(0, 0, 0)' : col);
+      if (!c || !(c[3] > 0)) continue;
+      var rgba = 'rgba(' + Math.round(c[0]) + ',' + Math.round(c[1]) + ',' + Math.round(c[2]) + ',' + (Math.round(c[3] * 1000) / 1000) + ')';
+      var dx = lens[0], dy = lens[1], blur = lens[2] || 0, spread = lens[3] || 0;
+      if (!dx && !dy && !blur) { if (spread > 0) rings.push(fmtPx(spread) + ' ' + rgba); }
+      else if (!drop) drop = fmtPx(dx) + ' ' + fmtPx(dy) + ' ' + fmtPx(blur) + ' ' + rgba;
+    }
+    if (rings.length) s['box-ring'] = rings.join(', ');
+    if (drop) s['box-drop'] = drop;
+  }
   function insetFill(s) {
     var v = s['box-shadow'].trim(), m = /^inset\s+(.*)$/.exec(v) || /^(.*?)\s+inset$/.exec(v);
     if (!m || v.indexOf(',', v.lastIndexOf(')') + 1) >= 0) return;
@@ -10562,11 +11443,11 @@
   // host draws in tree order and knows no z-index (React Flow's background
   // comes after its z-index: 2 viewport, a selected node gets 1000). In-flow
   // children keep their order, so the layout does not change.
-  function paintOrder(src) {
+  function paintOrder(src, vw) {
     var keyed = null;
     for (var i = 0; i < src.length; i++) {
       var e = src[i];
-      if (e.nodeType !== 1) continue;
+      if (vw && !vw.on[i] || e.nodeType !== 1) continue;
       var cs = computedOf(e);
       // (one with neither top nor bottom keeps its place: its static
       // position is under the boxes before it)
@@ -10720,9 +11601,21 @@
   // while __virtAgain() says so, before it paints.
   var VIRT_GUESS = 24, virts = [], virtOn = false, virtAgain = false, virtR = { gen: -1 };
   G.__virtRows = function (on) { virtOn = !!on; changed(); return String(virtOn); };
-  var vstat = { sig: 0, plan: 0, again: 0, info: 0, rules: 0, why: [] };
-  G.__virtStats = function () { var o = JSON.stringify(vstat); vstat = { sig: 0, plan: 0, again: 0, info: 0, rules: 0, why: [] }; return o; };
+  var vstat = { sig: 0, plan: 0, base: 0, again: 0, info: 0, rules: 0, why: [] };
+  G.__virtStats = function () { var o = JSON.stringify(vstat); vstat = { sig: 0, plan: 0, base: 0, again: 0, info: 0, rules: 0, why: [] }; return o; };
   G.__virtAgain = function () { var a = virtAgain; virtAgain = false; return a ? '1' : ''; };
+  G.__virtDbg = function () {
+    var o = [];
+    virts.forEach(function (st) {
+      var p = st.plan; if (!p || p.on.length < 100) return;
+      var cnt = {}, mode = 0, mc = 0;
+      p.pitch.forEach(function (v) { cnt[v] = (cnt[v] || 0) + 1; if (cnt[v] > mc) { mc = cnt[v]; mode = v; } });
+      var odd = []; p.pitch.forEach(function (v, i) { if (v !== mode && p.src[i]._attrs !== undefined) odd.push(i + ':' + v); });
+      var runs = [], a = -1; for (var i = 0; i <= p.on.length; i++) { var on = i < p.on.length && p.on[i]; if (on && a < 0) a = i; if (!on && a >= 0) { runs.push(a + '-' + (i - 1)); a = -1; } }
+      o.push('mode ' + mode + ' odd ' + odd.slice(0, 20).join(' ') + ' on ' + runs.join(','));
+    });
+    return o.join(' | ');
+  };
   G.__virtState = function () {
     return JSON.stringify(virts.map(function (st) {
       var k = 0, p = st.plan;
@@ -10879,8 +11772,10 @@
     var out = '', texts = [], els = 0, ok = true;
     (function walk(e, pi) {
       if (!ok) return;
-      var nt = e.nodeType;
-      if (nt === 3 || nt === 4) {
+      var at = e._attrs;
+      if (at === undefined) {
+        var nt = e.nodeType;
+        if (nt !== 3 && nt !== 4) return;
         var t = e._data;
         if (!t) return;
         var tw = virtTextW(t);
@@ -10889,13 +11784,12 @@
         out += '#' + pi;
         return;
       }
-      if (nt !== 1) return;
       // (a child of more than a few hundred elements is no row: a page's
       // table under its wrapper, walked at every render)
       if (els > 300 || e.namespaceURI !== HTML_NS || VIRT_LEAF[e.localName] === 1 || e._sr || e._ab || (e._waapi && e._waapi.length)) { ok = false; return; }
-      var me = els++, s = '<' + e.localName, at = e._attrs;
+      var me = els++, s = '<' + e.localName;
       for (var a = 0; a < at.length; a++) {
-        var nm = at[a].name, v = at[a].value;
+        var nm = at[a].name, v = at[a]._v;
         if (nm === 'class') s += ' class=' + v;
         else if (nm === 'style') { if (v.indexOf('var(') >= 0) { ok = false; return; } s += ' style=' + v; }
         else if (nm === 'id') { if (R.ids[v]) s += ' id=' + v; }
@@ -10923,24 +11817,49 @@
       els.push(x);
       for (var j = 0; j < x._c.length; j++) walk(x._c[j]);
     })(e);
-    var info = { plain: false, W: [], extra: [], blockOf: [], fs: [], bold: [], pre: [] };
+    var info = { plain: false, W: [], extra: [], blockOf: [], fs: [], bold: [], pre: [] }, frow = [], free = [];
     for (var i = 0; i < els.length && ok; i++) {
       var x = els[i], c = computedOf(x), disp = c.display || 'inline';
       var tf = c.transform;
       if ((c.position && c.position !== 'static' && c.position !== 'relative') || (c.float && c.float !== 'none') || (tf && tf !== 'none') || (c.translate && c.translate !== 'none') || (c.rotate && c.rotate !== 'none') || (c.scale && c.scale !== 'none')) ok = false;
       if (c.position === 'relative' && ((c.top && c.top !== 'auto' && virtPx(c.top)) || (c.bottom && c.bottom !== 'auto' && virtPx(c.bottom)))) ok = false;
       if (disp === 'list-item' && c['list-style-position'] === 'inside') ok = false;
-      if (/^(inline-)?(flex|grid)$/.test(disp) || disp === 'contents' || /^ruby/.test(disp) || (c.columns && c.columns !== 'auto auto') || (c['column-count'] && c['column-count'] !== 'auto')) ok = false;
+      // (a flex box of one line, in a row: as high as its highest item,
+      // each item one line while all of them fit side by side)
+      var fx = /^(inline-)?flex$/.test(disp) && /^row/.test(c['flex-direction'] || 'row') && (c['flex-wrap'] || 'nowrap') === 'nowrap';
+      if (fx) frow[i] = 1;
+      if (!fx && /^(inline-)?(flex|grid)$/.test(disp) || disp === 'contents' || /^ruby/.test(disp) || (c.columns && c.columns !== 'auto auto') || (c['column-count'] && c['column-count'] !== 'auto')) ok = false;
       // a rule that depends on the place and changes boxes, where it could match
       for (var r = 0; r < R.pos.length && ok; r++) if (virtMatch(x, R.pos[r].parts, 0, e, reps)) ok = false;
-      var inl = disp === 'inline' || disp === 'inline-block';
       var pi = i === 0 ? -1 : els.indexOf(x.parentNode);
+      var item = pi >= 0 && frow[pi] && disp !== 'none', inl = !item && (disp === 'inline' || disp === 'inline-block');
+      // (a block under an item as wide as its content: not known)
+      if (pi >= 0 && free[pi] && !inl && disp !== 'none') ok = false;
       info.blockOf[i] = inl && pi >= 0 ? info.blockOf[pi] : i;
       info.fs[i] = virtPx(c['font-size']) || 16;
       info.bold[i] = parseInt(c['font-weight'], 10) >= 600;
       info.pre[i] = /^(pre|pre-wrap|pre-line|break-spaces)$/.test(c['white-space'] || '');
       var hor = virtPx(c['padding-left']) + virtPx(c['padding-right']) + virtPx(c['border-left-width']) + virtPx(c['border-right-width']);
-      if (!inl) {
+      if (item) {
+        // an item: its own block when its width is set, else its text is
+        // counted in the flex box's line; the flex box's line holds each
+        // item's outer width and the gaps between them
+        var mar = Math.max(0, virtPx(c['margin-left'])) + Math.max(0, virtPx(c['margin-right']));
+        var fw = /px$/.test(c.width || '') ? c.width : /px$/.test(c['flex-basis'] || '') ? c['flex-basis'] : null;
+        var bb = c['box-sizing'] === 'border-box', pc = computedOf(x.parentNode), gap = virtPx(pc['column-gap'] || pc.gap);
+        var outer = mar + (frow[pi]++ > 1 ? gap : 0);
+        if (fw !== null) {
+          var px = virtPx(fw);
+          info.W[i] = bb ? px - hor : px;
+          outer += bb ? px : px + hor;
+          info.extra[i] = 0;
+        } else {
+          info.blockOf[i] = info.blockOf[pi];
+          free[i] = true;
+          outer += hor;
+        }
+        info.extra[pi] = (info.extra[pi] || 0) + outer;
+      } else if (!inl) {
         var b = boxes[x.__id];
         // (a row of a collapsed table has no box: its cells have)
         if (!b) { if (disp !== 'none' && !/^table-row/.test(disp)) ok = false; info.W[i] = /^table-row/.test(disp) ? Infinity : 0; }
@@ -10985,7 +11904,7 @@
         if (sum < 99.9) return info;
       }
     } else {
-      if (!/^(block|flow-root|list-item|table)$/.test(rc.display) || virtPx(rc['margin-top']) || virtPx(rc['margin-bottom'])) return info;
+      if (!/^(block|flow-root|list-item|table|flex)$/.test(rc.display) || virtPx(rc['margin-top']) || virtPx(rc['margin-bottom'])) return info;
     }
     info.plain = true;
     return info;
@@ -10994,6 +11913,14 @@
   function virtFits(c, info) {
     var t = c._vsg && c._vsg.t;
     if (!t) return false;
+    // (the same texts against the same laid-out child: the same answer)
+    var m = c._vft;
+    if (m && m[0] === t && m[1] === info) return m[2];
+    var r = virtFitsNow(t, info);
+    c._vft = [t, info, r];
+    return r;
+  }
+  function virtFitsNow(t, info) {
     var sum = [];
     for (var i = 0; i < t.length; i++) {
       var pi = t[i][0];
@@ -11047,55 +11974,97 @@
     }
     return t <= u ? [t, u] : null;
   }
-  // which children render: the plan for n's children src now
-  function virtPlan(n, cs, src, st) {
-    vstat.plan++;
-    var R = virtRules(), tbl = cs.display === 'table-row-group', len = src.length;
-    var wk = virtWidth(n), act = doc._active, h = viewport.h, ctx = R.fp + '|' + virtInh(cs);
-    var on = new Array(len), pitch = new Array(len), pos = new Array(len + 1), guess = false, seen = {}, unk = [];
-    var sv = tbl && st.sv ? st.sv : 0;
+  // what the plan knows of each child apart from where the viewport is:
+  // kept while the children, their subtrees, the width, the rules and what
+  // the layouts told (st.ver) are the same, so a scroll over 10 000 rows
+  // does not look into each of them again
+  function virtBase(n, cs, src, st, R, wk, ctx) {
+    var b = st.base, len = src.length, ws = cs['white-space'] || '', i, e;
+    if (b && b.wk === wk && b.ctx === ctx && b.ver === st.ver && b.len === len && b.ws === ws) {
+      for (i = 0; i < len; i++) { e = src[i]; if (b.src[i] !== e || b.rv[i] !== (e._attrs !== undefined ? e._rv : e._data)) break; }
+      if (i === len) { vstat.base++; return b; }
+    }
+    var cull = new Array(len), pitch = new Array(len), pos = new Array(len + 1), unk = [], sigs = new Array(len), rv = new Array(len), seen = {}, guess = false;
     // (the guess for a child of no known height: one of the known ones)
-    var g = VIRT_GUESS;
+    var g = VIRT_GUESS, tk = '|' + wk + '|' + ctx, tried = st.tried[tk];
     for (var rk in st.refs) { g = st.refs[rk].pitch; break; }
-    var top = st.top !== null ? st.top : (boxes[n.__id] ? boxes[n.__id][1] : null);
-    var y0 = top === null ? null : scrollAbove(n) - top;
     pos[0] = 0;
-    for (var i = 0; i < len; i++) {
-      var e = src[i], p = -1, cull = false;
-      if (e.nodeType !== 1) {
+    for (i = 0; i < len; i++) {
+      e = src[i];
+      var p = -1, cu = false;
+      if (e._attrs === undefined) {
+        rv[i] = e._data;
         // (white space between the rows: nothing; anything else: all of them)
-        if ((e.nodeType === 3 || e.nodeType === 4) && !/[^ \t\n\r\f]/.test(e._data) && !/^pre|^break/.test(cs['white-space'] || '')) { on[i] = false; pitch[i] = 0; pos[i + 1] = pos[i]; continue; }
+        if ((e.nodeType === 3 || e.nodeType === 4) && !/[^ \t\n\r\f]/.test(e._data) && !/^pre|^break/.test(ws)) { cull[i] = true; pitch[i] = 0; pos[i + 1] = pos[i]; sigs[i] = null; continue; }
+        st.base = null;
         return null;
       }
+      rv[i] = e._rv;
       var sig = virtSig(e, R), ref = sig !== null ? st.refs[sig] : null;
+      sigs[i] = sig;
       if (ref && (ref.wk !== wk || ref.ctx !== ctx)) ref = null;
-      if (e._vp !== undefined && e._vpk === e._rv + '|' + wk + '|' + ctx) p = e._vp;
-      if (ref && ref.info.plain && virtFits(e, ref.info)) { cull = true; if (p < 0) p = ref.pitch; }
+      if (e._vp !== undefined && e._vpr === e._rv && e._vpk === tk) p = e._vp;
+      if (ref && ref.info.plain && virtFits(e, ref.info)) { cu = true; if (p < 0) p = ref.pitch; }
       else if (sig !== null && !ref) {
         // (none of its kind laid out yet: the first two render, the
         // others are guessed until they are)
         var sn = seen[sig] = (seen[sig] || 0) + 1;
-        if (sn > 2 && !st.tried[sig + '|' + wk + '|' + ctx]) { cull = true; guess = true; if (p < 0) p = g; }
+        if (sn > 2 && !(tried && tried[sig])) { cu = true; guess = true; if (p < 0) p = g; }
       }
       if (p < 0) { p = g; guess = true; unk[i] = true; }
-      if (cull && (st.pins.indexOf(e) >= 0 || (act && act !== e && e.contains(act)) || act === e)) cull = false;
-      on[i] = !cull;
+      cull[i] = cu;
       e._vpi = i;
       pitch[i] = p;
       pos[i + 1] = pos[i] + p;
     }
+    b = st.base = { wk: wk, ctx: ctx, ver: st.ver, len: len, ws: ws, src: src.slice(), rv: rv, cull: cull, pitch: pitch, pos: pos, unk: unk, sigs: sigs, guess: guess };
+    return b;
+  }
+  function virtSameKids(a, b) {
+    if (a === b) return true;
+    if (a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+  // which children render: the plan for n's children src now
+  function virtPlan(n, cs, src, st) {
+    vstat.plan++;
+    var R = virtRules(), tbl = cs.display === 'table-row-group', len = src.length, i;
+    var wk = virtWidth(n), act = doc._active, h = viewport.h, ctx = R.fp + '|' + virtInh(cs);
+    var sv = tbl && st.sv ? st.sv : 0;
+    var base = virtBase(n, cs, src, st, R, wk, ctx);
+    if (!base) return null;
+    var pitch = base.pitch, pos = base.pos, guess = base.guess, unk = base.unk, on = new Array(len);
+    for (i = 0; i < len; i++) on[i] = !base.cull[i];
+    // (a child a script asked the geometry of, and the one holding the
+    // focused element: rendered)
+    for (i = 0; i < st.pins.length; i++) { var pe = st.pins[i]; if (src[pe._vpi] === pe) on[pe._vpi] = true; }
+    if (act) { for (var q = act; q && q.parentNode !== n; q = q.parentNode); if (q && src[q._vpi] === q) on[q._vpi] = true; }
+    var top = st.top !== null ? st.top : (boxes[n.__id] ? boxes[n.__id][1] : null);
+    var y0 = top === null ? null : scrollAbove(n) - top;
+    // (the children rendered last still cover the viewport and half a
+    // viewport either way: the same ones, so that a scroll renders the
+    // rows again only every half viewport, not at each wheel turn)
+    var last = st.plan;
+    if (y0 !== null && last && last.wk === wk && virtSameKids(last.src, src)) {
+      var lo2 = y0 - h / 2, hi2 = y0 + 1.5 * h, keep = true;
+      for (i = 0; i < len && keep; i++) if (!last.on[i] && pos[i + 1] > lo2 && pos[i] < hi2 && src[i]._attrs !== undefined) keep = false;
+      if (keep) { for (i = 0; i < len; i++) if (last.on[i]) on[i] = true; }
+      else last = null;
+    } else last = null;
     // near the viewport: a viewport above it to one below
-    if (y0 !== null) {
+    if (last) {}
+    else if (y0 !== null) {
       var lo = y0 - h, hi = y0 + 2 * h;
-      for (i = 0; i < len; i++) if (!on[i] && src[i].nodeType === 1 && pos[i + 1] > lo && pos[i] < hi) on[i] = true;
+      for (i = 0; i < len; i++) if (!on[i] && pos[i + 1] > lo && pos[i] < hi && src[i]._attrs !== undefined) on[i] = true;
     } else {
       // (where the box is not known yet: its first viewports, by the guess)
-      for (i = 0; i < len && pos[i] < 2 * h; i++) if (src[i].nodeType === 1) on[i] = true;
+      for (i = 0; i < len && pos[i] < 2 * h; i++) if (src[i]._attrs !== undefined) on[i] = true;
       guess = true;
     }
     // (a rendered child of no known pitch: the next one renders too, so
     // that the layout gives its pitch)
-    for (i = 0; i < len; i++) if (on[i] && unk[i]) for (var nk = i + 1; nk < len; nk++) if (src[nk].nodeType === 1) { on[nk] = true; break; }
+    for (i in unk) { i = +i; if (on[i]) for (var nk = i + 1; nk < len; nk++) if (src[nk]._attrs !== undefined) { on[nk] = true; break; } }
     // the runs left out, as their heights: what the plan is known by
     var runs = [], a = -1;
     for (i = 0; i <= len; i++) {
@@ -11103,7 +12072,7 @@
       if (off && a < 0) a = i;
       if (!off && a >= 0) { runs.push(a + ':' + i + ':' + Math.round((pos[i] - pos[a]) * 100)); a = -1; }
     }
-    return { on: on, pitch: pitch, pos: pos, guess: guess, wk: wk, sv: sv, key: runs.join(','), tbl: tbl, src: src.slice(), cs: cs };
+    return { on: on, pitch: pitch, pos: pos, guess: guess, wk: wk, sv: sv, key: runs.join(','), tbl: tbl, src: base.src, cs: cs, base: base };
   }
   // the spacer for children [a, b) of the plan
   function virtSpacer(plan, a, b) {
@@ -11126,7 +12095,7 @@
     // (under a transform the viewport is not where the boxes say)
     for (var q = n; q && q.nodeType === 1; q = q.parentNode) { var qc = computedOf(q), tf = qc.transform; if ((tf && tf !== 'none') || (qc.zoom && qc.zoom !== '1' && qc.zoom !== 'normal')) return virtDrop(n); }
     var st = n._virt;
-    if (!st) { st = n._virt = { el: n, top: null, refs: {}, tried: {}, pins: [], plan: null, sv: 0, why: '' }; virts.push(st); }
+    if (!st) { st = n._virt = { el: n, top: null, refs: {}, tried: {}, pins: [], plan: null, base: null, ver: 0, sv: 0, why: '' }; virts.push(st); }
     if (tbl) { var tb = n.parentNode && n.parentNode.nodeType === 1 ? computedOf(n.parentNode) : null; st.sv = tb && tb['border-collapse'] !== 'collapse' ? virtPx(String(tb['border-spacing'] || '0').split(/\s+/).pop()) : 0; }
     var plan = virtPlan(n, cs, src, st);
     if (!plan) return virtDrop(n);
@@ -11141,49 +12110,55 @@
       if (!plan) continue;
       var again = false, src = plan.src, len = src.length, R = virtRules();
       if (measure) {
-        var wk = virtWidth(n), bands = new Array(len), j, reps = [], rseen = {}, ctx = R.fp + '|' + virtInh(computedOf(n));
+        var wk = virtWidth(n), bands = new Array(len), j, reps = [], rseen = {}, ctx = R.fp + '|' + virtInh(computedOf(n)), tk = '|' + wk + '|' + ctx;
         // (the others of the box, one of each signature)
+        var sigs = plan.base && plan.base.src === src ? plan.base.sigs : null;
         for (j = 0; j < len && !reps.over; j++) {
           var se = src[j];
-          if (se.nodeType !== 1) continue;
-          var ss = virtSig(se, R);
+          if (se._attrs === undefined) continue;
+          var ss = sigs ? sigs[j] : virtSig(se, R);
           if (ss !== null && rseen[ss]) continue;
           if (ss !== null) rseen[ss] = true;
           reps.push(se);
           if (reps.length > 40) reps.over = true;
         }
-        for (j = 0; j < len; j++) if (plan.on[j] && src[j].nodeType === 1) bands[j] = virtBand(src[j]);
+        for (j = 0; j < len; j++) if (plan.on[j] && src[j]._attrs !== undefined) bands[j] = virtBand(src[j]);
         // where the box starts: a rendered child's top less what is above it
         st.top = null;
         for (j = 0; j < len; j++) if (bands[j]) { st.top = bands[j][0] - plan.pos[j]; break; }
         if (st.top === null && boxes[n.__id]) st.top = boxes[n.__id][1];
         // each rendered child's pitch: to the next one's top, or its height
         for (j = 0; j < len; j++) {
+          if (!plan.on[j]) continue;
           var bd = bands[j], e = src[j];
-          if (e.nodeType !== 1 || !plan.on[j]) continue;
-          var sig = virtSig(e, R);
-          if (sig !== null) st.tried[sig + '|' + wk + '|' + ctx] = true;
+          if (e._attrs === undefined) continue;
+          var sig = virtSig(e, R), same = e._vpr === e._rv && e._vpk === tk;
+          if (sig !== null) { var tr = st.tried[tk] || (st.tried[tk] = {}); if (!tr[sig]) { tr[sig] = true; st.ver++; } }
           // (nothing laid out: nothing to its height)
-          if (!bd) { if (!boxes[e.__id]) { e._vp = 0; e._vpk = e._rv + '|' + wk + '|' + ctx; } continue; }
+          if (!bd) { if (!boxes[e.__id] && (e._vp !== 0 || !same)) { e._vp = 0; e._vpr = e._rv; e._vpk = tk; st.ver++; } continue; }
           var nx = -1;
-          for (var k = j + 1; k < len; k++) { if (!plan.on[k]) break; if (src[k].nodeType === 1) { nx = k; break; } }
+          for (var k = j + 1; k < len; k++) { if (!plan.on[k]) break; if (src[k]._attrs !== undefined) { nx = k; break; } }
           // (the last before a run left out: its height is not its pitch in
           // a collapsed table, the border below it is shared; the plan
           // renders the next one too while its pitch is not known)
           var p = nx >= 0 && bands[nx] ? bands[nx][0] - bd[0] : nx < 0 && k >= len ? bd[1] - bd[0] + st.sv : -1;
+          // (the first after a run left out, in a table: the border above
+          // it is not shared with a row as it is in the full table, so the
+          // top of its band is not where it is there)
+          if (p >= 0 && plan.tbl) { for (var pv = j - 1; pv >= 0 && src[pv]._attrs === undefined; pv--); if (pv >= 0 && !plan.on[pv]) p = -1; }
           if (p < 0) continue;
-          e._vp = p;
-          e._vpk = e._rv + '|' + wk + '|' + ctx;
+          if (e._vp !== p || !same) { e._vp = p; e._vpr = e._rv; e._vpk = tk; st.ver++; }
           if (sig === null) continue;
           var ref = st.refs[sig];
           if (!ref || ref.wk !== wk || ref.ctx !== ctx || !ref.info.plain) {
             var info = virtRefInfo(e, R, plan.tbl, reps);
-            if (!ref || ref.wk !== wk || ref.ctx !== ctx || info.plain && virtFits(e, info)) st.refs[sig] = { pitch: p, wk: wk, ctx: ctx, info: info, rel: virtRel(e, bd[0]) };
+            if (!ref || ref.wk !== wk || ref.ctx !== ctx || info.plain && virtFits(e, info)) { st.refs[sig] = { pitch: p, wk: wk, ctx: ctx, info: info, rel: virtRel(e, bd[0]) }; st.ver++; }
           }
         }
       }
-      // the plan again from what is known now
-      var np = virtPlan(n, plan.cs, src, st);
+      // the plan again from what is known now (a scroll changes nothing
+      // that the plan is made of: no plan again for it)
+      var np = measure ? virtPlan(n, plan.cs, src, st) : plan;
       if (!np) again = true;
       // (the same runs of the same heights: the render would be the same)
       else if (measure) again = np.key !== plan.key;
@@ -11191,7 +12166,7 @@
         // (a scroll: only when the viewport, half a viewport either way,
         // reaches a child left out)
         var y0 = st.top === null ? 0 : scrollAbove(n) - st.top, lo = y0 - viewport.h / 2, hi = y0 + 1.5 * viewport.h;
-        for (j = 0; j < len && !again; j++) if (!plan.on[j] && src[j].nodeType === 1 && plan.pos[j + 1] > lo && plan.pos[j] < hi) again = true;
+        for (j = 0; j < len && !again; j++) if (!plan.on[j] && plan.pos[j + 1] > lo && plan.pos[j] < hi && src[j]._attrs !== undefined) again = true;
       }
       if (again) {
         st.why = measure ? 'layout' : 'scroll';
@@ -11613,11 +12588,21 @@
     return found;
   }
   function elementOf(n) { while (n && n.nodeType !== 1) n = n.parentNode; return n; }
+  // the pointer's cursor over the hovered element (CSS UI 4 cursor; auto is
+  // text over a text field or text, default elsewhere, as a host draws it)
+  G.__cursor = function () {
+    var e = hoverEl;
+    if (!e || !e.isConnected) return 'default';
+    var c = String(computedOf(e).cursor || 'auto').split(',').pop().trim();
+    if (c !== 'auto') return c;
+    if (textEntry(e)) return 'text';
+    return 'default';
+  };
   var clickCount = 0, lastDown = 0, downTarget = null;
   function mods(m) { return { ctrlKey: !!m.ctrl, shiftKey: !!m.shift, altKey: !!m.alt, metaKey: !!m.meta }; }
   function mouseInit(m, extra) {
     var o = mods(m);
-    o.bubbles = true; o.cancelable = true; o.composed = true; o.view = G;
+    o.bubbles = true; o.cancelable = true; o.composed = true; o.view = G; o._host = true;
     o.clientX = m.x || 0; o.clientY = m.y || 0; o.button = m.button || 0; o.buttons = m.buttons || 0;
     for (var k in extra) o[k] = extra[k];
     return o;
@@ -11630,16 +12615,31 @@
     // transforms (a node of a zoomed React Flow viewport), the boxes do
     if (m.x !== undefined && (!target || !hittable(target) || (transformedUnder(target) && !under(target, m.x, m.y)))) target = hitTest(m.x, m.y) || target;
     var t = m.type;
+    // (a captured pointer's moves and release go to the capturing element,
+    // wherever the pointer is: a slider's thumb dragged past its track)
+    var cap = doc && doc._cap && doc._cap.el.isConnected ? doc._cap.el : null;
+    if (doc && doc._cap && !cap) { doc._cap.el._capture = undefined; doc._cap = null; }
+    if (cap && (t === 'move' || t === 'up')) target = cap;
     // a release without the host's node ends the press where it began,
     // unless that is in transformed content (where the boxes are the truth)
     if (t === 'up' && m.target === undefined && downTarget && downTarget.isConnected && !transformedUnder(downTarget)) target = downTarget;
     // a press, release or key is a user gesture (window.open may follow)
     if ((t === 'down' || t === 'up' || t === 'key') && typeof G.__activate === 'function') G.__activate();
+    if (t === 'leave') {
+      // the pointer left the host's view: nothing is hovered
+      if (hoverEl) {
+        var gone = hoverEl;
+        hoverEl = null;
+        pointerStateChanged(gone, null);
+        if (gone.isConnected) { dispatch(gone, new PointerEvent('pointerout', mouseInit(m, {}))); dispatch(gone, new MouseEvent('mouseout', mouseInit(m, {}))); leaveEnter(gone, null, m); }
+      }
+      return 'ok';
+    }
     if (t === 'move') {
       if (picker && target && picker.kind === 'select') { var pmi = pickerItemOf(target); if (pmi && pmi._pickIndex !== undefined && pmi._pickIndex !== picker.at) pickerMark(pmi._pickIndex); }
       if (rangeDrag && rangeDrag.el.isConnected && m.x !== undefined) rangeAt(rangeDrag.el, m.x);
       var over = target || (doc && doc.documentElement);
-      if (over !== hoverEl) {
+      if (over !== hoverEl && !cap) {
         var old = hoverEl;
         hoverEl = over;
         pointerStateChanged(old, over);
@@ -11675,7 +12675,7 @@
       if (okm) {
         // focus moves to the focusable element under the pointer
         var f = target;
-        while (f && f.nodeType === 1 && !focusable(f)) f = f.parentNode;
+        while (f && f.nodeType === 1 && !focusable(f) && !(f._sr && f._sr.delegatesFocus)) f = composedParent(f);
         doc._focusVisible = false;
         if (f && f.nodeType === 1) focusElement(f); else if (doc._active) focusElement(null);
         // (a select opens its option list)
@@ -11699,6 +12699,8 @@
       if (rangeDrag) { var rd = rangeDrag; rangeDrag = null; if (rd.el.isConnected && rd.el.value !== rd.from) dispatch(rd.el, new Event('change', { bubbles: true })); }
       dispatch(tgt, new PointerEvent('pointerup', mouseInit(m, { detail: clickCount })));
       dispatch(tgt, new MouseEvent('mouseup', mouseInit(m, { detail: clickCount })));
+      // (the release ends a capture: lostpointercapture after pointerup)
+      if (doc._cap) { var lc = doc._cap.el; doc._cap = null; lc._capture = undefined; if (lc.isConnected) dispatch(lc, new PointerEvent('lostpointercapture', { bubbles: true, composed: true, pointerId: 1 })); }
       var wasActive = activeEl;
       activeEl = null;
       pointerStateChanged(wasActive, null);
@@ -11803,6 +12805,10 @@
   // inline position (start, center, end, nearest), within its scroll range.
   // Boxes are the last layout's, in page coordinates before any scroll.
   function scrollIntoView(el, arg) {
+    // (where it is now: cmdk scrolls its selected item into view in the
+    // layout effect after Radix's accordion set its open height, and the
+    // page came out 36 px short of the browser's)
+    if (el.isConnected) reflow();
     var b = el.isConnected ? boxes[el.__id] : null;
     if (!b) return;
     var o = arg === false ? { block: 'end', inline: 'nearest' } : arg && typeof arg === 'object' ? arg : {};
@@ -11812,6 +12818,7 @@
       if (how === 'start') t = start;
       else if (how === 'end') t = start + size - view;
       else if (how === 'center') t = start + size / 2 - view / 2;
+      else if (how === 'if-needed') t = start < cur || start + size > cur + view ? start + size / 2 - view / 2 : cur;
       else if (start < cur) t = size > view ? start + size - view : start;
       else if (start + size > cur + view) t = size > view ? start : start + size - view;
       else t = cur;
@@ -11819,7 +12826,7 @@
     }
     // scroll between el and the container (what the inner containers moved)
     var inner = [];
-    for (var n = el.parentNode; n && n.nodeType === 1; n = n.parentNode) {
+    for (var n = composedParent(el); n && n.nodeType === 1; n = composedParent(n)) {
       var nb = boxes[n.__id];
       if (n === doc.documentElement || !nb) { inner.push(n); continue; }
       var cs = computedOf(n), oy = cs['overflow-y'] || 'visible', ox = cs['overflow-x'] || 'visible';
@@ -11833,11 +12840,16 @@
         if (ny !== (n.scrollTop || 0) || nx !== (n.scrollLeft || 0)) { n.scrollTop = ny; n.scrollLeft = nx; scrolled(n); dispatch(n, new Event('scroll')); }
       }
       inner.push(n);
+      // (a fixed box is the viewport's: what is around it and the page do
+      // not move it. Radix Select scrolls its chosen item into view in its
+      // fixed list, and the page jumped)
+      if (nb && n !== doc.documentElement && computedOf(n).position === 'fixed') return;
     }
+    if (computedOf(el).position === 'fixed') return;
     var root = doc && doc.documentElement;
     if (!root || (computedOf(root)['overflow-y'] || '') === 'hidden') return;
     var ry = 0;
-    for (var m = el.parentNode; m && m.nodeType === 1 && m !== root; m = m.parentNode) ry += m.scrollTop || 0;
+    for (var m = composedParent(el); m && m.nodeType === 1 && m !== root; m = composedParent(m)) ry += m.scrollTop || 0;
     var dtop = pos(b[1] - ry, b[3], viewport.h, root.scrollTop || 0, block, Math.max(0, pageHeight() - viewport.h));
     if (dtop !== (root.scrollTop || 0)) { root.scrollTop = dtop; scrolled(root); dispatch(doc, new Event('scroll')); }
   }
@@ -11888,6 +12900,8 @@
     if (k === ' ') return 'Space';
     return k;
   }
+  // a control a press focuses with :focus-visible (it takes typed text)
+  function textEntry(el) { return isTextControl(el) || !!(el && el.isContentEditable); }
   function isTextControl(el) {
     if (!el) return false;
     if (el.localName === 'textarea') return true;
@@ -11991,11 +13005,22 @@
   }
   function keyDefault(el, m) {
     var k = m.key;
+    // (Escape cancels the topmost modal dialog: cancel, then close)
+    if (k === 'Escape' && !picker) {
+      var md = topModal();
+      if (md) { if (dispatch(md, new Event('cancel', { cancelable: true }))) md.close(); return; }
+    }
     if (picker && picker.kind !== 'select' && (k === 'Escape' || k === 'Enter' || k === 'Tab')) { pickerClose(); if (k !== 'Tab') return; }
     if (k === 'Tab') {
       var order = tabOrder();
       if (!order.length) return;
       var i = order.indexOf(el);
+      // (from an element that is no stop, a host's inner one or a
+      // tabindex=-1 box: the stop it is in, else the next one after it)
+      if (i < 0 && el && el.nodeType === 1 && el !== doc.body) {
+        for (var q = 0; q < order.length; q++) if (composedContains(order[q], el) || composedContains(el, order[q])) { i = q; break; }
+        if (i < 0) { for (q = 0; q < order.length; q++) if (el.compareDocumentPosition && (el.compareDocumentPosition(order[q]) & 4)) break; i = m.shift ? q : q - 1; }
+      }
       var next = m.shift ? order[(i <= 0 ? order.length : i) - 1] : order[(i + 1) % order.length];
       focusElement(next);
       return;
@@ -12647,7 +13672,7 @@
     return v;
   }
   var VALIDATION_MSG = { valueMissing: 'Please fill out this field.', typeMismatch: 'Please enter a valid value.', patternMismatch: 'Please match the requested format.', rangeUnderflow: 'Value must be greater than or equal to the minimum.', rangeOverflow: 'Value must be less than or equal to the maximum.', stepMismatch: 'Please enter a valid value.', badInput: 'Please enter a number.' };
-  function controlInvalid(el) { return willValidateOf(el) && !validityOf(el).valid; }
+  function controlInvalid(el) { if (el._internals && el.constructor.formAssociated) return el._internals.willValidate && !el._internals.validity.valid; return willValidateOf(el) && !validityOf(el).valid; }
   // a form or fieldset is :invalid when a control it holds is
   function groupInvalid(g) {
     var bad = false;
@@ -12805,6 +13830,12 @@
     mediaDevices: { getUserMedia: function () { return Promise.reject(DOMException('Permission denied', 'NotAllowedError')); }, enumerateDevices: function () { return Promise.resolve([]); }, addEventListener: function () {} },
     serviceWorker: undefined,
     storage: { estimate: function () { return Promise.resolve({ quota: 0, usage: 0 }); }, persist: function () { return Promise.resolve(false); } },
+    // (no position here: every request is answered as a denied permission)
+    geolocation: {
+      getCurrentPosition: function (ok, err) { if (typeof err === 'function') setTimeout(function () { err({ code: 1, message: 'User denied Geolocation', PERMISSION_DENIED: 1, POSITION_UNAVAILABLE: 2, TIMEOUT: 3 }); }, 0); },
+      watchPosition: function (ok, err) { this.getCurrentPosition(ok, err); return 1; },
+      clearWatch: function () {}
+    },
     sendBeacon: function () { return false; },
     vibrate: function () { return false; },
     share: function () { return Promise.reject(DOMException('Share canceled', 'AbortError')); },
@@ -13291,6 +14322,484 @@
   };
   G.__querySelector = function (s) { var e = doc && doc.querySelector(s); return e ? String(e.__id) : ''; };
   G.__webdom = { restyleAll: function () { changed(); }, computedOf: computedOf, cascade: cascade, parseSelectorList: parseSelectorList, normalizeColor: normalizeColor, resolveURL: resolveURL, nodeById: nodeById, lengthPx: lengthPx };
+
+  // ---- interfaces and members found missing against Chromium --------------
+  // (bench/cases/webapi-survey: the globals and prototype members UI
+  // libraries reach for; what a page can use here behaves as in Chromium,
+  // what needs a network, threads or a database the host does not give
+  // (WebSocket, Worker, indexedDB...) is left out so feature tests see it
+  // missing)
+  (function () {
+    function iface(name, parent, obj) {
+      var C = function () { throw new TypeError('Illegal constructor'); };
+      Object.defineProperty(C, 'name', { value: name });
+      C.prototype = Object.create(parent ? parent.prototype : Object.prototype);
+      Object.defineProperty(C.prototype, 'constructor', { value: C, writable: true, configurable: true });
+      Object.defineProperty(C.prototype, Symbol.toStringTag, { value: name, configurable: true });
+      if (parent) Object.setPrototypeOf(C, parent);
+      if (obj) Object.setPrototypeOf(obj, C.prototype);
+      install(name, C);
+      return C;
+    }
+    function def(proto, name, get, set) { Object.defineProperty(proto, name, { get: get, set: set, configurable: true, enumerable: true }); }
+    iface('Navigator', null, navigator);
+    iface('History', null, history);
+    var perf = iface('Performance', EventTarget, performance);
+    perf.prototype.toJSON = function () { return { timeOrigin: this.timeOrigin, timing: this.timing, navigation: this.navigation }; };
+    iface('Screen', EventTarget, screen);
+    var StorageC = iface('Storage', null, G.localStorage);
+    Object.setPrototypeOf(G.sessionStorage, StorageC.prototype);
+    iface('CustomElementRegistry', null, customElements);
+    if (G.location) iface('Location', null, G.location); else iface('Location', null, null);
+    iface('StyleSheetList', null, null);
+    iface('FileList', null, null);
+    if (G.crypto) iface('Crypto', null, G.crypto);
+    install('Selection', Selection);
+    install('AbstractRange', AbstractRange);
+    install('PopStateEvent', PopStateEvent);
+    install('HashChangeEvent', HashChangeEvent);
+    install('PageTransitionEvent', PageTransitionEvent);
+    install('StorageEvent', StorageEvent);
+    install('TouchEvent', TouchEvent);
+    install('Touch', Touch);
+
+    // MediaList (CSSOM 4.1): a sheet's media
+    class MediaList {
+      constructor(text) { this._m = []; this.mediaText = text || ''; }
+      get mediaText() { return this._m.join(', '); }
+      set mediaText(v) { this._m = String(v || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean); }
+      get length() { return this._m.length; }
+      item(i) { return this._m[i] === undefined ? null : this._m[i]; }
+      appendMedium(m) { m = String(m).trim(); if (this._m.indexOf(m) < 0) this._m.push(m); }
+      deleteMedium(m) { var i = this._m.indexOf(String(m).trim()); if (i < 0) throw DOMException('Failed to delete medium.', 'NotFoundError'); this._m.splice(i, 1); }
+      toString() { return this.mediaText; }
+    }
+    install('MediaList', MediaList);
+    def(CSSStyleSheet.prototype, 'media', function () { var m = this._mediaList; if (!m) { var o = this._media0; m = this._mediaList = new MediaList(o && o.mediaText || ''); } return m; }, function (v) { this.media.mediaText = typeof v === 'string' ? v : v && v.mediaText || ''; });
+    if (!('ownerRule' in CSSStyleSheet.prototype)) CSSStyleSheet.prototype.ownerRule = null;
+
+    // VisualViewport: the layout viewport, scale 1
+    var VV = iface('VisualViewport', EventTarget, null);
+    var vv = Object.create(VV.prototype);
+    vv._ls = null;
+    def(vv, 'width', function () { return viewport.w; });
+    def(vv, 'height', function () { return viewport.h; });
+    def(vv, 'scale', function () { return 1; });
+    def(vv, 'offsetLeft', function () { return 0; });
+    def(vv, 'offsetTop', function () { return 0; });
+    def(vv, 'pageLeft', function () { return G.scrollX || 0; });
+    def(vv, 'pageTop', function () { return G.scrollY || 0; });
+    vv.onresize = null; vv.onscroll = null; vv.onscrollend = null;
+    install('visualViewport', vv);
+    G.addEventListener('resize', function () { var ev = new Event('resize'); if (typeof vv.onresize === 'function') vv.onresize(ev); dispatch(vv, ev); });
+    // (a script cannot close a window it did not open)
+    install('close', function () {});
+
+    // Node
+    Node.prototype.lookupPrefix = function (ns) {
+      if (!ns) return null;
+      for (var n = this.nodeType === 1 ? this : this.parentNode; n && n.nodeType === 1; n = n.parentNode) {
+        if (n.namespaceURI === ns && n.prefix) return n.prefix;
+      }
+      return null;
+    };
+    Node.prototype.isDefaultNamespace = function (ns) { return (ns || null) === this.lookupNamespaceURI(null); };
+    var lookupNS0 = Node.prototype.lookupNamespaceURI;
+    Node.prototype.lookupNamespaceURI = function (prefix) {
+      prefix = prefix || null;
+      if (prefix === 'xml') return 'http://www.w3.org/XML/1998/namespace';
+      if (prefix === 'xmlns') return 'http://www.w3.org/2000/xmlns/';
+      var n = this.nodeType === 9 ? this.documentElement : this.nodeType === 1 ? this : this.parentNode;
+      for (; n && n.nodeType === 1; n = n.parentNode) {
+        if (n.namespaceURI && (n.prefix || null) === prefix) return n.namespaceURI;
+        var v = n.getAttribute(prefix ? 'xmlns:' + prefix : 'xmlns');
+        if (v !== null) return v || null;
+      }
+      return lookupNS0.call(this, prefix);
+    };
+
+    // Element
+    var EP = Element.prototype, HP = HTMLElement.prototype;
+    EP.removeAttributeNode = function (a) {
+      if (!a || this._attrs.indexOf(a) < 0) throw DOMException("Failed to execute 'removeAttributeNode' on 'Element': The node provided is owned by another element.", 'NotFoundError');
+      this.removeAttribute(a.name);
+      a.ownerElement = null;
+      return a;
+    };
+    EP.setAttributeNodeNS = EP.setAttributeNode;
+    EP.getAttributeNodeNS = function (ns, n) { return this.getAttributeNode(n); };
+    EP.getElementsByTagNameNS = function (ns, t) {
+      var root = this, any = ns === '*', all = t === '*';
+      ns = ns === '' ? null : ns;
+      return liveCollection(function () {
+        var out = [];
+        eachElement(root, function (e) { if ((any || (e.namespaceURI || null) === ns) && (all || e.localName === t)) out.push(e); });
+        return out;
+      });
+    };
+    Document.prototype.getElementsByTagNameNS = EP.getElementsByTagNameNS;
+    DocumentFragment.prototype.getElementsByTagNameNS = EP.getElementsByTagNameNS;
+    def(EP, 'part', function () { return this._part || (this._part = new DOMTokenList(this, 'part')); }, function (v) { this.setAttribute('part', v); });
+    // (CSSOM View 6: display: none on it or above it, or content-visibility:
+    // hidden above it; opacity and visibility when asked)
+    EP.checkVisibility = function (o) {
+      o = o || {};
+      if (!this.isConnected) return false;
+      for (var n = this; n && n.nodeType === 1; n = upFlat(n)) {
+        var cs = computedOf(n);
+        if (cs.display === 'none') return false;
+        if (n !== this && cs['content-visibility'] === 'hidden') return false;
+        if ((o.checkOpacity || o.opacityProperty) && parseFloat(cs.opacity) === 0) return false;
+      }
+      if ((o.checkVisibilityCSS || o.visibilityProperty) && computedOf(this).visibility !== 'visible') return false;
+      return true;
+    };
+    // (a declarative shadow root, <template shadowrootmode>, in the text
+    // becomes the element's shadow root, HTML 8.5)
+    function declarativeShadow(root) {
+      var ts = [];
+      eachElement(root, function (e) { if (e.localName === 'template' && e.hasAttribute('shadowrootmode')) ts.push(e); });
+      for (var i = ts.length - 1; i >= 0; i--) {
+        var t = ts[i], host = t.parentNode, mode = t.getAttribute('shadowrootmode');
+        if (!host || host.nodeType !== 1 || host._sr || (mode !== 'open' && mode !== 'closed')) continue;
+        var sr = host.attachShadow({ mode: mode, delegatesFocus: t.hasAttribute('shadowrootdelegatesfocus'), clonable: t.hasAttribute('shadowrootclonable'), serializable: t.hasAttribute('shadowrootserializable') });
+        sr.appendChild(t.content);
+        host.removeChild(t);
+      }
+    }
+    EP.setHTMLUnsafe = function (html) {
+      var target = this.localName === 'template' && this.content ? this.content : this;
+      removeAll(target);
+      var frag = parseFragment(String(html), this);
+      declarativeShadow(frag);
+      target.appendChild(frag);
+    };
+    ShadowRoot.prototype.setHTMLUnsafe = EP.setHTMLUnsafe;
+    Document.parseHTMLUnsafe = function (html) { return new DOMParser().parseFromString(String(html), 'text/html'); };
+    function openTag(c) { var t = '<' + c._qname; for (var i = 0; i < c._attrs.length; i++) t += ' ' + c._attrs[i].name + '="' + escapeAttr(c._attrs[i]._v) + '"'; return t + '>'; }
+    function htmlWithShadows(node, o) {
+      var roots = (o && o.shadowRoots) || [], ser = o && o.serializableShadowRoots, out = '';
+      var kids = node.nodeType === 1 && node.localName === 'template' && node.content ? node.content._c : node._c;
+      for (var i = 0; i < kids.length; i++) {
+        var c = kids[i];
+        if (c.nodeType !== 1 || (c.namespaceURI === HTML_NS && VOID.test(c._qname))) { out += serialize(c, false); continue; }
+        var inner = '', sr = c._sr;
+        if (sr && ((ser && sr._serializable) || roots.indexOf(sr) >= 0)) inner = '<template shadowrootmode="' + sr.mode + '"' + (sr.delegatesFocus ? ' shadowrootdelegatesfocus=""' : '') + (sr._serializable ? ' shadowrootserializable=""' : '') + (sr._clonable ? ' shadowrootclonable=""' : '') + (sr._slotMode === 'manual' ? ' shadowrootslotassignment="manual"' : '') + '>' + htmlWithShadows(sr, o) + '</template>';
+        out += openTag(c) + inner + htmlWithShadows(c, o) + '</' + c._qname + '>';
+      }
+      return out;
+    }
+    EP.getHTML = function (o) { if (!o || (!o.serializableShadowRoots && !(o.shadowRoots && o.shadowRoots.length)) || !shadowCount) return this.localName === 'template' && this.content ? serializeChildren(this.content) : serializeChildren(this); return htmlWithShadows(this, o); };
+    ShadowRoot.prototype.getHTML = function (o) { return o && (o.serializableShadowRoots || (o.shadowRoots && o.shadowRoots.length)) ? htmlWithShadows(this, o) : serializeChildren(this); };
+    EP.requestFullscreen = function () { return Promise.reject(new TypeError('Permissions check failed')); };
+    EP.webkitRequestFullscreen = function () {};
+    if (!('fullscreenEnabled' in Document.prototype)) def(Document.prototype, 'fullscreenEnabled', function () { return false; });
+
+    // ARIA reflection (ARIA 1.3, 10.1): role and aria-* as nullable strings,
+    // the element references by id within the same tree
+    var ARIA = ['ariaAtomic', 'ariaAutoComplete', 'ariaBrailleLabel', 'ariaBrailleRoleDescription', 'ariaBusy', 'ariaChecked', 'ariaColCount', 'ariaColIndex', 'ariaColIndexText', 'ariaColSpan', 'ariaCurrent', 'ariaDescription', 'ariaDisabled', 'ariaExpanded', 'ariaHasPopup', 'ariaHidden', 'ariaInvalid', 'ariaKeyShortcuts', 'ariaLabel', 'ariaLevel', 'ariaLive', 'ariaModal', 'ariaMultiLine', 'ariaMultiSelectable', 'ariaOrientation', 'ariaPlaceholder', 'ariaPosInSet', 'ariaPressed', 'ariaReadOnly', 'ariaRelevant', 'ariaRequired', 'ariaRoleDescription', 'ariaRowCount', 'ariaRowIndex', 'ariaRowIndexText', 'ariaRowSpan', 'ariaSelected', 'ariaSetSize', 'ariaSort', 'ariaValueMax', 'ariaValueMin', 'ariaValueNow', 'ariaValueText'];
+    function ariaAttr(p) { return p === 'role' ? 'role' : 'aria-' + p.slice(4).toLowerCase(); }
+    ['role'].concat(ARIA).forEach(function (p) {
+      var a = ariaAttr(p);
+      def(EP, p, function () { return this.getAttribute(a); }, function (v) { if (v === null || v === undefined) this.removeAttribute(a); else this.setAttribute(a, v); });
+    });
+    var ARIA_REFS = { ariaActiveDescendantElement: 'aria-activedescendant', ariaControlsElements: 'aria-controls', ariaDescribedByElements: 'aria-describedby', ariaDetailsElements: 'aria-details', ariaErrorMessageElements: 'aria-errormessage', ariaFlowToElements: 'aria-flowto', ariaLabelledByElements: 'aria-labelledby', ariaOwnsElements: 'aria-owns' };
+    Object.keys(ARIA_REFS).forEach(function (p) {
+      var a = ARIA_REFS[p], one = !/Elements$/.test(p);
+      def(EP, p, function () {
+        var set = this._ariaRefs && this._ariaRefs[p];
+        if (set !== undefined && this.getAttribute(a) === '') { set = (one ? [set] : set).filter(function (e) { return e && e.isConnected; }); return one ? set[0] || null : set.length ? set : null; }
+        var v = this.getAttribute(a);
+        if (v === null) return null;
+        var root = this.getRootNode(), ids = v.trim().split(/\s+/), out = [];
+        for (var i = 0; i < ids.length; i++) { var e = root.getElementById ? root.getElementById(ids[i]) : root.querySelector && root.querySelector('#' + G.CSS.escape(ids[i])); if (e) out.push(e); }
+        return one ? out[0] || null : out.length ? out : null;
+      }, function (v) {
+        if (v === null || v === undefined) { if (this._ariaRefs) delete this._ariaRefs[p]; this.removeAttribute(a); return; }
+        (this._ariaRefs || (this._ariaRefs = {}))[p] = one ? v : Array.from(v);
+        this.setAttribute(a, '');
+      });
+    });
+    def(EP, 'elementTiming', function () { return this.getAttribute('elementtiming') || ''; }, function (v) { this.setAttribute('elementtiming', v); });
+
+    // HTMLElement
+    reflect(HTMLElement, ['autocapitalize']);
+    def(HP, 'enterKeyHint', function () { var v = (this.getAttribute('enterkeyhint') || '').toLowerCase(); return /^(enter|done|go|next|previous|search|send)$/.test(v) ? v : ''; }, function (v) { this.setAttribute('enterkeyhint', v); });
+    def(HP, 'inputMode', function () { var v = (this.getAttribute('inputmode') || '').toLowerCase(); return /^(none|text|tel|url|email|numeric|decimal|search)$/.test(v) ? v : ''; }, function (v) { this.setAttribute('inputmode', v); });
+    def(HP, 'translate', function () { for (var n = this; n && n.nodeType === 1; n = n.parentNode) { var t = n.getAttribute('translate'); if (t === '' || t === 'yes') return true; if (t === 'no') return false; } return true; }, function (v) { this.setAttribute('translate', v ? 'yes' : 'no'); });
+    def(HP, 'nonce', function () { return this._nonce !== undefined ? this._nonce : this.getAttribute('nonce') || ''; }, function (v) { this._nonce = String(v); });
+    if (!Object.getOwnPropertyDescriptor(HP, 'autofocus')) reflectBool(HTMLElement, ['autofocus']);
+    def(SVGElement.prototype, 'nonce', function () { return this.getAttribute('nonce') || ''; }, function (v) { this.setAttribute('nonce', v); });
+
+    // ElementInternals (HTML 4.13.7): form-associated custom elements, their
+    // value, validity, custom states and default ARIA
+    class CustomStateSet {
+      constructor(el) { this._el = el; this._s = new Set(); }
+      get size() { return this._s.size; }
+      has(v) { return this._s.has(v); }
+      add(v) { if (!this._s.has(v)) { this._s.add(v); changed(); } return this; }
+      delete(v) { var r = this._s.delete(v); if (r) changed(); return r; }
+      clear() { if (this._s.size) { this._s.clear(); changed(); } }
+      forEach(fn, self) { var t = this; this._s.forEach(function (v) { fn.call(self, v, v, t); }); }
+      values() { return this._s.values(); }
+      keys() { return this._s.values(); }
+      entries() { return this._s.entries(); }
+      [Symbol.iterator]() { return this._s.values(); }
+    }
+    var VFLAGS = ['valueMissing', 'typeMismatch', 'patternMismatch', 'tooLong', 'tooShort', 'rangeUnderflow', 'rangeOverflow', 'stepMismatch', 'badInput', 'customError'];
+    class ElementInternals {
+      constructor(el) { this._el = el; this._value = null; this._state = null; this._flags = {}; this._msg = ''; this._anchor = null; this.states = new CustomStateSet(el); }
+      _fa() { if (!this._el.constructor || !this._el.constructor.formAssociated) throw DOMException("Failed to execute on 'ElementInternals': The target element is not a form-associated custom element.", 'NotSupportedError'); }
+      get shadowRoot() { return this._el._sr || null; }
+      setFormValue(v, state) { this._fa(); this._value = v; this._state = state === undefined ? v : state; }
+      get form() { this._fa(); return formOf(this._el); }
+      get labels() { this._fa(); return labelsOf(this._el); }
+      get willValidate() { this._fa(); var e = this._el; if (e.hasAttribute("disabled") || e.hasAttribute("readonly")) return false; for (var n = e.parentNode; n && n.nodeType === 1; n = n.parentNode) if (n.localName === "fieldset" && n.hasAttribute("disabled")) return false; return true; }
+      get validity() {
+        this._fa();
+        var f = this._flags, v = {};
+        VFLAGS.forEach(function (k) { v[k] = !!f[k]; });
+        v.valid = !VFLAGS.some(function (k) { return f[k]; });
+        return v;
+      }
+      get validationMessage() { this._fa(); return this.validity.valid ? '' : this._msg; }
+      setValidity(flags, msg, anchor) {
+        this._fa();
+        flags = flags || {};
+        var bad = VFLAGS.some(function (k) { return flags[k]; });
+        if (bad && !msg) throw new TypeError("Failed to execute 'setValidity' on 'ElementInternals': The second argument should not be empty if one or more flags in the first argument are true.");
+        var f = {}; VFLAGS.forEach(function (k) { f[k] = !!flags[k]; });
+        this._flags = f; this._msg = bad ? String(msg) : ''; this._anchor = anchor || null;
+        attrChanged(this._el); validityChanged(this._el);
+      }
+      checkValidity() { this._fa(); if (!this.willValidate || this.validity.valid) return true; dispatch(this._el, new Event('invalid', { cancelable: true })); return false; }
+      reportValidity() { return this.checkValidity(); }
+    }
+    ['role'].concat(ARIA).forEach(function (p) { ElementInternals.prototype[p] = null; });
+    Object.keys(ARIA_REFS).forEach(function (p) { ElementInternals.prototype[p] = null; });
+    install('ElementInternals', ElementInternals);
+    install('CustomStateSet', CustomStateSet);
+    HP.attachInternals = function () {
+      if (this._internals) throw DOMException("Failed to execute 'attachInternals' on 'HTMLElement': ElementInternals for the specified element was already attached.", 'NotSupportedError');
+      if (this.localName.indexOf('-') < 0 || !customElementsRegistry[this.localName]) throw DOMException("Failed to execute 'attachInternals' on 'HTMLElement': Unable to attach ElementInternals to non-custom elements.", 'NotSupportedError');
+      if (this.constructor.disabledFeatures && Array.from(this.constructor.disabledFeatures).indexOf('internals') >= 0) throw DOMException("Failed to execute 'attachInternals' on 'HTMLElement': ElementInternals is disabled by disabledFeature static field.", 'NotSupportedError');
+      return (this._internals = new ElementInternals(this));
+    };
+    G.__internalsOf = function (el) { return el._internals || null; };
+
+    // HTMLSelectElement, HTMLDialogElement
+    HTMLSelectElement.prototype.showPicker = function () {
+      if (isDisabled(this)) throw DOMException("Failed to execute 'showPicker' on 'HTMLSelectElement': HTMLSelectElement::showPicker() cannot be used on immutable controls.", 'InvalidStateError');
+    };
+    var DP = HTMLDialogElement.prototype;
+    def(DP, 'returnValue', function () { return this._rv0 === undefined ? '' : this._rv0; }, function (v) { this._rv0 = String(v); });
+    DP.requestClose = function (rv) {
+      if (!this.open) return;
+      if (!dispatch(this, new Event('cancel', { cancelable: true }))) return;
+      this.close(rv);
+    };
+    reflect(HTMLDialogElement, []);
+    def(DP, 'closedBy', function () { var v = (this.getAttribute('closedby') || '').toLowerCase(); return /^(any|closerequest|none)$/.test(v) ? v : this._modal ? 'closerequest' : 'none'; }, function (v) { this.setAttribute('closedby', v); });
+
+    // ShadowRoot, HTMLSlotElement
+    var SP = ShadowRoot.prototype;
+    def(SP, 'slotAssignment', function () { return this._slotMode || 'named'; });
+    def(SP, 'clonable', function () { return !!this._clonable; });
+    def(SP, 'serializable', function () { return !!this._serializable; });
+    SP.elementsFromPoint = function (x, y) { var out = []; for (var e = hitTest(x, y); e && e.nodeType === 1; e = upFlat(e)) { var t = retarget(e, this); if (t && t.nodeType === 1 && out.indexOf(t) < 0) out.push(t); } return out; };
+    SP.getSelection = function () { return selection; };
+    SP.getAnimations = function () { var out = []; eachElement(this, function (e) { if (e._waapi) e._waapi.forEach(function (a) { if (animationRelevant(a)) out.push(a); }); }); return out; };
+    var attach0 = EP.attachShadow;
+    EP.attachShadow = function (init) {
+      var r = attach0.call(this, init);
+      if (init) { r._slotMode = init.slotAssignment === 'manual' ? 'manual' : 'named'; r._clonable = !!init.clonable; r._serializable = !!init.serializable; }
+      return r;
+    };
+    HTMLSlotElement.prototype.assign = function () {
+      var nodes = Array.prototype.slice.call(arguments), self = this;
+      (this._manual || []).forEach(function (n) { if (n._manualSlot === self) n._manualSlot = null; });
+      this._manual = nodes;
+      for (var i = 0; i < nodes.length; i++) nodes[i]._manualSlot = this;
+      changed();
+      var sr = shadowRootOf(this);
+      if (sr) scheduleSlots(this);
+    };
+
+    // HTMLMediaElement: no media pipeline here; the state of a media
+    // element that has nothing loaded (HAVE_NOTHING), as Chromium gives
+    // for a source it cannot play
+    var MP = HTMLMediaElement.prototype;
+    reflectBool(HTMLMediaElement, ['loop', 'autoplay', 'controls', 'playsInline', 'disableRemotePlayback']);
+    def(MP, 'muted', function () { return this._muted !== undefined ? this._muted : this.hasAttribute('muted'); }, function (v) { v = !!v; if (v !== this.muted) { this._muted = v; dispatch(this, new Event('volumechange')); } });
+    def(MP, 'defaultMuted', function () { return this.hasAttribute('muted'); }, function (v) { this.toggleAttribute('muted', !!v); });
+    def(MP, 'volume', function () { return this._vol === undefined ? 1 : this._vol; }, function (v) { v = +v; if (!(v >= 0 && v <= 1)) throw DOMException("Failed to set the 'volume' property on 'HTMLMediaElement': The volume provided (" + v + ') is outside the range [0, 1].', 'IndexSizeError'); if (v !== this.volume) { this._vol = v; dispatch(this, new Event('volumechange')); } });
+    def(MP, 'playbackRate', function () { return this._rate === undefined ? 1 : this._rate; }, function (v) { this._rate = +v; dispatch(this, new Event('ratechange')); });
+    def(MP, 'defaultPlaybackRate', function () { return this._drate === undefined ? 1 : this._drate; }, function (v) { this._drate = +v; });
+    def(MP, 'currentTime', function () { return this._ct || 0; }, function (v) { this._ct = +v || 0; });
+    def(MP, 'duration', function () { return NaN; });
+    def(MP, 'paused', function () { return this._paused === undefined ? true : this._paused; });
+    def(MP, 'ended', function () { return false; });
+    def(MP, 'seeking', function () { return false; });
+    def(MP, 'readyState', function () { return 0; });
+    def(MP, 'networkState', function () { return this.getAttribute('src') ? 3 : 0; });
+    def(MP, 'error', function () { return null; });
+    def(MP, 'currentSrc', function () { var v = this.getAttribute('src'); return v ? resolveURL(v) : ''; });
+    def(MP, 'srcObject', function () { return this._srcObj || null; }, function (v) { this._srcObj = v; });
+    def(MP, 'buffered', function () { return { length: 0, start: function () { throw DOMException('Index out of range.', 'IndexSizeError'); }, end: function () { throw DOMException('Index out of range.', 'IndexSizeError'); } }; });
+    def(MP, 'seekable', function () { return this.buffered; });
+    def(MP, 'played', function () { return this.buffered; });
+    reflect(HTMLMediaElement, ['preload', 'crossOrigin']);
+    urlProp(HTMLMediaElement, ['src']);
+    // (nothing ever loads: the element plays as one whose source is still
+    // being fetched, its promise waits)
+    MP.play = function () { if (this._paused !== false) { this._paused = false; dispatch(this, new Event('play')); } return new Promise(function () {}); };
+    MP.pause = function () { if (this._paused === false) { this._paused = true; dispatch(this, new Event('pause')); } };
+    MP.fastSeek = function (t) { this.currentTime = t; };
+    MP.addTextTrack = function () { return { mode: 'disabled', cues: [], addCue: function () {}, removeCue: function () {} }; };
+    def(MP, 'textTracks', function () { return []; });
+    HTMLMediaElement.NETWORK_EMPTY = 0; HTMLMediaElement.NETWORK_IDLE = 1; HTMLMediaElement.NETWORK_LOADING = 2; HTMLMediaElement.NETWORK_NO_SOURCE = 3;
+    HTMLMediaElement.HAVE_NOTHING = 0; HTMLMediaElement.HAVE_METADATA = 1; HTMLMediaElement.HAVE_CURRENT_DATA = 2; HTMLMediaElement.HAVE_FUTURE_DATA = 3; HTMLMediaElement.HAVE_ENOUGH_DATA = 4;
+    def(HTMLVideoElement.prototype, 'videoWidth', function () { return 0; });
+    def(HTMLVideoElement.prototype, 'videoHeight', function () { return 0; });
+    urlProp(HTMLVideoElement, ['poster']);
+
+    // SVGSVGElement: viewBox, width, height as animated values (SVG 2, 4.6)
+    function animLength(el, a, dflt) {
+      var base = { get value() { var v = el.getAttribute(a); if (v === null) return dflt; var n = parseFloat(v); if (/%$/.test(String(v).trim())) { var r = el.getBoundingClientRect(); return a === 'width' ? r.width : r.height; } return isNaN(n) ? dflt : n; }, set value(v) { el.setAttribute(a, String(v)); }, get valueAsString() { var v = el.getAttribute(a); return v === null ? '100%' : v; }, get unitType() { var v = el.getAttribute(a) || '100%'; return /%$/.test(v) ? 2 : /px$/.test(v) ? 5 : 1; } };
+      return { baseVal: base, animVal: base };
+    }
+    def(SVGSVGElement.prototype, 'width', function () { return animLength(this, 'width', 0); });
+    def(SVGSVGElement.prototype, 'height', function () { return animLength(this, 'height', 0); });
+    def(SVGSVGElement.prototype, 'x', function () { return animLength(this, 'x', 0); });
+    def(SVGSVGElement.prototype, 'y', function () { return animLength(this, 'y', 0); });
+    def(SVGSVGElement.prototype, 'viewBox', function () {
+      var el = this;
+      function rect() { var v = el.getAttribute('viewBox'); if (v === null) return null; var p = v.trim().split(/[\s,]+/).map(Number); if (p.length !== 4 || p.some(isNaN)) return null; return p; }
+      var base = {};
+      ['x', 'y', 'width', 'height'].forEach(function (k, i) { def(base, k, function () { var r = rect(); return r ? r[i] : 0; }, function (v) { var r = rect() || [0, 0, 0, 0]; r[i] = +v; el.setAttribute('viewBox', r.join(' ')); }); });
+      return { get baseVal() { return rect() ? base : null; }, get animVal() { return rect() ? base : null; } };
+    });
+    SVGSVGElement.prototype.createSVGRect = function () { return new DOMRect(0, 0, 0, 0); };
+    SVGSVGElement.prototype.createSVGNumber = function () { return { value: 0 }; };
+    SVGSVGElement.prototype.createSVGLength = function () { return { value: 0, unitType: 1, valueAsString: '0', newValueSpecifiedUnits: function (u, v) { this.value = v; this.unitType = u; }, convertToSpecifiedUnits: function () {} }; };
+    SVGSVGElement.prototype.createSVGTransform = function () { return { type: 1, matrix: new DOMMatrix(), angle: 0, setMatrix: function (m) { this.matrix = m; }, setTranslate: function (x, y) { this.matrix = new DOMMatrix().translate(x, y); this.type = 2; }, setScale: function (x, y) { this.matrix = new DOMMatrix().scale(x, y); this.type = 3; }, setRotate: function (a) { this.matrix = new DOMMatrix().rotate(a); this.angle = a; this.type = 4; } }; };
+    SVGSVGElement.prototype.getCurrentTime = function () { return 0; };
+    SVGSVGElement.prototype.pauseAnimations = function () {};
+    SVGSVGElement.prototype.unpauseAnimations = function () {};
+    SVGSVGElement.prototype.forceRedraw = function () {};
+    SVGSVGElement.prototype.suspendRedraw = function () { return 0; };
+    SVGSVGElement.prototype.unsuspendRedraw = function () {};
+    SVGSVGElement.prototype.unsuspendRedrawAll = function () {};
+
+    // CSS.registerProperty (CSS Properties and Values API 1): as @property
+    var registered = {};
+    G.CSS.registerProperty = function (d) {
+      if (!d || typeof d.name !== 'string' || d.name.slice(0, 2) !== '--') throw DOMException("Failed to execute 'registerProperty' on 'CSS': The name provided is not a custom property name.", 'SyntaxError');
+      if (registered[d.name]) throw DOMException("Failed to execute 'registerProperty' on 'CSS': The name provided has already been registered.", 'InvalidModificationError');
+      if (typeof d.inherits !== 'boolean') throw new TypeError("Failed to execute 'registerProperty' on 'CSS': required member inherits is undefined.");
+      var syn = d.syntax === undefined ? '*' : String(d.syntax);
+      if (syn !== '*' && d.initialValue === undefined) throw DOMException("Failed to execute 'registerProperty' on 'CSS': An initial value must be provided if the syntax is not '*'", 'SyntaxError');
+      registered[d.name] = { syntax: syn, inherits: d.inherits, initialValue: d.initialValue };
+      registerProp(d.name, d.inherits, d.initialValue, true);
+    };
+
+    // Blob: bytes() and stream(); Headers: getSetCookie()
+    Blob.prototype.bytes = function () { return Promise.resolve(this._bytes()); };
+    if (typeof G.ReadableStream === 'function') Blob.prototype.stream = function () { var b = this._bytes(); return new G.ReadableStream({ start: function (c) { if (b.length) c.enqueue(b); c.close(); } }); };
+    else Blob.prototype.stream = function () {
+      var b = this._bytes(), done = false;
+      return { locked: false, getReader: function () { return { read: function () { if (done || !b.length) { done = true; return Promise.resolve({ value: undefined, done: true }); } done = true; return Promise.resolve({ value: b, done: false }); }, releaseLock: function () {}, cancel: function () { done = true; return Promise.resolve(); }, closed: Promise.resolve() }; }, cancel: function () { done = true; return Promise.resolve(); }, [Symbol.asyncIterator]: function () { var r = this.getReader(); return { next: function () { return r.read(); }, return: function () { return Promise.resolve({ done: true }); } }; } };
+    };
+    G.Headers.prototype.getSetCookie = function () { var v = this.get('set-cookie'); return v === null ? [] : v.split(/,\s*(?=[^;=\s]+=)/); };
+
+    // FormData (XHR 5): a form's entries as a submission makes them, or
+    // appended ones
+    function formEntries(form, submitter) {
+      var out = [];
+      var els = form.elements || [];
+      for (var i = 0; i < els.length; i++) {
+        var e = els[i], ln = e.localName;
+        if (e._internals && e.constructor.formAssociated) {
+          var it = e._internals, fv = it._value, fnm = e.getAttribute('name');
+          if (isDisabled(e) || e.hasAttribute('disabled') || fv === null || fv === undefined) continue;
+          if (fv instanceof FormData) fv._e.forEach(function (p) { out.push([p[0], p[1]]); });
+          else if (fnm) out.push([fnm, fv]);
+          continue;
+        }
+        if (isDisabled(e) || (e.closest && e.closest('datalist'))) continue;
+        if (ln === 'button' || (ln === 'input' && /^(submit|image|button|reset)$/.test(e.type))) { if (e !== submitter || !e.name) continue; }
+        if (ln === 'fieldset' || ln === 'output' || ln === 'object') continue;
+        var name = e.getAttribute('name');
+        if (ln === 'input' && e.type === 'image' && e === submitter) { var pre = name ? name + '.' : ''; out.push([pre + 'x', '0'], [pre + 'y', '0']); continue; }
+        if (!name) continue;
+        if (ln === 'input' && (e.type === 'checkbox' || e.type === 'radio')) { if (e.checked) out.push([name, e.hasAttribute('value') ? e.getAttribute('value') : 'on']); continue; }
+        if (ln === 'select') { e.options.forEach(function (o) { if (o.selected && !isDisabled(o)) out.push([name, o.value]); }); continue; }
+        if (ln === 'input' && e.type === 'file') { var fs = e.files || []; if (!fs.length) out.push([name, new File([], '', { type: 'application/octet-stream' })]); for (var f = 0; f < fs.length; f++) out.push([name, fs[f]]); continue; }
+        var v = e.value;
+        if (ln === 'textarea') v = String(v).replace(/\r\n?/g, '\n');
+        out.push([name, String(v)]);
+        var dn = e.getAttribute('dirname');
+        if (dn && (ln === 'textarea' || ln === 'input')) out.push([dn, 'ltr']);
+      }
+      return out;
+    }
+    function fdValue(v, fname) {
+      if (v instanceof Blob) {
+        if (!(v instanceof File) || fname !== undefined) { var f = new File([], fname !== undefined ? String(fname) : v instanceof File ? v.name : 'blob', { type: v.type, lastModified: v.lastModified }); f._s = v._s; return f; }
+        return v;
+      }
+      return String(v);
+    }
+    class FormData {
+      constructor(form, submitter) {
+        this._e = [];
+        if (form !== undefined && form !== null) {
+          if (!(form instanceof HTMLFormElement)) throw new TypeError("Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'.");
+          if (submitter && (submitter.form !== form)) throw DOMException("Failed to construct 'FormData': The specified element is not owned by this form element.", 'NotFoundError');
+          this._e = formEntries(form, submitter || null).map(function (p) { return [p[0], fdValue(p[1])]; });
+        }
+      }
+      append(n, v, f) { this._e.push([String(n), fdValue(v, f)]); }
+      delete(n) { n = String(n); this._e = this._e.filter(function (p) { return p[0] !== n; }); }
+      get(n) { n = String(n); for (var i = 0; i < this._e.length; i++) if (this._e[i][0] === n) return this._e[i][1]; return null; }
+      getAll(n) { n = String(n); return this._e.filter(function (p) { return p[0] === n; }).map(function (p) { return p[1]; }); }
+      has(n) { n = String(n); return this._e.some(function (p) { return p[0] === n; }); }
+      set(n, v, f) {
+        n = String(n); v = fdValue(v, f);
+        var i = -1;
+        for (var k = 0; k < this._e.length; k++) if (this._e[k][0] === n) { if (i < 0) { i = k; this._e[k] = [n, v]; } else { this._e.splice(k, 1); k--; } }
+        if (i < 0) this._e.push([n, v]);
+      }
+      forEach(fn, self) { var l = this._e.slice(); for (var i = 0; i < l.length; i++) fn.call(self, l[i][1], l[i][0], this); }
+      entries() { return this._e.map(function (p) { return [p[0], p[1]]; })[Symbol.iterator](); }
+      keys() { return this._e.map(function (p) { return p[0]; })[Symbol.iterator](); }
+      values() { return this._e.map(function (p) { return p[1]; })[Symbol.iterator](); }
+      [Symbol.iterator]() { return this.entries(); }
+      get [Symbol.toStringTag]() { return 'FormData'; }
+    }
+    install('FormData', FormData);
+    G.__formEntries = formEntries;
+    // (a FormData body: urlencoded when every value is text, the way a
+    // host that carries text only can send it; formData() reads either
+    // form back)
+    G.Response.prototype.formData = G.Request.prototype.formData = function () {
+      var self = this, type = (this.headers.get('content-type') || '').toLowerCase();
+      return this.text().then(function (t) {
+        var fd = new FormData();
+        if (type.indexOf('application/x-www-form-urlencoded') >= 0 || !/multipart/.test(type)) { new URLSearchParams(t).forEach(function (v, k) { fd.append(k, v); }); return fd; }
+        var m = /boundary=("?)([^";]+)\1/.exec(type);
+        if (!m) throw new TypeError('Failed to fetch');
+        t.split('--' + m[2]).slice(1, -1).forEach(function (part) {
+          var at = part.indexOf('\r\n\r\n'); if (at < 0) return;
+          var head = part.slice(0, at), body = part.slice(at + 4).replace(/\r\n$/, '');
+          var nm = /name="([^"]*)"/.exec(head), fn = /filename="([^"]*)"/.exec(head), ct = /content-type:\s*([^\r\n]+)/i.exec(head);
+          if (!nm) return;
+          if (fn) fd.append(nm[1], new File([body], fn[1], { type: ct ? ct[1] : '' })); else fd.append(nm[1], body);
+        });
+        return fd;
+      });
+    };
+  })();
 
   // until __page: an empty document
   doc = newDocument('about:blank');

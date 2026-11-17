@@ -4105,8 +4105,12 @@ impl DomView {
         }
         // (a scrolled box's children are laid out where its scroll puts
         // them: web/dom takes their boxes unscrolled, and subtracts every
-        // ancestor's scrollTop itself, getBoundingClientRect)
-        let (esl, est) = (el.borrow().scroll_left, el.borrow().scroll_top);
+        // ancestor's scrollTop itself, getBoundingClientRect). What is added
+        // back is the scroll the layout moved them by (applied): the asked-for
+        // one can be more, when the extent was not measured yet (the root
+        // scrolled by scrollIntoView in a page still being laid out came back
+        // 314 px low in every box until the next scroll)
+        let (esl, est) = (el.borrow().applied_scroll_left, el.borrow().applied_scroll_top);
         if esl != 0.0 || est != 0.0 {
             kf = kf.borrow().then(&DomFrame::shift(esl, est));
         }
@@ -5179,6 +5183,28 @@ impl DomView {
         }
         f
     }
+    /// the corner of the parent that clips a picture filling it (overflow
+    /// not visible, one border-radius, no border or padding, the picture
+    /// 100% by 100%), else empty
+    fn parentClipRadius(&self, s: &Rc<RefCell<JsonValue>>) -> String {
+        if s.borrow().getText("width") != "100%" || s.borrow().getText("height") != "100%" {
+            return String::new();
+        }
+        let pox: String = self.outerS.borrow().getText("overflow-x");
+        let pr: String = self.outerS.borrow().getText("border-top-left-radius");
+        let pbw: String = self.outerS.borrow().getText("border-top-width");
+        let ppd: String = self.outerS.borrow().getText("padding-top");
+        if pox.is_empty() || pox == "visible" || pr.is_empty() || pr == "0px" {
+            return String::new();
+        }
+        if !(pbw.is_empty() || pbw == "0px") || !(ppd.is_empty() || ppd == "0px") {
+            return String::new();
+        }
+        if self.outerS.borrow().getText("border-top-right-radius") != pr || self.outerS.borrow().getText("border-bottom-right-radius") != pr || self.outerS.borrow().getText("border-bottom-left-radius") != pr {
+            return String::new();
+        }
+        pr
+    }
     fn style(&self, e: &Rc<RefCell<EVGElement>>, s: &Rc<RefCell<JsonValue>>, display: &str) {
         // EVG places an element with an inset out of flow; in CSS only an
         // absolute or fixed one is (a relative one's offset is left out)
@@ -5316,6 +5342,16 @@ impl DomView {
             // height definite for what is inside)
             if !(bcf == "column" || bcf == "column-reverse") {
                 basis_skip = "width".to_string();
+            }
+        }
+        // (a percentage basis down a column of no definite height is the
+        // content's, CSS Flexbox 9.2 3 B: the height it says is not where
+        // the item starts. Radix Select's viewport, 36 px tall with flex: 1,
+        // showed one option where Chrome shows them all)
+        if pba_auto && (bcf == "column" || bcf == "column-reverse") && self.wm.is_empty() && !breplaced {
+            let pbh: String = s.borrow().getText("height");
+            if !pbh.is_empty() && pbh != "auto" {
+                basis_skip = "height".to_string();
             }
         }
         // (a cell's percentage width is its column's, of the table: the
@@ -5587,6 +5623,15 @@ impl DomView {
                         }
                     }
                 }
+                // (in a grid flex-start and flex-end are start and end,
+                // CSS Box Alignment 6.1; EVG reads flex-start as its default,
+                // the stretch)
+                if (n == "align-self" || n == "justify-self") && (v == "flex-start" || v == "flex-end") {
+                    let gpd: String = self.outerS.borrow().getText("display");
+                    if gpd == "grid" || gpd == "inline-grid" {
+                        v = if v == "flex-start" { "start".to_string() } else { "end".to_string() };
+                    }
+                }
                 if v != "auto" && (v != "normal" && v != "none") {
                     EVGElement::set_attribute(&e, &n, v.clone());
                 }
@@ -5717,6 +5762,19 @@ impl DomView {
                 }
             }
         }
+        // (so is a flex or grid item's of a container whose height is not
+        // definite and will not be, flexbox 9.8: shadcn's Command, h-full in
+        // a column item of a card in a grid with items-start, was laid out
+        // at a percentage of its parent's zero flex basis, 2 px tall)
+        if self.inFlex && !placed && self.defH < 0.0 && !self.defHMaybe && (bgd == "flex" || bgd == "inline-flex" || bgd == "grid" || bgd == "inline-grid") {
+            let __v_qhi: Vec<String> = vec!["height".to_string(), "min-height".to_string()];
+            for qhn in __v_qhi.iter() {
+                let qhv: String = s.borrow().getText(qhn);
+                if (qhv.as_bytes().len() as i64) > 1 && qhv.ends_with("%") && DomText::index_of(&qhv, "(") < 0 {
+                    EVGElement::set_attribute(&e, qhn, "auto".to_string());
+                }
+            }
+        }
         // (a percentage height of a definite one with an aspect-ratio: in
         // px, so the ratio gives the width it asks for while it is measured,
         // CSS Sizing 4, 5.1)
@@ -5820,6 +5878,14 @@ impl DomView {
         if wv.is_empty() || wv == "auto" {
             let fl0: String = s.borrow().getText("float");
             if display == "inline-block" || (display == "inline-flex" || (display == "inline-grid" || (display == "inline-table" || (fl0 == "left" || fl0 == "right")))) {
+                EVGElement::set_attribute(&e, "width", "fit-content".to_string());
+                fit_w = true;
+            }
+            // (so is a fixed box not held by both insets, CSS 2.1 10.3.7:
+            // EVG lays a fixed box out at the viewport's width. Radix's
+            // popper wrapper, position: fixed; left: 0, spread a Select's
+            // list over the whole page)
+            if pos == "fixed" && display != "grid" && !(s.borrow().has("left") && s.borrow().has("right")) && !fit_w {
                 EVGElement::set_attribute(&e, "width", "fit-content".to_string());
                 fit_w = true;
             }
@@ -6544,17 +6610,37 @@ impl DomView {
                     EVGElement::set_attribute(&e, "lanes-tolerance", gtol.clone());
                 }
             }
-            let gi: String = s.borrow().getText("align-items");
+            // (flex-start and flex-end are start and end in a grid)
+            let mut gi: String = s.borrow().getText("align-items");
+            if gi == "flex-start" || gi == "flex-end" {
+                gi = if gi == "flex-start" { "start".to_string() } else { "end".to_string() };
+            }
             if !gi.is_empty() && gi != "normal" {
                 EVGElement::set_attribute(&e, "align-items", gi.clone());
             }
-            let gj: String = s.borrow().getText("justify-items");
+            let mut gj: String = s.borrow().getText("justify-items");
+            if gj == "flex-start" || gj == "flex-end" {
+                gj = if gj == "flex-start" { "start".to_string() } else { "end".to_string() };
+            }
             if !gj.is_empty() && (gj != "normal" && gj != "legacy") {
                 EVGElement::set_attribute(&e, "justify-items", gj.clone());
             }
             let gc: String = s.borrow().getText("align-content");
             if gc.is_empty() || gc == "normal" {
-                EVGElement::set_attribute(&e, "align-content", "stretch".to_string());
+                // (stretch grows only auto rows, CSS Grid 11.8: with every
+                // row content-sized by min-content or max-content it is
+                // start. EVG stretched them: shadcn's Sheet, auto-rows-min,
+                // spread its Name label and field down the whole sheet)
+                let gar: String = s.borrow().getText("grid-auto-rows").trim().to_string();
+                let gtr: String = s.borrow().getText("grid-template-rows").trim().to_string();
+                let mut keyword_rows: bool = !gar.is_empty() && (gtr.is_empty() || gtr == "none");
+                let gar_list: Vec<String> = DomView::listOf(&gar);
+                for gt in gar_list.iter() {
+                    if gt != "min-content" && gt != "max-content" {
+                        keyword_rows = false;
+                    }
+                }
+                EVGElement::set_attribute(&e, "align-content", if keyword_rows { "start".to_string() } else { "stretch".to_string() });
             }
             return;
         }
@@ -7460,7 +7546,71 @@ impl DomView {
         }
     }
     /// an element and what is inside it
+    /// an element of the page with what it is to a screen reader (`ax`,
+    /// webapi.js's role, name and states) on EVG's a11y fields, from which
+    /// EVGA11yFromTree builds the accessible tree
     fn element(&mut self, n: &Rc<RefCell<JsonValue>>, inh: Rc<RefCell<JsonValue>>) -> Rc<RefCell<EVGElement>> {
+        let e: Rc<RefCell<EVGElement>> = self.elementBody(n, inh);
+        if n.borrow().has("ax") {
+            DomView::applyAx(&e, &n.borrow().get("ax"));
+            // (a form control's drawn text is its value, not its name)
+            let tg: String = n.borrow().getText("t");
+            if tg == "input" || tg == "textarea" || tg == "select" {
+                for k in e.borrow().children.iter().cloned() {
+                    k.borrow_mut().a11y_hidden = true;
+                }
+            }
+        }
+        e
+    }
+    fn axNum(ax: &Rc<RefCell<JsonValue>>, k: &str) -> Option<f64> {
+        let t: String = ax.borrow().getText(k);
+        t.trim().to_string().parse::<f64>().ok()
+    }
+    fn applyAx(e: &Rc<RefCell<EVGElement>>, ax: &Rc<RefCell<JsonValue>>) {
+        if ax.borrow().getInt("h", 0) == 1 {
+            e.borrow_mut().a11y_hidden = true;
+            return;
+        }
+        let role: String = ax.borrow().getText("r");
+        if role.is_empty() {
+            return;
+        }
+        e.borrow_mut().role = role.clone();
+        e.borrow_mut().a11y_label = ax.borrow().getText("n");
+        e.borrow_mut().a11y_description = ax.borrow().getText("d");
+        e.borrow_mut().a11y_value = ax.borrow().getText("v");
+        e.borrow_mut().a11y_checked = ax.borrow().getInt("ck", 0);
+        e.borrow_mut().a11y_pressed = ax.borrow().getInt("pr", 0);
+        e.borrow_mut().a11y_expanded = ax.borrow().getInt("ex", 0);
+        e.borrow_mut().a11y_selected = ax.borrow().getInt("se", 0);
+        e.borrow_mut().a11y_disabled = ax.borrow().getInt("di", 0) == 1;
+        e.borrow_mut().a11y_focusable = ax.borrow().getInt("fo", 0) == 1;
+        e.borrow_mut().a11y_modal = ax.borrow().getInt("mo", 0) == 1;
+        e.borrow_mut().a11y_level = ax.borrow().getInt("lv", 0);
+        e.borrow_mut().a11y_pos_in_set = ax.borrow().getInt("ps", 0);
+        e.borrow_mut().a11y_set_size = ax.borrow().getInt("sz", 0);
+        e.borrow_mut().a11y_has_popup = ax.borrow().getText("hp");
+        e.borrow_mut().a11y_current = ax.borrow().getText("cu");
+        e.borrow_mut().a11y_orientation = ax.borrow().getText("or");
+        e.borrow_mut().a11y_role_description = ax.borrow().getText("rd");
+        e.borrow_mut().a11y_required = if ax.borrow().getInt("rq", 0) == 1 { "true".to_string() } else { "".to_string() };
+        e.borrow_mut().a11y_invalid = if ax.borrow().getInt("iv", 0) == 1 { "true".to_string() } else { "".to_string() };
+        e.borrow_mut().a11y_read_only = if ax.borrow().getInt("ro", 0) == 1 { "true".to_string() } else { "".to_string() };
+        let vn: Option<f64> = DomView::axNum(ax, "vn");
+        if vn.is_some() {
+            e.borrow_mut().a11y_has_value = true;
+            e.borrow_mut().a11y_value_now = (vn.unwrap() + 0.5).floor() as i64;
+        }
+        let vmin: Option<f64> = DomView::axNum(ax, "vmin");
+        let vmax: Option<f64> = DomView::axNum(ax, "vmax");
+        if vmin.is_some() && vmax.is_some() {
+            e.borrow_mut().a11y_has_range = true;
+            e.borrow_mut().a11y_value_min = (vmin.unwrap() + 0.5).floor() as i64;
+            e.borrow_mut().a11y_value_max = (vmax.unwrap() + 0.5).floor() as i64;
+        }
+    }
+    fn elementBody(&mut self, n: &Rc<RefCell<JsonValue>>, inh: Rc<RefCell<JsonValue>>) -> Rc<RefCell<EVGElement>> {
         let band: bool = self.bandOnly;
         self.bandOnly = false;
         let own: String = DomView::wmOf(&inh);
@@ -8193,6 +8343,24 @@ impl DomView {
                 EVGElement::set_attribute(&fte, "min-width", "0px".to_string());
                 EVGElement::add_child(&e, Rc::clone(&icon));
             }
+            // a textarea that resizes: Chromium's grip in its bottom right
+            // corner (unset resize/overflow are Chromium's auto defaults)
+            let rsz: String = s.borrow().getText("resize");
+            let rov: String = s.borrow().getText("overflow-x");
+            if t == "textarea" && rsz != "none" && rov != "visible" && rov != "clip" {
+                let grip: Rc<RefCell<EVGElement>> = EVGElement::create_div();
+                grip.borrow_mut().tag_name = "svg".to_string();
+                EVGElement::set_attribute(&grip, "svg", "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\" viewBox=\"0 0 10 10\"><path d=\"M9 2 L2 9 M9 6 L6 9\" fill=\"none\" stroke=\"#6b6b6b\" stroke-width=\"1\"/></svg>".to_string());
+                EVGElement::set_attribute(&grip, "viewBox", "0 0 10 10".to_string());
+                EVGElement::set_attribute(&grip, "width", "10px".to_string());
+                EVGElement::set_attribute(&grip, "height", "10px".to_string());
+                EVGElement::set_attribute(&grip, "position", "absolute".to_string());
+                // (EVG's insets are of the content box: out over the padding)
+                EVGElement::set_attribute(&grip, "right", format!("{}px", DomView::fmt(1.0 - self.relOff(&s, "padding-right", false))));
+                EVGElement::set_attribute(&grip, "bottom", format!("{}px", DomView::fmt(1.0 - self.relOff(&s, "padding-bottom", false))));
+                EVGElement::set_attribute(&grip, "pointer-events", "none".to_string());
+                EVGElement::add_child(&e, Rc::clone(&grip));
+            }
             // (its outline, a :focus rule's: the control returns before the
             // other elements' outlines are added)
             self.outlineBox(&e, &s, &inh, &display);
@@ -8417,6 +8585,15 @@ impl DomView {
                     }
                     EVGElement::set_attribute(&pic, "svg", sv2.clone());
                     pic.borrow_mut().tag_name = "svg".to_string();
+                    // (a picture filling a parent that clips at rounded
+                    // corners, an avatar's overflow hidden + rounded-full
+                    // around a size-full img: EVG's clips are rectangles, so
+                    // the picture takes the parent's corners, which EVG cuts
+                    // an SVG picture to)
+                    let pcr: String = self.parentClipRadius(&s);
+                    if !pcr.is_empty() && s.borrow().getText("border-top-left-radius").is_empty() {
+                        EVGElement::set_attribute(&pic, "border-radius", pcr);
+                    }
                     // (a picture is cut to its box)
                     EVGElement::set_attribute(&pic, "overflow", "hidden".to_string());
                     pic.borrow_mut().svg_doc = Some(self.svgs.borrow_mut().docOf(&sv2));
@@ -9077,6 +9254,24 @@ impl DomView {
         if indef_item {
             self.defHMaybe = false;
         }
+        // (a grid item or a flex row's item of auto height that is not
+        // stretched is as tall as its content: not definite, so a
+        // percentage height in it is auto. shadcn's Command, h-full in a
+        // card of a grid with items-start, came out 2 px tall)
+        if self.defHMaybe && self.inFlex && (mh.is_empty() || mh == "auto") && mpos != "absolute" && mpos != "fixed" {
+            let ipd: String = self.outerS.borrow().getText("display");
+            let ipdir: String = self.outerS.borrow().getText("flex-direction");
+            let across: bool = ipd == "grid" || ipd == "inline-grid" || ((ipd == "flex" || ipd == "inline-flex") && (ipdir.is_empty() || ipdir == "row" || ipdir == "row-reverse"));
+            if across {
+                let mut ias: String = s.borrow().getText("align-self");
+                if ias.is_empty() || ias == "auto" {
+                    ias = self.outerS.borrow().getText("align-items");
+                }
+                if !(ias.is_empty() || ias == "normal" || ias == "stretch") {
+                    self.defHMaybe = false;
+                }
+            }
+        }
         // a positioned box paints over its in-flow siblings (CSS 2.1
         // Appendix E), whatever their order in the tree
         let ppos: String = s.borrow().getText("position");
@@ -9351,14 +9546,25 @@ impl DomView {
     /// outline-offset out from it, painted over the content; it takes no
     /// room (not an inline's, whose outline follows its line boxes)
     fn outlineBox(&self, e: &Rc<RefCell<EVGElement>>, s: &Rc<RefCell<JsonValue>>, inh: &Rc<RefCell<JsonValue>>, display: &str) {
-        let ost: String = s.borrow().getText("outline-style");
-        if !(ost == "solid" || ost == "dotted" || ost == "dashed") {
-            return;
-        }
         if display.is_empty() || display == "inline" || display == "contents" || (display.starts_with("table-") && display != "table-cell" && display != "table-caption") {
             return;
         }
-        let ow: f64 = DomView::pxOf(&s.borrow().getText("outline-width"));
+        // box-shadow first (webapi.js gives its outer layers as rings and
+        // one drop shadow): under the outline, as CSS paints them
+        self.shadowRings(e, s, display);
+        let mut ost: String = s.borrow().getText("outline-style");
+        let mut ow: f64 = DomView::pxOf(&s.borrow().getText("outline-width"));
+        // (outline-style auto, the browser's focus ring: Chromium draws it
+        // 2px wide whatever the width says)
+        if ost == "auto" {
+            ost = "solid".to_string();
+            if ow < 2.0 {
+                ow = 2.0;
+            }
+        }
+        if !(ost == "solid" || ost == "dotted" || ost == "dashed") {
+            return;
+        }
         if ow <= 0.0 {
             return;
         }
@@ -9370,6 +9576,48 @@ impl DomView {
         if oc.is_empty() {
             oc = "rgb(0, 0, 0)".to_string();
         }
+        self.ringBox(e, s, display, ow, off, &oc, &ost);
+    }
+    /// box-shadow's outer layers as webapi.js gives them: "box-ring" the
+    /// rings (no offset, no blur, a spread: focus rings, Bootstrap's and
+    /// Tailwind's), "spread color" by ", ", the topmost first; "box-drop"
+    /// the first blurred or offset one, "dx dy blur color", EVG's shadow
+    fn shadowRings(&self, e: &Rc<RefCell<EVGElement>>, s: &Rc<RefCell<JsonValue>>, display: &str) {
+        let rings: String = s.borrow().getText("box-ring");
+        if !rings.is_empty() {
+            let parts: Vec<String> = rings.split(", ").map(|x| x.to_string()).collect::<Vec<String>>();
+            // (the bottom one first: each later child paints over it)
+            let mut i: i64 = (parts.len() as i64) - 1;
+            while i >= 0 {
+                let one: String = parts[i as usize].clone();
+                let sp: i64 = DomText::index_of(&one, " ");
+                if sp > 0 {
+                    let w: f64 = DomView::pxOf(&one[0..(sp as usize)].to_string());
+                    let n1: i64 = one.as_bytes().len() as i64;
+                    let col: String = one[((sp + 1) as usize)..(n1) as usize].to_string();
+                    if w > 0.0 {
+                        self.ringBox(e, s, display, w, 0.0, &col, "solid");
+                    }
+                }
+                i = i - 1;
+            }
+        }
+        let drop: String = s.borrow().getText("box-drop");
+        if !drop.is_empty() {
+            // (the colour is last and has no spaces: webapi.js writes it rgba(r,g,b,a))
+            let d: Vec<String> = drop.split(" ").map(|x| x.to_string()).collect::<Vec<String>>();
+            if d.len() == 4 {
+                EVGElement::set_attribute(e, "shadow-offset-x", d[0].clone());
+                EVGElement::set_attribute(e, "shadow-offset-y", d[1].clone());
+                EVGElement::set_attribute(e, "shadow-radius", d[2].clone());
+                EVGElement::set_attribute(e, "shadow-color", d[3].clone());
+            }
+        }
+    }
+    /// a box of its own around the border box, `off` out from it and `w`
+    /// wide, painted over the content; it takes no room. Its corners follow
+    /// the element's (CSS UI 4: an outline follows border-radius)
+    fn ringBox(&self, e: &Rc<RefCell<EVGElement>>, s: &Rc<RefCell<JsonValue>>, display: &str, ow: f64, off: f64, oc: &str, ost: &str) {
         let o: Rc<RefCell<EVGElement>> = EVGElement::create_div();
         EVGElement::set_attribute(&o, "position", "absolute".to_string());
         EVGElement::set_attribute(&o, "box-sizing", "border-box".to_string());
@@ -9384,10 +9632,14 @@ impl DomView {
         EVGElement::set_attribute(&o, "right", format!("{}px", DomView::fmt(0.0 - out_r)));
         EVGElement::set_attribute(&o, "bottom", format!("{}px", DomView::fmt(0.0 - out_b)));
         EVGElement::set_attribute(&o, "left", format!("{}px", DomView::fmt(0.0 - out_l)));
+        let rad: String = DomView::grownRadius(s, ow + off);
+        if !rad.is_empty() {
+            EVGElement::set_attribute(&o, "border-radius", rad);
+        }
         let wv: String = format!("{}px", DomView::fmt(ow));
         if ost == "solid" {
             EVGElement::set_attribute(&o, "border-width", wv.clone());
-            EVGElement::set_attribute(&o, "border-color", oc.clone());
+            EVGElement::set_attribute(&o, "border-color", oc.to_string());
         } else {
             EVGElement::set_attribute(&o, "padding-top", wv.clone());
             EVGElement::set_attribute(&o, "padding-right", wv.clone());
@@ -9398,6 +9650,38 @@ impl DomView {
         }
         EVGElement::set_attribute(&o, "paint-late", "true".to_string());
         EVGElement::add_child(e, Rc::clone(&o));
+    }
+    /// the element's corner radii grown by `by` (a corner that is square
+    /// stays square), "" when it has none; a percentage is kept as it is
+    fn grownRadius(s: &Rc<RefCell<JsonValue>>, by: f64) -> String {
+        let names: Vec<String> = vec!["border-top-left-radius".to_string(), "border-top-right-radius".to_string(), "border-bottom-right-radius".to_string(), "border-bottom-left-radius".to_string()];
+        let mut out: Vec<String> = Vec::new();
+        let mut any: bool = false;
+        for nm in names.iter().cloned() {
+            let v: String = s.borrow().getText(&nm);
+            // (an elliptical corner, "4px 8px": its first radius)
+            let mut first: String = v.clone();
+            let sp: i64 = DomText::index_of(&v, " ");
+            if sp > 0 {
+                first = v[0..(sp as usize)].to_string();
+            }
+            if first.ends_with("%") {
+                any = true;
+                out.push(first.clone());
+                continue;
+            }
+            let r: f64 = DomView::pxOf(&first);
+            if r > 0.0 {
+                any = true;
+                out.push(format!("{}px", DomView::fmt(r + by)));
+            } else {
+                out.push("0px".to_string());
+            }
+        }
+        if !any {
+            return "".to_string();
+        }
+        out.join(" ")
     }
     /// --- tables ---------------------------------------------------------------
     ///
