@@ -355,6 +355,9 @@ pub fn run() {
     // (headless: script run after the steps, frames, then a value printed)
     let mut eval: Option<String> = None;
     let mut print: Option<String> = None;
+    // (headless: text typed a character a frame, each frame saved beside
+    // the screenshot as <out>.<n>.bmp)
+    let mut typed: Option<String> = None;
     let (mut ww, mut wh) = (1200.0f32, 800.0f32 + BAR);
     let mut i = 1;
     while i < args.len() {
@@ -365,6 +368,7 @@ pub fn run() {
             "--screenshot" => { shot = v; i += 1; }
             "--eval" => { eval = v; i += 1; }
             "--print" => { print = v; i += 1; }
+            "--type" => { typed = v; i += 1; }
             "--steps" => { steps = v.and_then(|s| s.parse().ok()).unwrap_or(0); i += 1; }
             "--size" => {
                 if let Some((w, h)) = v.as_deref().and_then(|s| s.split_once(',')) { ww = w.parse().unwrap_or(ww); wh = h.parse::<f32>().unwrap_or(800.0) + BAR; }
@@ -439,6 +443,19 @@ pub fn run() {
             let pg = app.pg.as_mut().unwrap();
             pg.value(js);
             for _ in 0..40 { pg.tick(16.0); if pg.dirty() { let t = pg.render(); if t.contains("data:image/svg") { app.render_json.push(t); } pg.layout(); } }
+        }
+        if let Some(tx) = &typed {
+            for (n, ch) in tx.chars().enumerate() {
+                let q = if ch == '"' || ch == '\\' { format!("\\{}", ch) } else { ch.to_string() };
+                app.input(format!("{{\"type\":\"text\",\"text\":\"{}\"}}", q));
+                app.pg.as_mut().unwrap().tick(16.0);
+                app.frame_list();
+                app.draw(&mut painter);
+                unsafe {
+                    let s = sdl::SDL_RenderReadPixels(ren, std::ptr::null());
+                    if !s.is_null() { sdl::SDL_SaveBMP(s, sdl::cstr(&format!("{}.{}.bmp", out, n)).as_ptr()); sdl::SDL_DestroySurface(s); }
+                }
+            }
         }
         if let Some(js) = &print { println!("{}", app.pg.as_mut().unwrap().value(js)); }
         app.frame_list();

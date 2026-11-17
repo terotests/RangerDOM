@@ -278,8 +278,9 @@ impl Painter {
         self.set_clip(None);
     }
 
+    /// (RANGERDOM_DUMP=1: every command drawn, on stderr)
     fn cmd(&mut self, c: &EVGDrawCmd) {
-        if std::env::var_os("RANGERDOM_DUMP").is_some() { let t = c.tile.as_ref().map(|t| { let t = t.borrow(); (t.x, t.y, t.w, t.h) }); eprintln!("CMD {} {}{} box {} {} {} {} r {} rgba {} {} {} {} tile {:?} th {} fs {}", c.kind, c.src, c.text, c.x, c.y, c.w, c.h, c.radius, c.r, c.g, c.b, c.a, t, c.thickness, c.font_size); }
+        if dump_cmds() { let t = c.tile.as_ref().map(|t| { let t = t.borrow(); (t.x, t.y, t.w, t.h) }); eprintln!("CMD {} {}{} box {} {} {} {} r {} rgba {} {} {} {} tile {:?} th {} fs {}", c.kind, c.src, c.text, c.x, c.y, c.w, c.h, c.radius, c.r, c.g, c.b, c.a, t, c.thickness, c.font_size); }
         match c.kind {
             RECT => {
                 let start = self.verts.len();
@@ -689,4 +690,9 @@ fn dash_ring(r: &[(f32, f32)], pat: &[f32], offset: f32) -> Vec<Vec<(f32, f32)>>
     }
     if k % 2 == 0 && cur.len() >= 2 { out.push(cur); }
     out
+}
+
+fn dump_cmds() -> bool {
+    static D: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *D.get_or_init(|| std::env::var_os("RANGERDOM_DUMP").is_some())
 }
