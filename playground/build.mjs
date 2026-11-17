@@ -9,6 +9,8 @@
 //   node playground/build.mjs --out site   # somewhere else (the Pages build)
 //   node playground/build.mjs --no-cases   # the engine and the page only
 //   node playground/build.mjs --no-wasm    # without rangerdom_pg.wasm
+//   node playground/build.mjs --native     # also the desktop program (SDL3),
+//                                          # -> <out>/native/rangerdom-demo
 //
 // The engine bundle (rangerdom_pg.js) is playground/src/Playground.rgr
 // compiled to JavaScript in a staged tree, because view/ and json/ reach EVG
@@ -36,6 +38,7 @@ const outAt = argv.indexOf("--out");
 const OUT = outAt >= 0 ? path.resolve(argv[outAt + 1]) : path.join(HERE, "dist");
 const withCases = !argv.includes("--no-cases");
 const withWasm = !argv.includes("--no-wasm");
+const withNative = argv.includes("--native");
 const pins = JSON.parse(fs.readFileSync(path.join(HERE, "pins.json"), "utf8"));
 
 // <dir> at <rev> of <git>, only the <sparse> paths
@@ -155,12 +158,13 @@ for (const f of fs.readdirSync(path.join(HERE, "web"))) fs.cpSync(path.join(HERE
 for (const f of ["evg-webgl.js", "evg-measure.js", "evg-a11y.js"]) fs.copyFileSync(path.join(EVG, "gl", f), path.join(OUT, f));
 fs.writeFileSync(path.join(OUT, ".nojekyll"), "");
 
-if (withWasm) {
-  const G = path.join(RANGER, "gallery");
-  const place = (from, to) => {
-    fs.rmSync(path.join(RANGER, to), { recursive: true, force: true });
-    fs.cpSync(from, path.join(RANGER, to), { recursive: true, filter: (p) => !p.includes(`${path.sep}target`) });
-  };
+const G = path.join(RANGER, "gallery");
+const place = (from, to) => {
+  fs.rmSync(path.join(RANGER, to), { recursive: true, force: true });
+  fs.cpSync(from, path.join(RANGER, to), { recursive: true, filter: (p) => !p.includes(`${path.sep}target`) });
+};
+// the engine crate and what it reaches, in the Ranger tree
+function placeEngine() {
   place(EVG, "lib/evg");
   place(path.join(ROOT, "view"), "gallery/domview");
   place(path.join(ROOT, "json"), "gallery/domjson");
@@ -168,6 +172,10 @@ if (withWasm) {
   fs.mkdirSync(path.join(G, "rangerdom_pg"), { recursive: true });
   for (const f of ["Cargo.toml", "src"]) place(path.join(HERE, "wasm", f), `gallery/rangerdom_pg/${f}`);
   place(path.join(ROOT, "js"), "gallery/rangerdom_pg/js");
+}
+
+if (withWasm) {
+  placeEngine();
   console.log("==> rangerdom_pg.wasm (cargo, wasm32-wasip1)");
   const crate = path.join(G, "rangerdom_pg");
   try {
@@ -181,6 +189,29 @@ if (withWasm) {
     console.error("rangerdom_pg.wasm was not built (cargo with the wasm32-wasip1 target?): the page will use rangerdom_pg.js");
     if (process.env.CI) process.exit(1);
   }
+}
+
+// The desktop program: playground/native (an SDL3 window that draws EVG's
+// display list) beside the engine crate, built for the host or for
+// NATIVE_TARGETS (comma separated cargo targets; more than one on macOS are
+// joined into one universal binary with lipo). SDL3 is linked as
+// `pkg-config --static --libs sdl3` (or SDL3_LIBS) says.
+if (withNative) {
+  placeEngine();
+  for (const f of ["Cargo.toml", "build.rs", "src"]) place(path.join(HERE, "native", f), `gallery/rangerdom_native/${f}`);
+  const crate = path.join(G, "rangerdom_native");
+  const targets = (process.env.NATIVE_TARGETS || "").split(",").filter(Boolean);
+  const bins = [];
+  for (const t of targets.length ? targets : [""]) {
+    console.log(`==> rangerdom-demo (cargo${t ? ", " + t : ""})`);
+    execFileSync("cargo", ["build", "--release", ...(t ? ["--target", t] : [])], { cwd: crate, stdio: ["ignore", "inherit", "inherit"] });
+    bins.push(path.join(crate, "target", t, "release", "rangerdom-demo"));
+  }
+  const dir = path.join(OUT, "native");
+  fs.mkdirSync(dir, { recursive: true });
+  if (bins.length > 1) execFileSync("lipo", ["-create", "-output", path.join(dir, "rangerdom-demo"), ...bins], { stdio: "inherit" });
+  else fs.copyFileSync(bins[0], path.join(dir, "rangerdom-demo"));
+  fs.chmodSync(path.join(dir, "rangerdom-demo"), 0o755);
 }
 
 if (withCases) {

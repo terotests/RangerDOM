@@ -381,8 +381,13 @@ impl Playground {
         EVGA11yTree::to_json(&t)
     }
     pub fn paint(&mut self) -> String {
+        match self.paint_list() { Some(dl) => EVGDisplayList::to_json(&dl), None => String::new() }
+    }
+    /// The display list itself, for a host that draws its commands without
+    /// the JSON (playground/native)
+    pub fn paint_list(&mut self) -> Option<Rc<RefCell<EVGDisplayList>>> {
         self.newest();
-        let (Some(root), Some(lay)) = (self.root.clone(), self.lay.clone()) else { return String::new() };
+        let (Some(root), Some(lay)) = (self.root.clone(), self.lay.clone()) else { return None };
         let dl = Rc::new(RefCell::new(EVGDisplayList::new()));
         // (opacity fades a subtree as one picture: evg-webgl composites a
         // group offscreen)
@@ -394,7 +399,7 @@ impl Playground {
         EVGDisplayList::set_fragments(&dl, false);
         EVGDisplayList::set_text_engine(&dl, EVGLayout::get_text_engine(&lay));
         EVGDisplayList::build(&dl, root);
-        EVGDisplayList::to_json(&dl)
+        Some(dl)
     }
 }
 
