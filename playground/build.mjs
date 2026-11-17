@@ -11,6 +11,9 @@
 //   node playground/build.mjs --no-wasm    # without rangerdom_pg.wasm
 //   node playground/build.mjs --native     # also the desktop program (SDL3),
 //                                          # -> <out>/native/rangerdom-demo
+//   node playground/build.mjs --native-lib # the program as a static library
+//                                          # per target, linked elsewhere
+//                                          # (playground/native/mac-link.sh)
 //
 // The engine bundle (rangerdom_pg.js) is playground/src/Playground.rgr
 // compiled to JavaScript in a staged tree, because view/ and json/ reach EVG
@@ -38,7 +41,8 @@ const outAt = argv.indexOf("--out");
 const OUT = outAt >= 0 ? path.resolve(argv[outAt + 1]) : path.join(HERE, "dist");
 const withCases = !argv.includes("--no-cases");
 const withWasm = !argv.includes("--no-wasm");
-const withNative = argv.includes("--native");
+const withNativeLib = argv.includes("--native-lib");
+const withNative = argv.includes("--native") || withNativeLib;
 const pins = JSON.parse(fs.readFileSync(path.join(HERE, "pins.json"), "utf8"));
 
 // <dir> at <rev> of <git>, only the <sparse> paths
@@ -199,19 +203,30 @@ if (withWasm) {
 if (withNative) {
   placeEngine();
   for (const f of ["Cargo.toml", "build.rs", "src"]) place(path.join(HERE, "native", f), `gallery/rangerdom_native/${f}`);
+  // (the engine as a Rust library only: a cdylib would need the target's
+  // linker, which a static library built off a Mac does not have)
+  const pgToml = path.join(G, "rangerdom_pg", "Cargo.toml");
+  fs.writeFileSync(pgToml, fs.readFileSync(pgToml, "utf8").replace('crate-type = ["cdylib", "rlib"]', 'crate-type = ["rlib"]'));
   const crate = path.join(G, "rangerdom_native");
   const targets = (process.env.NATIVE_TARGETS || "").split(",").filter(Boolean);
+  const dir = path.join(OUT, "native");
+  fs.mkdirSync(dir, { recursive: true });
   const bins = [];
-  for (const t of targets.length ? targets : [""]) {
+  if (withNativeLib) for (const t of targets.length ? targets : [""]) {
+    console.log(`==> librangerdom_native.a (cargo${t ? ", " + t : ""})`);
+    execFileSync("cargo", ["rustc", "--release", "--lib", "--crate-type", "staticlib", ...(t ? ["--target", t] : [])], { cwd: crate, stdio: ["ignore", "inherit", "inherit"] });
+    fs.copyFileSync(path.join(crate, "target", t, "release", "librangerdom_native.a"), path.join(dir, `librangerdom_native${t ? "-" + t : ""}.a`));
+  }
+  else for (const t of targets.length ? targets : [""]) {
     console.log(`==> rangerdom-demo (cargo${t ? ", " + t : ""})`);
     execFileSync("cargo", ["build", "--release", ...(t ? ["--target", t] : [])], { cwd: crate, stdio: ["ignore", "inherit", "inherit"] });
     bins.push(path.join(crate, "target", t, "release", "rangerdom-demo"));
   }
-  const dir = path.join(OUT, "native");
-  fs.mkdirSync(dir, { recursive: true });
-  if (bins.length > 1) execFileSync("lipo", ["-create", "-output", path.join(dir, "rangerdom-demo"), ...bins], { stdio: "inherit" });
-  else fs.copyFileSync(bins[0], path.join(dir, "rangerdom-demo"));
-  fs.chmodSync(path.join(dir, "rangerdom-demo"), 0o755);
+  if (!withNativeLib) {
+    if (bins.length > 1) execFileSync("lipo", ["-create", "-output", path.join(dir, "rangerdom-demo"), ...bins], { stdio: "inherit" });
+    else fs.copyFileSync(bins[0], path.join(dir, "rangerdom-demo"));
+    fs.chmodSync(path.join(dir, "rangerdom-demo"), 0o755);
+  }
 }
 
 if (withCases) {

@@ -10,6 +10,11 @@ edition = "2021"
 license = "MIT"
 publish = false
 
+[lib]
+path = "src/lib.rs"
+# (staticlib: the engine built off the Mac and linked there with SDL3)
+crate-type = ["rlib", "staticlib"]
+
 [[bin]]
 name = "rangerdom-demo"
 path = "src/main.rs"
