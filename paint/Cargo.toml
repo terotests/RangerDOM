@@ -1,0 +1,20 @@
+# RangerDOM's painter as a crate (src/lib.rs): EVG's display list as
+# triangles, textured quads and clips, for any 2D renderer. Strict Rust that
+# Ranger also reads: EVGBrowser compiles it to C++ (its SDL3 desktop build),
+# playground/native uses it through cargo. Placed in Ranger's
+# gallery/rangerdom_paint beside gallery/domview.
+[package]
+name = "rangerdom_paint"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+ranger = { path = "../../runtime/rust/ranger" }
+
+# a target table: Ranger reads EVG from the .rgr files (rgr.rs), not this crate
+[target.'cfg(all())'.dependencies]
+rangerevg = { path = "../../runtime/rust/rangerevg" }

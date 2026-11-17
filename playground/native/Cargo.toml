@@ -1,8 +1,9 @@
 # The playground's engine (playground/wasm, CEr + webapi.js + view + EVG) in
 # a native desktop window: SDL3 for the window, input and drawing, the
-# display list painted here (src/paint.rs) with the system's TrueType faces
-# (src/ttf.rs). build.mjs --native places this crate in the pinned Ranger
-# tree as gallery/rangerdom_native, beside gallery/rangerdom_pg.
+# display list painted by RangerDOM's shared painter (paint/, the crate
+# rangerdom_paint) and run with SDL3 here (src/paint.rs). build.mjs --native
+# places this crate in the pinned Ranger tree as gallery/rangerdom_native,
+# beside gallery/rangerdom_pg and gallery/rangerdom_paint.
 [package]
 name = "rangerdom_native"
 version = "0.1.0"
@@ -24,6 +25,7 @@ ranger = { path = "../../runtime/rust/ranger", features = ["shared-cell"] }
 rangerevg = { path = "../../runtime/rust/rangerevg" }
 rangerdom_pg = { path = "../rangerdom_pg" }
 rangerdom_view = { path = "../domview" }
+rangerdom_paint = { path = "../rangerdom_paint" }
 
 [patch."https://github.com/terotests/Ranger.git"]
 ranger = { path = "../../runtime/rust/ranger", features = ["shared-cell"] }

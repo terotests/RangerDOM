@@ -202,6 +202,7 @@ if (withWasm) {
 // `pkg-config --static --libs sdl3` (or SDL3_LIBS) says.
 if (withNative) {
   placeEngine();
+  for (const f of ["Cargo.toml", "src"]) place(path.join(ROOT, "paint", f), `gallery/rangerdom_paint/${f}`);
   for (const f of ["Cargo.toml", "build.rs", "src"]) place(path.join(HERE, "native", f), `gallery/rangerdom_native/${f}`);
   // (the engine as a Rust library only: a cdylib would need the target's
   // linker, which a static library built off a Mac does not have)

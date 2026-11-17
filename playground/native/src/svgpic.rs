@@ -4,16 +4,11 @@
 // switch knob, a select's arrow): DomView names each `dompng-<n>-<hash>`
 // of its data: URL (DomView::pngPart) and the display list draws it by that
 // name (IMAGE). The URLs come from the render tree's background-image
-// values; EVG's SVG parser reads each and its paths are rasterized here.
+// values; the shared painter (rangerdom_paint) draws each.
 
 use std::collections::HashMap;
-use std::rc::Rc;
 
-use ranger::cell::RefCell;
 use rangerdom_view::DomView;
-use rangerevg::{PathRing, SVGPathParser, SvgDocument, SvgParser, SvgVectorItem, VectorViewBox};
-
-use crate::ttf::Raster;
 
 /// name -> SVG text, for every SVG data: URL a render tree has shown
 #[derive(Default)]
@@ -129,79 +124,5 @@ impl Pictures {
             if self.svgs.contains_key(&name) { continue; }
             if let Some(svg) = svg_of(&u) { self.svgs.insert(name, svg); }
         }
-    }
-}
-
-/// An SVG drawn into w x h pixels (xMidYMid meet), RGBA, not premultiplied.
-pub fn rasterize(svg: &str, w: usize, h: usize) -> Vec<u8> {
-    let mut out = vec![0u8; w * h * 4];
-    let sp = Rc::new(RefCell::new(SvgParser::new()));
-    let doc = SvgParser::parse(&sp, svg.to_string());
-    if SvgDocument::item_count(&doc) == 0 { return out; }
-    let vb = SvgDocument::effective_view_box(&doc);
-    let m = VectorViewBox::resolve(&vb, w as f64, h as f64, "xMidYMid meet");
-    let (ma, mb, mc, md, me, mf) = { let m = m.borrow(); (m.a, m.b, m.c, m.d, m.e, m.f) };
-    let scale = (ma * md - mb * mc).abs().sqrt();
-    let items = doc.borrow().items.clone();
-    for it in &items {
-        let cmds = it.borrow().commands.clone();
-        let parser = SVGPathParser::from_commands(cmds);
-        let rings: Vec<Rc<RefCell<PathRing>>> = SVGPathParser::flatten_rings(&parser, 16, ma, mb, mc, md, me, mf);
-        let polys: Vec<(Vec<(f32, f32)>, bool)> = rings.iter().map(|r| {
-            let r = r.borrow();
-            (r.pts.chunks(2).filter(|p| p.len() == 2).map(|p| (p[0] as f32, p[1] as f32)).collect(), r.closed)
-        }).collect();
-        if SvgVectorItem::has_fill(it) {
-            let c = it.borrow().fill_color.clone().unwrap();
-            let c = c.borrow();
-            let mut ras = Raster::new(w, h);
-            let closed: Vec<Vec<(f32, f32)>> = polys.iter().map(|p| p.0.clone()).filter(|p| p.len() >= 3).collect();
-            ras.rings(&closed);
-            let eo = it.borrow().fill_rule == "evenodd";
-            over(&mut out, &ras.rgba(eo), [c.r as f32, c.g as f32, c.b as f32, c.a as f32]);
-        }
-        if SvgVectorItem::has_stroke(it) {
-            let c = it.borrow().stroke_color.clone().unwrap();
-            let c = c.borrow();
-            let t = (it.borrow().stroke_width * scale) as f32;
-            let mut ras = Raster::new(w, h);
-            let mut quads = Vec::new();
-            for (p, closed) in &polys {
-                let n = p.len();
-                if n < 2 { continue; }
-                let segs = if *closed { n } else { n - 1 };
-                for i in 0..segs {
-                    let (a, b) = (p[i], p[(i + 1) % n]);
-                    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-                    let l = (dx * dx + dy * dy).sqrt();
-                    if l < 1e-4 { continue; }
-                    // (each piece reaches half a width past its ends, which
-                    // fills the joins of a polyline)
-                    let (ux, uy) = (dx / l * t / 2.0, dy / l * t / 2.0);
-                    let (nx, ny) = (-uy, ux);
-                    let (a, b) = ((a.0 - ux, a.1 - uy), (b.0 + ux, b.1 + uy));
-                    // (wound the same way, so overlaps add)
-                    quads.push(vec![(a.0 + nx, a.1 + ny), (b.0 + nx, b.1 + ny), (b.0 - nx, b.1 - ny), (a.0 - nx, a.1 - ny)]);
-                }
-            }
-            ras.rings(&quads);
-            over(&mut out, &ras.rgba(false), [c.r as f32, c.g as f32, c.b as f32, c.a as f32]);
-        }
-    }
-    out
-}
-
-/// coverage (alpha of a white RGBA) in colour c (0-255, alpha 0-1) over out
-fn over(out: &mut [u8], cov: &[u8], c: [f32; 4]) {
-    for i in (0..out.len()).step_by(4) {
-        let sa = cov[i + 3] as f32 / 255.0 * c[3];
-        if sa <= 0.0 { continue; }
-        let da = out[i + 3] as f32 / 255.0;
-        let oa = sa + da * (1.0 - sa);
-        for k in 0..3 {
-            let d = out[i + k] as f32;
-            out[i + k] = ((c[k] * sa + d * da * (1.0 - sa)) / oa).round().clamp(0.0, 255.0) as u8;
-        }
-        out[i + 3] = (oa * 255.0).round() as u8;
     }
 }
