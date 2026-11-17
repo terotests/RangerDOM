@@ -7298,7 +7298,9 @@
   // closing brace (t.length when it has none)
   function splitNestedIn(t, from, decls, nested) {
     var i = from, n = t.length, start = from;
-    function decl(seg) { if (!/^\s*@/.test(seg)) decls.push(seg); }
+    // (no regular expression here: one on each declaration between the
+    // scans of a long block made the engine copy the block every time)
+    function decl(seg) { if (seg.trim().charAt(0) !== '@') decls.push(seg); }
     while (i < n) {
       var k = cssScan(t, i, ';{}');
       if (k >= n) break;
@@ -7319,7 +7321,9 @@
     var i = 0, n = body.length, start = 0;
     // (an at-rule in a declaration list, `@import ...;`, is no
     // declaration: it runs to its semicolon or its block)
-    function decl(seg) { if (!/^\s*@/.test(seg)) decls.push(seg); }
+    // (no regular expression here: one on each declaration between the
+    // scans of a long block made the engine copy the block every time)
+    function decl(seg) { if (seg.trim().charAt(0) !== '@') decls.push(seg); }
     while (i < n) {
       var k = cssScan(body, i, ';{');
       if (k >= n) break;
