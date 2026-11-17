@@ -359,7 +359,9 @@ pub fn run() {
     let ci = case.as_ref().and_then(|c| cases.iter().position(|x| &x.name == c)).unwrap_or(0);
 
     unsafe {
-        if shot.is_some() && std::env::var("SDL_VIDEO_DRIVER").is_err() {
+        // (headless: the offscreen driver where it has GL through EGL; macOS has
+        // no EGL, a hidden Cocoa window with Metal draws there)
+        if shot.is_some() && !cfg!(target_os = "macos") && std::env::var("SDL_VIDEO_DRIVER").is_err() {
             sdl::SDL_SetHint(sdl::cstr("SDL_VIDEO_DRIVER").as_ptr(), sdl::cstr("offscreen").as_ptr());
         }
         if !sdl::SDL_Init(sdl::INIT_VIDEO) { eprintln!("SDL_Init: {}", sdl::error()); std::process::exit(1); }
