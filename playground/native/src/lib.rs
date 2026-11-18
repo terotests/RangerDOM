@@ -15,7 +15,6 @@
 mod paint;
 mod sdl;
 mod svgpic;
-mod ttf;
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
