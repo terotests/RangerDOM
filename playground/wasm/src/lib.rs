@@ -1153,7 +1153,13 @@ impl Synced {
                     if let Some(b) = r.borrow().children.first().cloned() {
                         let mut dp = DomPaint::new();
                         if paint_lane() && dp.compare(&w0, &page.borrow().get("root")) && dp.apply(&b, 0) {
-                            EVGRetain::paint_frame(&l, &r);
+                            if dp.dirty.is_empty() {
+                                EVGRetain::paint_frame(&l, &r);
+                            } else {
+                                // (a text changed: laid out on the path to it)
+                                EVGRetain::layout_frame(&l, r.clone(), &dp.dirty);
+                                DomView::settle(&b);
+                            }
                             let boxes = DomView::boxesSince(&b, 0, &self.kept.boxes);
                             #[cfg(not(target_arch = "wasm32"))]
                             if std::env::var("PG_RETAINCHECK").is_ok() {
