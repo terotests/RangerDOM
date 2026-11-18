@@ -19,6 +19,8 @@ mod rgr {
     #[cfg(any())]
     ranger::import_rgr!("../../../lib/evg/EVGLayoutFull");
     #[cfg(any())]
+    ranger::import_rgr!("../../../lib/evg/EVGRetain");
+    #[cfg(any())]
     ranger::import_rgr!("../../../lib/evg/EVGTextEngine");
     #[cfg(any())]
     ranger::import_rgr!("../../../lib/evg/EVGTextMeasurer");
@@ -32,4 +34,4 @@ mod rgr {
     ranger::import_rgr!("../../../lib/evg/VectorViewBox");
 }
 #[cfg(not(ranger))]
-pub use rangerevg::{EVGBox, EVGCodepoint, EVGColor, EVGCssExtra, EVGElement, EVGLayout, EVGLayoutFull, EVGTextEngine, EVGTextLine, EVGTextMetrics, EVGUnit, Matrix2D, PathBounds, SvgDocument, SvgParser, VectorViewBox};
+pub use rangerevg::{EVGBox, EVGCodepoint, EVGColor, EVGCssExtra, EVGElement, EVGLayout, EVGLayoutFull, EVGRetain, EVGTextEngine, EVGTextLine, EVGTextMetrics, EVGUnit, Matrix2D, PathBounds, SvgDocument, SvgParser, VectorViewBox};
