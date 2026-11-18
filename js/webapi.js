@@ -11749,7 +11749,7 @@
   // rendered where it is (virtPin), as is the focused one.
   // A host turns them on (__virtRows(true)) when its frame renders again
   // while __virtAgain() says so, before it paints.
-  var VIRT_GUESS = 24, virts = [], virtOn = false, virtAgain = false, virtR = { gen: -1 };
+  var VIRT_GUESS = 24, VIRT_MIN = 32, virts = [], virtOn = false, virtAgain = false, virtR = { gen: -1 };
   G.__virtRows = function (on) { virtOn = !!on; changed(); return String(virtOn); };
   var vstat = { sig: 0, plan: 0, base: 0, again: 0, info: 0, rules: 0, why: [] };
   G.__virtStats = function () { var o = JSON.stringify(vstat); vstat = { sig: 0, plan: 0, base: 0, again: 0, info: 0, rules: 0, why: [] }; return o; };
@@ -12239,6 +12239,14 @@
   // n's children at a render: the plan, or null for all of them
   function virtWindow(n, cs, src) {
     if (!virtOn || shadowCount || src.length < 2 || !doc) return virtDrop(n);
+    // (the fast path of a box no plan can pay for: fewer than VIRT_MIN
+    // element children all render, as without a plan. On a small page the
+    // plan's signatures and checks were over half of a frame's script. The
+    // box's own height says nothing: a scroller's is the viewport's)
+    if (src.length < VIRT_MIN) return virtDrop(n);
+    var vk = 0;
+    for (var vi = 0; vi < src.length && vk < VIRT_MIN; vi++) if (src[vi]._attrs !== undefined) vk++;
+    if (vk < VIRT_MIN) return virtDrop(n);
     var tbl = cs.display === 'table-row-group';
     if (!tbl && !/^(block|flow-root|list-item)$/.test(cs.display)) return virtDrop(n);
     if (!tbl && !virtWidthStands(n)) return virtDrop(n);
