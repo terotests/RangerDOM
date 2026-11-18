@@ -11,6 +11,7 @@
 #![allow(non_snake_case)]
 
 mod dom_page;
+mod dom_paint;
 mod dom_view;
 mod rgr;
 
@@ -18,3 +19,5 @@ mod rgr;
 pub use dom_view::{DomBoxes, DomFrame, DomMemo, DomPngs, DomSeg, DomSvgDocs, DomView};
 #[cfg(not(ranger))]
 pub use dom_page::DomPage;
+#[cfg(not(ranger))]
+pub use dom_paint::DomPaint;

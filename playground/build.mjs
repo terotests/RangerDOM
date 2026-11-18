@@ -117,8 +117,15 @@ let code = fs.readFileSync(path.join(STAGE, "out", "rangerdom_pg.js"), "utf8").r
 // again on each read, so CEr's lexer is quadratic in the source: webapi.js
 // took 10 s to load. Until the compiler keeps the bytes, the encoder keeps
 // its last sixteen long answers and the short ones (CEr's punctuators) (strings do not change; the answers are only read).
-const ENC = "const r_cb_enc = new TextEncoder();";
-if (!code.includes(ENC)) throw new Error("rangerdom_pg.js: no r_cb_enc to patch (the compiler changed: check the load time)");
+// (the compiler writes the encoder as `new TextEncoder()`, or since Ranger
+// 64458b4 as an object that makes one on first use: either is replaced)
+let ENC = "const r_cb_enc = new TextEncoder();";
+if (!code.includes(ENC)) {
+  const at = code.indexOf("const r_cb_enc = { e: null, encode: function (s) {");
+  const end = at < 0 ? -1 : code.indexOf("\n} };\n", at);
+  ENC = end < 0 ? "" : code.slice(at, end + 5);
+}
+if (!ENC) throw new Error("rangerdom_pg.js: no r_cb_enc to patch (the compiler changed: check the load time)");
 code = code.replace(ENC, `const r_cb_enc = (function () {
   const te = new TextEncoder();
   const kept = new Map();

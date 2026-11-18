@@ -14,8 +14,8 @@ use ranger::cell::RefCell;
 use std::collections::HashMap;
 
 use rangerdom_json::{JsonParser, JsonValue};
-use rangerdom_view::{DomBoxes, DomSvgDocs, DomView};
-use rangerevg::{EVGA11yFromTree, EVGA11yTree, EVGDisplayList, EVGElement, EVGLayout, EVGUnit};
+use rangerdom_view::{DomBoxes, DomPaint, DomSvgDocs, DomView};
+use rangerevg::{EVGA11yFromTree, EVGA11yTree, EVGDisplayList, EVGElement, EVGLayout, EVGRetain, EVGUnit};
 
 // ---------------------------------------------------------------- text widths
 // In the browser the page's text is measured by the browser (main.js
@@ -102,7 +102,7 @@ mod measure {
             m
         }
         fn measure_text_width(&mut self, text: String, font_family: String, font_size: f64) -> f64 { self.width(&text, &font_family, font_size) }
-        fn get_line_height(&self, font_family: String, font_size: f64) -> f64 { EVGTextMeasurerTrait::get_line_height(&self.inner, Self::table_face(&font_family), font_size) }
+        fn get_line_height(&mut self, font_family: String, font_size: f64) -> f64 { EVGTextMeasurerTrait::get_line_height(&mut self.inner, Self::table_face(&font_family), font_size) }
         fn mono_for(&mut self, font_family: String) -> bool { if Self::split(&font_family).is_some() { false } else { EVGTextMeasurerTrait::mono_for(&mut self.inner, font_family) } }
         fn prepare_tables(&mut self) { EVGTextMeasurerTrait::prepare_tables(&mut self.inner) }
         fn measure_char(&mut self, ch: i64, font_family: String, font_size: f64) -> f64 {
@@ -1058,6 +1058,55 @@ impl Kept {
         }
     }}
 
+/// whether pages that change only what is drawn skip building and layout
+/// (DomPaint; PG_NOPAINT turns it off natively)
+fn paint_lane() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    if std::env::var("PG_NOPAINT").is_ok() {
+        return false;
+    }
+    true
+}
+
+/// PG_RETAINCHECK on a paint-only frame: the page built and laid out from
+/// nothing draws what the kept elements draw
+#[cfg(not(target_arch = "wasm32"))]
+fn paint_check(page: &Rc<RefCell<JsonValue>>, root: &Rc<RefCell<EVGElement>>, lay: &Rc<RefCell<EVGLayout>>, w: f64, h: f64) {
+    let list = |root: &Rc<RefCell<EVGElement>>, lay: &Rc<RefCell<EVGLayout>>| {
+        let dl = Rc::new(RefCell::new(EVGDisplayList::new()));
+        dl.borrow_mut().group_opacity = true;
+        EVGDisplayList::set_fragments(&dl, false);
+        EVGDisplayList::set_text_engine(&dl, EVGLayout::get_text_engine(lay));
+        EVGDisplayList::build(&dl, root.clone());
+        EVGDisplayList::to_json(&dl)
+    };
+    let fresh_page = JsonParser::parse(page.borrow().toJson()).borrow_mut().value();
+    let froot = EVGElement::create_div();
+    froot.borrow_mut().width = Some(EVGUnit::px(w));
+    froot.borrow_mut().height = Some(EVGUnit::px(h));
+    EVGElement::set_attribute(&froot, "white-space", "nowrap".to_string());
+    EVGElement::set_attribute(&froot, "font-family", "Arial".to_string());
+    let fb = DomView::build(&fresh_page, 0, w, h);
+    EVGElement::add_child(&froot, fb.clone());
+    let flay = Rc::new(RefCell::new(EVGLayout::new()));
+    EVGLayout::set_page_size(&flay, w, h);
+    EVGLayout::layout(&flay, froot.clone());
+    DomView::settle(&fb);
+    let kb = root.borrow().children.first().cloned().unwrap();
+    let (kl, fl) = (list(root, lay), list(&froot, &flay));
+    if DomView::boxes(&kb, 0) != DomView::boxes(&fb, 0) {
+        eprintln!("PAINT boxes differ");
+    } else if kl != fl {
+        let (x, y) = (kl.as_bytes(), fl.as_bytes());
+        let mut i = 0;
+        while i < x.len() && i < y.len() && x[i] == y[i] { i += 1; }
+        let from = i.saturating_sub(120);
+        eprintln!("PAINT list differs at {}: kept ...{} | fresh ...{}", i, String::from_utf8_lossy(&x[from..(i + 120).min(x.len())]), String::from_utf8_lossy(&y[from..(i + 120).min(y.len())]));
+    } else {
+        eprintln!("PAINT same");
+    }
+}
+
 /// What a synchronous layout left for the next paint.
 struct Synced {
     w: f64,
@@ -1090,7 +1139,39 @@ impl Synced {
         let page = JsonParser::parse(json.to_string()).borrow_mut().value();
         let delta = page.borrow().has("d");
         if delta {
+            let was = self.kept.root.clone();
+            let tops = page.borrow().get("tops");
+            let lone = !(tops.borrow().kind == 4 && !tops.borrow().items.is_empty());
             let same = self.kept.resolve(&page)?;
+            // a page that changed only what is drawn (DomPaint): the values
+            // written on the elements laid out last, the paint bounds
+            // measured again, nothing built or laid out
+            // (not under a caret or selection decorate drew: lay_out puts
+            // those again)
+            if !same && lone && self.tree_at == (self.w, self.h) && self.kept.deco.is_none() {
+                if let (Some(w0), Some((r, l))) = (was, self.tree.clone()) {
+                    if let Some(b) = r.borrow().children.first().cloned() {
+                        let mut dp = DomPaint::new();
+                        if paint_lane() && dp.compare(&w0, &page.borrow().get("root")) && dp.apply(&b, 0) {
+                            EVGRetain::paint_frame(&l, &r);
+                            let boxes = DomView::boxesSince(&b, 0, &self.kept.boxes);
+                            #[cfg(not(target_arch = "wasm32"))]
+                            if std::env::var("PG_RETAINCHECK").is_ok() {
+                                // (the box changes sent, as lay_out's check mirrors them)
+                                let m = JsonParser::parse(boxes.clone()).borrow_mut().value();
+                                let (set, gone) = (m.borrow().get("set"), m.borrow().get("gone"));
+                                for (i, k) in set.borrow().keys.iter().enumerate() { self.kept.mirror.insert(k.clone(), set.borrow().items[i].borrow().toJson()); }
+                                for g in gone.borrow().items.iter() { self.kept.mirror.remove(&g.borrow().str); }
+                                paint_check(&page, &r, &l, self.w, self.h);
+                            }
+                            self.json = json.to_string();
+                            self.boxes = boxes.clone();
+                            self.last = Some((r.clone(), l.clone()));
+                            return Some((boxes, r, l));
+                        }
+                    }
+                }
+            }
             #[cfg(not(target_arch = "wasm32"))]
             if page.borrow().has("whole") {
                 let mut at = String::new();
