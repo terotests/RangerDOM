@@ -9109,7 +9109,10 @@
   // c is the style `base` with only `keys` changed (renderNode then takes
   // base's own properties and looks at those only: 120 boxes animated,
   // each walked its 250 properties a frame)
+  // (only one step back is read: base's own step is let go, or each patch
+  // of a box kept every style it had before, a whole style a frame)
   function diffFrom(c, base, keys) {
+    if (base._dfrom) base._dfrom = null;
     Object.defineProperty(c, '_dfrom', { value: { base: base, keys: keys }, enumerable: false, configurable: true, writable: true });
   }
   // An element whose inline style changed only in properties that nothing
