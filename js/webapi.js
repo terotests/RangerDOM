@@ -99,6 +99,9 @@
   // S)), only el and what is under it are styled again, and its following
   // siblings when a selector has a + or ~ combinator; else the whole page
   // (changed)
+  // SVG attributes only drawing reads (not presentation attributes, see
+  // presentationalHints; viewBox of the outer <svg> sizes it, not here)
+  var SVG_GEOMETRY = { d: 1, points: 1, x: 1, y: 1, x1: 1, y1: 1, x2: 1, y2: 1, cx: 1, cy: 1, r: 1, rx: 1, ry: 1, dx: 1, dy: 1, pathLength: 1, viewBox: 1, preserveAspectRatio: 1 };
   function attrChanged(el, name, was, now) {
     if (name === 'class' || name === 'id' || name === undefined) ancEpoch++;
     if (name !== 'style') sigEpoch++;
@@ -127,6 +130,11 @@
     if (name === 'style' && el._styleSync && el._styleChg && el._styleChg.length === 1 && (el._styleChg[0] === 'transform' || el._styleChg[0] === 'opacity')) { if (el._rv !== el._tfv || el._tfn !== el._styleChg[0]) { el._tf0 = el._rv || 0; el._tfn = el._styleChg[0]; } el._tfv = textStamp; }
     for (var p = el; p; p = p.parentNode) p._rv = textStamp;
     if (computedCache.gen !== styleGen) return;
+    // an SVG shape's geometry (a path's d, a circle's r...) that no
+    // selector reads: no style changes, only the drawing (el drawn again,
+    // _rv above). An animated path set its d each frame, and each set
+    // styled the path again with all it matches: most of such a frame.
+    if (name && el.namespaceURI === SVG_NS && SVG_GEOMETRY[name] && el.localName !== 'svg' && !(featureIndex(), fxCache.attrRead)['a:' + name.toLowerCase()]) { el._rj = null; return; }
     var old = computedCache.map[el.__id];
     // (an inline style change leaves what matched el, unless a selector
     // reads the style attribute)
@@ -861,7 +869,7 @@
   }
   function featureIndex() {
     if (fxCache.gen === sheetGen) return fxCache.fx;
-    var fx = {}, sibs = [], styleRead = false;
+    var fx = {}, sibs = [], styleRead = false, attrRead = {};
     var sheets = [ua()].concat(cascadeSheets(doc));
     function entry(f) { return fx[f] || (fx[f] = { desc: [], sib: [] }); }
     for (var i = 0; i < sheets.length; i++) {
@@ -872,7 +880,9 @@
         var parts = sel.parts, key = sel.key;
         // (a selector that reads the style attribute, anywhere in it: an
         // inline style change can then change what matches)
-        if (!styleRead) for (var ks = 0; ks < parts.length && !styleRead; ks++) { var fst = []; featuresOf(parts[ks].c, fst, false); for (var ns = 0; ns < fst.length; ns++) if (fst[ns].f === 'a:style') styleRead = true; }
+        // (and every attribute any compound reads, the subject's too:
+        // attrRead, for the attributes that only drawing reads)
+        for (var ks = 0; ks < parts.length; ks++) { var fst = []; featuresOf(parts[ks].c, fst, false); for (var ns = 0; ns < fst.length; ns++) if (fst[ns].f.charAt(0) === 'a') { attrRead[fst[ns].f] = true; if (fst[ns].f === 'a:style') styleRead = true; } }
         // every compound left of a + or ~, loose (its pseudo-classes left
         // out): an element put in or taken out that can match one changes
         // what the following siblings that fit the subject's key match
@@ -906,7 +916,7 @@
         }
       }
     }
-    fxCache = { gen: sheetGen, fx: fx, sibs: sibs, styleRead: styleRead };
+    fxCache = { gen: sheetGen, fx: fx, sibs: sibs, styleRead: styleRead, attrRead: attrRead };
     return fx;
   }
   // an attribute's value by its stored name (class, id, style: the same in
@@ -2144,6 +2154,34 @@
       this._set(n, v, prio);
       this._sync(n);
     }
+    // several properties set as one change: what setProperty does for each
+    // name in turn, with one write of the style attribute and so one
+    // restyle check (attrChanged's patch takes all the names). For a host
+    // that knows a frame's changes (RangerGames' dom.js): each setProperty
+    // wrote the whole attribute and checked the element's style again.
+    _setMany(names, values) {
+      if (this._readonly) throw DOMException('read-only', 'NoModificationAllowedError');
+      var chg = [], whole = false;
+      for (var i = 0; i < names.length; i++) {
+        var n = String(names[i]), v = values[i];
+        if (n.slice(0, 2) !== '--') n = n.toLowerCase();
+        if (v === null || v === undefined || v === '') {
+          var parts = shorthandParts(n) || [n];
+          for (var j = 0; j < parts.length; j++) {
+            var at = this._order.indexOf(parts[j]);
+            if (at >= 0) { this._order.splice(at, 1); delete this._p[parts[j]]; delete this._prio[parts[j]]; whole = true; }
+          }
+          continue;
+        }
+        v = specifiedText(n, String(v).trim());
+        var longhands = expandShorthand(n, v);
+        if (longhands) { for (var k in longhands) this._set(k, longhands[k], undefined); whole = true; continue; }
+        this._set(n, v, undefined);
+        chg.push(n);
+      }
+      if (whole) this._sync();
+      else if (chg.length) this._sync(chg);
+    }
     _set(n, v, prio) {
       // (a shorthand's longhand it gave no value: not set, as a browser
       // drops an invalid declaration; AG Grid's styles had one, and its
@@ -2188,7 +2226,7 @@
     _sync(one) {
       if (!this._owner) return;
       this._owner._styleSync = true;
-      this._owner._styleChg = one !== undefined ? [one] : null;
+      this._owner._styleChg = one === undefined ? null : typeof one === 'string' ? [one] : one;
       var t = this.cssText;
       if (t) this._owner.setAttribute('style', t); else this._owner.removeAttribute('style');
       this._owner._styleSync = false;
@@ -9894,10 +9932,9 @@
     return [gam(r) * 255, gam(g) * 255, gam(bb) * 255];
   }
 
-  function getComputedStyle(el, pseudo) {
-    if (!el || el.nodeType !== 1) throw new TypeError("Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.");
-    var c = el.isConnected ? computedOf(el) : { display: 'block', _vars: {} };
-    var decl = new CSSStyleDeclaration(null);
+  // every property of a resolved style, as getComputedStyle answers them
+  // (ComputedDecl fills itself so when a read needs more than one value)
+  function fillComputed(decl, el, c, conn, b) {
     for (var k in INITIAL) decl._set(k, c[k] !== undefined ? c[k] : INITIAL[k], '');
     for (var n in c) if (n.charAt(0) !== '_') decl._set(n, c[n], '');
     for (var v in c._vars) decl._set(v, c._vars[v], '');
@@ -9924,14 +9961,13 @@
         decl._set('animation-play-state', aj(function (a) { return a.play; }), '');
       }
     }
-    var b = boxes[el.__id];
-    if (b && el.isConnected && c.display !== 'none') {
+    if (b && conn && c.display !== 'none') {
       if (!/^\d/.test(decl._p.width) || decl._p.width === 'auto') decl._p.width = fmtPx(b[2]);
       if (!/^\d/.test(decl._p.height) || decl._p.height === 'auto') decl._p.height = fmtPx(b[3]);
     }
     // (a subgrid's tracks: "subgrid" and the line names of each line it
     // spans, [] where it names none, as Chromium resolves them)
-    if (el.isConnected && /^(inline-)?grid$/.test(c.display || '') && el.parentNode && el.parentNode.nodeType === 1) {
+    if (conn && /^(inline-)?grid$/.test(c.display || '') && el.parentNode && el.parentNode.nodeType === 1) {
       var pd = computedOf(el.parentNode).display || '';
       if (/^(inline-)?grid(-lanes)?$/.test(pd)) {
         ['columns', 'rows'].forEach(function (ax) {
@@ -9950,8 +9986,60 @@
     // (a number line-height resolves to its px, as Chromium reports it)
     if (/^[\d.]+$/.test(decl._p['line-height'] || '') && c._fontPx) decl._p['line-height'] = fmtPx(parseFloat(decl._p['line-height']) * c._fontPx);
     computedShorthands(decl._p);
-    decl._readonly = true;
-    return styleProxy(decl);
+  }
+  // getComputedStyle's declaration: read-only, and filled with all ~400
+  // properties only when a read needs them all (length, item, cssText,
+  // iteration) or one that is worked out from others (COMPUTED_SPECIAL).
+  // A read of one plain property takes it from the resolved style as the
+  // fill would. Pages read one or two (RangerGames' dom.js position and
+  // display per new element, AG Grid, Floating UI): the whole fill was
+  // most of such a frame's script.
+  var COMPUTED_SPECIAL = {
+    width: 1, height: 1, 'line-height': 1, 'text-decoration-line': 1, 'grid-template-columns': 1, 'grid-template-rows': 1,
+    margin: 1, padding: 1, inset: 1, 'border-width': 1, 'border-style': 1, 'border-color': 1, 'border-top': 1, 'border-right': 1,
+    'border-bottom': 1, 'border-left': 1, border: 1, 'border-radius': 1, gap: 1, overflow: 1
+  };
+  class ComputedDecl extends CSSStyleDeclaration {
+    constructor(el, c, conn, b) { super(null); this._el = el; this._c = c; this._conn = conn; this._b = b; this._filled = false; this._readonly = true; }
+    _fill() {
+      if (this._filled) return;
+      this._filled = true;
+      this._readonly = false;
+      fillComputed(this, this._el, this._c, this._conn, this._b);
+      this._readonly = true;
+      this._el = null;
+    }
+    get _p() { if (!this._filled) this._fill(); return this.__p; }
+    set _p(v) { this.__p = v; }
+    get _order() { if (!this._filled) this._fill(); return this.__order; }
+    set _order(v) { this.__order = v; }
+    getPropertyValue(n) {
+      n = String(n);
+      if (n.slice(0, 2) !== '--') n = n.toLowerCase();
+      if (!this._filled) {
+        var c = this._c;
+        if (!COMPUTED_SPECIAL[n] && n.slice(0, 10) !== 'animation-') {
+          // (the fill's order: INITIAL, the style's own, its variables; a
+          // later one wins, undefined and null are not set)
+          var v, w;
+          if (Object.prototype.hasOwnProperty.call(INITIAL, n)) v = c[n] !== undefined ? c[n] : INITIAL[n];
+          if (n.charAt(0) !== '_' && (w = c[n]) !== undefined && w !== null) v = w;
+          if (c._vars && (w = c._vars[n]) !== undefined && w !== null) v = w;
+          return v === undefined || v === null ? '' : v;
+        }
+      }
+      var r = this.__p[n];
+      if (!this._filled) { this._fill(); r = this.__p[n]; }
+      return r === undefined ? '' : r;
+    }
+  }
+
+  function getComputedStyle(el, pseudo) {
+    if (!el || el.nodeType !== 1) throw new TypeError("Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.");
+    var conn = el.isConnected;
+    var c = conn ? computedOf(el) : { display: 'block', _vars: {} };
+    var b = boxes[el.__id];
+    return styleProxy(new ComputedDecl(el, c, conn, b ? [b[0], b[1], b[2], b[3]] : null));
   }
   // a resolved style's shorthands from its longhands (CSSOM 6.7.2 resolved
   // values, as Chromium serialises them): four sides collapse to fewer when
