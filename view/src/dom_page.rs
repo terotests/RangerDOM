@@ -35,7 +35,7 @@ use std::rc::Rc;
 
 use crate::dom_view::{DomBoxes, DomSvgDocs, DomView};
 use crate::rgr::EVGElement;
-use rangerdom_json::{JsonParser, JsonValue};
+use rangerdom_json::{JsonMemo, JsonParser, JsonValue};
 
 pub struct DomPage {
     pub svgs: Rc<RefCell<DomSvgDocs>>,
@@ -59,8 +59,10 @@ pub struct DomPage {
     byN: HashMap<i64, Rc<RefCell<JsonValue>>>,
     epoch: i64,
     /// the nodes' style objects by node id, and their texts
-    styleObj: HashMap<String, Rc<RefCell<JsonValue>>>,
-    styleText: HashMap<String, String>,
+    /// the style objects parsed so far by their text (JsonMemo): a node
+    /// sent again with the same style has the same object, which what was
+    /// built under it is kept by, and a style is parsed once
+    styles: Rc<RefCell<JsonMemo>>,
     /// the nodes the last page sent (fresh), the most a page sent (total),
     /// how many numbered nodes the page held when last counted (live)
     fresh: i64,
@@ -96,8 +98,7 @@ impl DomPage {
             laid: false,
             byN: HashMap::new(),
             epoch: -1,
-            styleObj: HashMap::new(),
-            styleText: HashMap::new(),
+            styles: Rc::new(RefCell::new(JsonMemo::new("s"))),
             fresh: 0,
             total: 0,
             live: 0,
@@ -140,6 +141,7 @@ impl DomPage {
             return 0;
         }
         let p: Rc<RefCell<JsonParser>> = JsonParser::parse(json.clone());
+        p.borrow_mut().memo = Some(Rc::clone(&self.styles));
         let page: Rc<RefCell<JsonValue>> = p.borrow_mut().value();
         if page.borrow().kind != 5 {
             return 0;
@@ -343,8 +345,7 @@ impl DomPage {
         let epoch: i64 = page.borrow().getInt("d", 0);
         if epoch != self.epoch {
             self.byN = HashMap::new();
-            self.styleObj = HashMap::new();
-            self.styleText = HashMap::new();
+            self.styles.borrow_mut().clear();
             self.root = None;
             self.total = 0;
             self.live = 0;
@@ -409,20 +410,6 @@ impl DomPage {
             }
             self.byN = keep;
             self.live = self.byN.len() as i64;
-            let mut so: HashMap<String, Rc<RefCell<JsonValue>>> = HashMap::new();
-            let mut st: HashMap<String, String> = HashMap::new();
-            let sk: Vec<String> = self.styleObj.keys().cloned().collect::<Vec<String>>();
-            for k in sk.iter().cloned() {
-                if ids.contains_key(&k) {
-                    so.insert(k.clone(), Rc::clone(self.styleObj.get(&k).unwrap()));
-                    let tx: Option<String> = self.styleText.get(&k).cloned();
-                    if tx.is_some() {
-                        st.insert(k.clone(), tx.unwrap());
-                    }
-                }
-            }
-            self.styleObj = so;
-            self.styleText = st;
         }
         if self.fresh > self.total {
             self.total = self.fresh;
@@ -506,25 +493,6 @@ impl DomPage {
         let id: String = n.borrow().getText("i");
         if !id.is_empty() {
             self.fresh += 1;
-            // (a node sent again keeps its style object while that holds
-            // the same: its children were built under it)
-            let s: Rc<RefCell<JsonValue>> = n.borrow().get("s");
-            if s.borrow().kind == 5 {
-                let text: String = s.borrow().toJson();
-                let was: Option<String> = self.styleText.get(&id).cloned();
-                let mut keep: Rc<RefCell<JsonValue>> = Rc::clone(&s);
-                if was.is_some() && was.unwrap() == text {
-                    let old: Option<Rc<RefCell<JsonValue>>> = self.styleObj.get(&id).cloned();
-                    if old.is_some() {
-                        keep = old.unwrap();
-                    }
-                }
-                if !Rc::ptr_eq(&keep, &s) {
-                    n.borrow_mut().put("s", Rc::clone(&keep));
-                }
-                self.styleObj.insert(id.clone(), keep);
-                self.styleText.insert(id.clone(), text);
-            }
         }
         let num: i64 = n.borrow().getInt("n", -1);
         if num >= 0 {

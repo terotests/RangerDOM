@@ -9,6 +9,7 @@
 //! decoded (utf8Of).
 
 use ranger::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::rgr::JsonText;
@@ -270,6 +271,32 @@ impl JsonValue {
     }
 }
 
+/// the objects under a key (a render tree's "s", its nodes' computed
+/// styles) a reader has parsed, by their text: the same text again is the
+/// same object, not parsed again. A page's boxes share a few styles (a
+/// game's 266 boxes, 30 styles), and a delta sends them again each frame.
+#[derive(Clone)]
+pub struct JsonMemo {
+    pub key: String,
+    pub map: HashMap<String, Rc<RefCell<JsonValue>>>,
+    pub hits: i64,
+    pub misses: i64,
+}
+
+impl JsonMemo {
+    pub fn new(key: &str) -> Self {
+        Self {
+            key: key.to_string(),
+            map: HashMap::new(),
+            hits: 0,
+            misses: 0,
+        }
+    }
+    pub fn clear(&mut self) {
+        self.map = HashMap::new();
+    }
+}
+
 #[derive(Clone)]
 pub struct JsonParser {
     pub text: String,
@@ -277,6 +304,7 @@ pub struct JsonParser {
     pub len: i64,
     pub ok: bool,
     pub error: String,
+    pub memo: Option<Rc<RefCell<JsonMemo>>>,
 }
 
 impl JsonParser {
@@ -287,6 +315,7 @@ impl JsonParser {
             len: 0,
             ok: true,
             error: String::new(),
+            memo: None,
         }
     }
     /// the value, or null with ok false
@@ -421,7 +450,12 @@ impl JsonParser {
             }
             self.pos += 1;
             self.ws();
-            let v: Rc<RefCell<JsonValue>> = self.readValue();
+            let mut v: Rc<RefCell<JsonValue>> = Rc::new(RefCell::new(JsonValue::new()));
+            if self.memo.is_some() && self.peek() == 123 && key == self.memo.as_ref().unwrap().borrow().key {
+                v = self.readMemo();
+            } else {
+                v = self.readValue();
+            }
             o.borrow_mut().put(&key, v.clone());
             self.ws();
             let c: i64 = self.peek();
@@ -437,6 +471,65 @@ impl JsonParser {
             }
         }
         o
+    }
+    /// an object at pos from the memo by its text, or parsed and kept there
+    fn readMemo(&mut self) -> Rc<RefCell<JsonValue>> {
+        let start: i64 = self.pos;
+        let end: i64 = self.objectEnd(start);
+        if end < 0 {
+            return self.readValue();
+        }
+        let raw: String = JsonText::substr(&self.text, start, end);
+        let memo: Rc<RefCell<JsonMemo>> = Rc::clone(self.memo.as_ref().unwrap());
+        let hit: Option<Rc<RefCell<JsonValue>>> = memo.borrow().map.get(&raw).cloned();
+        if hit.is_some() {
+            self.pos = end;
+            memo.borrow_mut().hits += 1;
+            return hit.unwrap();
+        }
+        let v: Rc<RefCell<JsonValue>> = self.readValue();
+        if self.ok && self.pos == end {
+            if (memo.borrow().map.len() as i64) >= 8192 {
+                memo.borrow_mut().clear();
+            }
+            memo.borrow_mut().map.insert(raw, Rc::clone(&v));
+            memo.borrow_mut().misses += 1;
+        }
+        v
+    }
+    /// where the object starting at start ends (after its closing brace),
+    /// -1 when it does not
+    fn objectEnd(&self, start: i64) -> i64 {
+        let mut depth: i64 = 0;
+        let mut i: i64 = start;
+        let mut inStr: bool = false;
+        while i < self.len {
+            let c: i64 = JsonText::char_at(&self.text, i);
+            if inStr {
+                if c == 92 {
+                    i += 1;
+                } else {
+                    if c == 34 {
+                        inStr = false;
+                    }
+                }
+            } else {
+                if c == 34 {
+                    inStr = true;
+                }
+                if c == 123 || c == 91 {
+                    depth += 1;
+                }
+                if c == 125 || c == 93 {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i + 1;
+                    }
+                }
+            }
+            i += 1;
+        }
+        -1
     }
     pub fn readArray(&mut self) -> Rc<RefCell<JsonValue>> {
         let a: Rc<RefCell<JsonValue>> = JsonValue::mkArr();

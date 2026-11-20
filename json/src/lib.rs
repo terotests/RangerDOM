@@ -10,5 +10,5 @@ mod json;
 mod rgr;
 pub mod text;
 
-pub use json::{JsonParser, JsonValue};
+pub use json::{JsonMemo, JsonParser, JsonValue};
 pub use text::DomText;
