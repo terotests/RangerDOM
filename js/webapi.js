@@ -20,6 +20,8 @@
 //                         rest named ({"r": n}); see renderJson
 //   __renderDelta(again)  __render() for such a host; again: it lost what
 //                         it kept, the whole page is sent
+//   __wire(on)            a delta host that reads the styles as a table:
+//                         each style's shared part sent once, see wireRef
 //   __styleCheck()        a test's: '' when the page with every style found
 //                         again is the page the kept styles give
 //   __layout(json)        the boxes the host laid out: {"id": [x, y, w, h]}
@@ -9502,6 +9504,8 @@
     for (var n in vals) out[n] = computeValue(n, vals[n], ctx, parent, out);
     if (b._cc) Object.defineProperty(out, '_cc', { value: b._cc, enumerable: false, configurable: true, writable: true });
     Object.defineProperty(out, '_sid', { value: ++styleUid, enumerable: false });
+    // (the style it is over: the style table's base, wireRefOf)
+    Object.defineProperty(out, '_ovb', { value: b, enumerable: false });
     return out;
   }
   function computeStyle1(el, parent, pe, extra, spec) {
@@ -10650,6 +10654,9 @@
       Object.defineProperty(cs, '_ownPs', { value: parentStyle, enumerable: false, configurable: true, writable: true });
     }
     o.s = s;
+    // (sMod: s is not its style's own members with only PATCHED ones
+    // changed, wireText)
+    var sMod = false;
     // the individual transforms (translate, rotate, scale) before the
     // transform list, CSS Transforms 2, 6.1: the host takes one list
     if ((cs.translate && cs.translate !== 'none') || (cs.rotate && cs.rotate !== 'none') || (cs.scale && cs.scale !== 'none')) s.transform = individualTransforms(n, cs);
@@ -10666,15 +10673,15 @@
     if (n.localName === 'body' && n.parentNode && n.parentNode.localName === 'html' && n.parentNode.parentNode && n.parentNode.parentNode.nodeType === 9 && (s['overflow-x'] || s['overflow-y'])) {
       var rootCs = computedOf(n.parentNode), firstBody = null;
       for (var bi = 0; bi < n.parentNode._c.length && !firstBody; bi++) if (n.parentNode._c[bi].localName === 'body') firstBody = n.parentNode._c[bi];
-      if (firstBody === n && (rootCs['overflow-x'] || 'visible') === 'visible' && (rootCs['overflow-y'] || 'visible') === 'visible') { delete s['overflow-x']; delete s['overflow-y']; }
+      if (firstBody === n && (rootCs['overflow-x'] || 'visible') === 'visible' && (rootCs['overflow-y'] || 'visible') === 'visible') { delete s['overflow-x']; delete s['overflow-y']; sMod = true; }
     }
-    if (/^(inline-)?grid-lanes$/.test(cs.display)) lanesStyle(cs, s);
+    if (/^(inline-)?grid-lanes$/.test(cs.display)) { lanesStyle(cs, s); sMod = true; }
     // (width does not apply to rows and row groups, height not to columns
     // and column groups, CSS 2 10.2 and 10.5)
     var tblBox = (!cs.float || cs.float === 'none') && cs.position !== 'absolute' && cs.position !== 'fixed' && !(parentStyle && /flex|grid/.test(parentStyle.display || ''));
     if (!tblBox) {}
-    else if (/^table-(row|row-group|header-group|footer-group)$/.test(cs.display)) { delete s.width; delete s['min-width']; delete s['max-width']; }
-    else if (/^table-column(-group)?$/.test(cs.display)) { delete s.height; delete s['min-height']; delete s['max-height']; }
+    else if (/^table-(row|row-group|header-group|footer-group)$/.test(cs.display)) { delete s.width; delete s['min-width']; delete s['max-width']; sMod = true; }
+    else if (/^table-column(-group)?$/.test(cs.display)) { delete s.height; delete s['min-height']; delete s['max-height']; sMod = true; }
     // a text field with an auto width is as wide as its size (20) in
     // characters, as Chromium measures them: 0.6em each and 1.275em more
     // (0.75em more in a monospace font), in a line only: a flex or grid
@@ -10686,6 +10693,7 @@
       var fw = fsz * (0.6 * fsize + (/monospace/.test(cs['font-family'] || '') ? 0.75 : 1.275));
       if (cs['box-sizing'] === 'border-box') fw += (parseFloat(cs['padding-left']) || 0) + (parseFloat(cs['padding-right']) || 0) + (parseFloat(cs['border-left-width']) || 0) + (parseFloat(cs['border-right-width']) || 0);
       s.width = (Math.round(fw * 100) / 100) + 'px';
+      sMod = true;
     }
     // (a percentage-wide text field in a flex row that is itself as wide
     // as its content: the row's width is the field's size in characters,
@@ -10697,6 +10705,7 @@
       var fw2 = fsz2 * (0.6 * fsize2 + (/monospace/.test(cs['font-family'] || '') ? 0.75 : 1.275));
       if (cs['box-sizing'] === 'border-box') fw2 += (parseFloat(cs['padding-left']) || 0) + (parseFloat(cs['padding-right']) || 0) + (parseFloat(cs['border-left-width']) || 0) + (parseFloat(cs['border-right-width']) || 0);
       s['min-width'] = (Math.round(fw2 * 100) / 100) + 'px';
+      sMod = true;
     }
     var a = null;
     for (var i = 0; i < n._attrs.length; i++) {
@@ -10838,11 +10847,11 @@
       var kids0 = kids;
       kids = anonTables(cs.display, kids, kd, o.i, true);
       if (kids !== kids0) { kel = null; kdj = null; }
-      if (cs['border-collapse'] === 'collapse' && /^(inline-)?table$/.test(cs.display)) { pjDelta = deltaOn && !deltaOff; kids = collapseTable(o, kids, true, cs.color, kel); pjDelta = false; kdj = collapseDj; collapseDj = null; }
+      if (cs['border-collapse'] === 'collapse' && /^(inline-)?table$/.test(cs.display)) { pjDelta = deltaOn && !deltaOff; sMod = true; kids = collapseTable(o, kids, true, cs.color, kel); pjDelta = false; kdj = collapseDj; collapseDj = null; }
       var own = JSON.stringify(o);
       var kj = kids.join(',');
       if (deltaOn) {
-        if (kdj) { renderDj = own.slice(1, -1) + (kids.length ? ',"c":[' + kdj.join(',') + ']}' : '}'); if (kel && !pm && !pb && !pa && !fl) renderOwn = { el: n, own: own, kids: kids, kel: kel, cs: cs, st: null }; }
+        if (kdj) { var ownD = wireOn && o.s && typeof o.s === 'object' ? wireText(own, o, cs, parentStyle, sMod) : own; renderDj = ownD.slice(1, -1) + (kids.length ? ',"c":[' + kdj.join(',') + ']}' : '}'); if (kel && !pm && !pb && !pa && !fl) renderOwn = { el: n, own: own, ownW: wireOn ? ownD : null, kids: kids, kel: kel, cs: cs, st: null }; }
         else { unmark(dm0); renderDj = null; }
       }
       // (a table part's own members and children, for its table's border
@@ -11907,6 +11916,85 @@
     for (var i = from; i < marks.length; i++) marks[i].dj = null;
     marks.length = from;
   }
+  // THE STYLE TABLE (__wire): a delta host that keeps a table of styles is
+  // sent each node's style as a reference. A style's members that place
+  // or size a box (PATCHED: a game writes each box's left and top of
+  // its own, so no two styles were alike) stay with the node; the rest,
+  // shared by many boxes, is a base sent once in an epoch under a number:
+  // "s":7, or "s":[7,{"left":"3px","top":"9px"}]. The bases a render
+  // made go before its root, "st":{"e":epoch,"d":[[7,{...}],...]}. Only
+  // the delta texts (dj) carry references; a part that goes whole has its
+  // style written out, as without the table. The style attribute is left
+  // out of them: its declarations are in the style.
+  var wireOn = false, wireEpoch = 0, wireBase = null, wireN = 0, wireMemo = null, wireMemoN = 0, wireDefs = [];
+  // (the members a box's own inline style puts over a shared style,
+  // inlineOverlay's PATCHED, are the ones that stay with the node)
+  var WIRE_LIST = null;
+  function wireReset() { wireEpoch = deltaEpoch; wireBase = Object.create(null); wireN = 0; wireMemo = Object.create(null); wireMemoN = 0; wireDefs = []; }
+  // s (its text sT) as the table names it: a number, or [number, the
+  // placing members], as text
+  function wireRef(s, sT) {
+    if (wireEpoch !== deltaEpoch) wireReset();
+    var r = wireMemo[sT];
+    if (r !== undefined) return r;
+    var b = {}, ov = null;
+    for (var k in s) { if (PATCHED[k] === 1) { if (!ov) ov = {}; ov[k] = s[k]; } else b[k] = s[k]; }
+    var bT = JSON.stringify(b), id = wireBase[bT];
+    if (id === undefined) { id = wireBase[bT] = ++wireN; wireDefs.push('[' + id + ',' + bT + ']'); }
+    r = ov ? '[' + id + ',' + JSON.stringify(ov) + ']' : String(id);
+    if (++wireMemoN > 8192) { wireMemo = Object.create(null); wireMemoN = 1; }
+    wireMemo[sT] = r;
+    return r;
+  }
+  // the same by the style s is copied from: the boxes of one shared style
+  // (cs, or the style a patch or an inline overlay is over: _dfrom, _ovb)
+  // under one parent style have one base; only the members of PATCHED
+  // differ
+  function wireRefOf(s, cs, ps) {
+    if (wireEpoch !== deltaEpoch) wireReset();
+    var df = cs._dfrom, K = df && df.base ? df.base : cs._ovb || cs, c = K._wb, id;
+    if (c && c.ps === ps && c.ep === wireEpoch && c.tb === wireBase) id = c.id;
+    else {
+      var b = {};
+      for (var k in s) if (PATCHED[k] !== 1) b[k] = s[k];
+      var bT = JSON.stringify(b);
+      id = wireBase[bT];
+      if (id === undefined) { id = wireBase[bT] = ++wireN; wireDefs.push('[' + id + ',' + bT + ']'); }
+      if (!c) { c = {}; Object.defineProperty(K, '_wb', { value: c, enumerable: false, configurable: true, writable: true }); }
+      c.ps = ps; c.ep = wireEpoch; c.tb = wireBase; c.id = id;
+    }
+    if (!WIRE_LIST) WIRE_LIST = Object.keys(PATCHED);
+    var ov = null;
+    for (var i = 0; i < WIRE_LIST.length; i++) { var v = s[WIRE_LIST[i]]; if (v !== undefined) { if (!ov) ov = {}; ov[WIRE_LIST[i]] = v; } }
+    var r = ov ? '[' + id + ',' + JSON.stringify(ov) + ']' : String(id);
+    if (wireCheck) { wireCheck.n++; if (sortedJson(wireRef(s, JSON.stringify(s))) !== sortedJson(r)) { wireCheck.bad++; if (!wireCheck.first) wireCheck.first = r + ' /// ' + JSON.stringify(s); } }
+    return r;
+  }
+  var wireCheck = null;
+  // a node's text (own: o's JSON) with its style a reference and without
+  // its style attribute. (o's members are i, t, s in that order: its
+  // style is the first ,"s": after the tag)
+  function wireText(own, o, cs, ps, mod) {
+    var s = o.s, a = o.a, sT = JSON.stringify(s), at = own.indexOf(',"s":' + sT);
+    if (at < 0) return own;
+    var post = own.slice(at + 5 + sT.length);
+    if (a && typeof a.style === 'string') {
+      var sa = '"style":' + JSON.stringify(a.style), j = post.indexOf(sa);
+      if (j >= 0) {
+        var e = j + sa.length;
+        if (post.charCodeAt(j - 1) === 44) j--; else if (post.charCodeAt(e) === 44) e++;
+        post = post.slice(0, j) + post.slice(e);
+      }
+    }
+    return own.slice(0, at) + ',"s":' + (mod || !cs ? wireRef(s, sT) : wireRefOf(s, cs, ps)) + post;
+  }
+  // the bases made since the last delta render, for its text
+  function wireTable() {
+    if (!wireOn || wireEpoch !== deltaEpoch || !wireDefs.length) return '';
+    var t = ',"st":{"e":' + deltaEpoch + ',"d":[' + wireDefs.join(',') + ']}';
+    wireDefs = [];
+    return t;
+  }
   // n's kept render (k) with a new transform: el.style.transform was the
   // only change at or under n since (attrChanged), and its style is the one
   // k was rendered with but for the transform (patchedStyle). The text k
@@ -11944,6 +12032,17 @@
       if (plain) cut.kd = cut.kj;
     }
     var open = cut.pre + b + cut.mid + st + cut.post, dm = marks.length, kd = cut.kd;
+    // (with the style table: the delta text from the node's own text with
+    // its style named, cut the same way around the one value)
+    var cutW = null, openW = null;
+    if (fp.ownW && wireOn && wireEpoch === deltaEpoch) {
+      cutW = fp.cutW && fp.cutW.pn === pn ? fp.cutW : null;
+      if (!cutW) {
+        var w0 = fp.ownW, tw = '"' + pn + '":' + JSON.stringify(a), iw = w0.indexOf(tw);
+        if (iw >= 0 && w0.indexOf(tw, iw + 1) < 0) cutW = { pn: pn, pre: w0.slice(0, iw) + '"' + pn + '":"', post: '"' + w0.slice(iw + tw.length, -1) };
+      }
+      if (cutW) openW = cutW.pre + b + cutW.post;
+    }
     if (kd === null) {
       var kids = fp.kids, kel = fp.kel, kdj = [];
       for (var q = 0; q < kids.length; q++) {
@@ -11957,9 +12056,9 @@
       kd = ',"c":[' + kdj.join(',') + ']}';
     }
     var json = open + cut.kj;
-    var nk = { sg: styleGen, rv: n._rv, ps: parentStyle, sc: sc, json: json, ct: false, parts: null, fp: { el: n, own: open + '}', kids: fp.kids, kel: fp.kel, cs: cs, st: st, cut: cut }, _dm: dm };
+    var nk = { sg: styleGen, rv: n._rv, ps: parentStyle, sc: sc, json: json, ct: false, parts: null, fp: { el: n, own: open + '}', ownW: openW !== null ? openW + '}' : null, kids: fp.kids, kel: fp.kel, cs: cs, st: st, cut: cut, cutW: cutW }, _dm: dm };
     nk.n = ++deltaSerial;
-    nk.dj = '{"n":' + nk.n + ',' + open.slice(1) + kd;
+    nk.dj = '{"n":' + nk.n + ',' + (openW !== null ? openW : open).slice(1) + kd;
     nk.sent = 0; nk.de = deltaEpoch;
     n._rjl = nk; n._rj = nk;
     deltaOf(nk);
@@ -12679,7 +12778,12 @@
       // what the host has of it holds, under the number it had)
       var was = n._rjl;
       if (was && was.de === deltaEpoch && was.json === json) { nk.n = was.n; nk.dj = was.dj; nk.sent = was.sent; marks.length = dm; }
-      else { nk.n = json ? ++deltaSerial : 0; nk.dj = json && renderDj !== null && typeof r === 'string' ? '{"n":' + nk.n + ',' + renderDj : null; nk.sent = 0; }
+      else {
+        nk.n = json ? ++deltaSerial : 0; nk.dj = json && renderDj !== null && typeof r === 'string' ? '{"n":' + nk.n + ',' + renderDj : null; nk.sent = 0;
+        // (a node rendered as an object, an inline <svg> or a canvas,
+        // with the style table: its text with its style named)
+        if (json && wireOn && r && typeof r === 'object' && r.s && typeof r.s === 'object' && !deltaOff) { var wj = wireText(json, r, null, null, true); if (wj !== json) nk.dj = '{"n":' + nk.n + ',' + wj.slice(1); }
+      }
       nk.de = deltaEpoch;
       n._rjl = nk;
     }
@@ -12978,7 +13082,8 @@
     }
     var gone = goneEls ? ',"gone":' + goneEls : '';
     goneEls = 0;
-    return '{"v":' + generation + gone + ',"w":' + JSON.stringify(viewport.w) + ',"h":' + JSON.stringify(viewport.h) + ',"root":' + (root || 'null') + ',"title":' + JSON.stringify(doc.title) + (doc.compatMode === 'BackCompat' ? ',"quirks":true' : '') + (browserFonts ? ',"fm":"' + (browserFonts === 'measure' ? 'measure' : 'browser') + '"' : '') + '}';
+    var stT = delta ? wireTable() : '';
+    return '{"v":' + generation + gone + ',"w":' + JSON.stringify(viewport.w) + ',"h":' + JSON.stringify(viewport.h) + stT + ',"root":' + (root || 'null') + ',"title":' + JSON.stringify(doc.title) + (doc.compatMode === 'BackCompat' ? ',"quirks":true' : '') + (browserFonts ? ',"fm":"' + (browserFonts === 'measure' ? 'measure' : 'browser') + '"' : '') + '}';
   }
 
   // ---- input from the host -------------------------------------------------
@@ -14688,6 +14793,10 @@
   };
   // a test's: each text movedJson gives is compared with renderNode's
   G.__fastRenderCheck = function (on) { if (on === undefined) return fastCheck ? JSON.stringify(fastCheck) : ''; fastCheck = on ? { n: 0, bad: 0, first: '' } : null; return ''; };
+  // a test's: each style wireRefOf names by the style it is copied from is
+  // compared with the one its text gives
+  G.__wireCheck = function (on) { if (on === undefined) return wireCheck ? JSON.stringify(wireCheck) : ''; wireCheck = on ? { n: 0, bad: 0, first: '' } : null; return ''; };
+  G.__wire = function (on) { on = !!on; if (on !== wireOn) { wireOn = on; deltaEpoch++; } return String(wireOn); };
   G.__deltaRender = function (on) { on = !!on; if (on !== deltaOn) { deltaOn = on; deltaEpoch++; } return String(deltaOn); };
   // the host draws text with the browser's own faces (the playground's
   // canvas), so a line of Arial has Arial's height, not that of the Open

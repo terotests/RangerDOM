@@ -58,7 +58,6 @@ pub struct DomPage {
     /// delta pages: the nodes by their numbers, the epoch they are of
     byN: HashMap<i64, Rc<RefCell<JsonValue>>>,
     epoch: i64,
-    /// the nodes' style objects by node id, and their texts
     /// the style objects parsed so far by their text (JsonMemo): a node
     /// sent again with the same style has the same object, which what was
     /// built under it is kept by, and a style is parsed once
@@ -142,7 +141,16 @@ impl DomPage {
         }
         let p: Rc<RefCell<JsonParser>> = JsonParser::parse(json.clone());
         p.borrow_mut().memo = Some(Rc::clone(&self.styles));
+        self.styles.borrow_mut().missing = false;
         let page: Rc<RefCell<JsonValue>> = p.borrow_mut().value();
+        if self.styles.borrow().missing {
+            // (a style named from a table this host does not have)
+            self.styles.borrow_mut().missing = false;
+            self.styles.borrow_mut().restart(-1);
+            self.byN = HashMap::new();
+            self.lastJson = String::new();
+            return -1;
+        }
         if page.borrow().kind != 5 {
             return 0;
         }
@@ -345,7 +353,11 @@ impl DomPage {
         let epoch: i64 = page.borrow().getInt("d", 0);
         if epoch != self.epoch {
             self.byN = HashMap::new();
-            self.styles.borrow_mut().clear();
+            // (the page's style table, when it has one, began the epoch
+            // as the page was read: what it added stays)
+            if self.styles.borrow().epoch != epoch {
+                self.styles.borrow_mut().restart(epoch);
+            }
             self.root = None;
             self.total = 0;
             self.live = 0;
