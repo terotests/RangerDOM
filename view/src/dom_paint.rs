@@ -302,6 +302,10 @@ impl DomPaint {
             self.ok = false;
             return;
         }
+        // (the same text is the same object, JsonMemo)
+        if Rc::ptr_eq(ws, ns) {
+            return;
+        }
         let wk: Vec<String> = ws.borrow().keys.clone();
         for k in wk.iter().cloned() {
             if !ns.borrow().has(&k) {
