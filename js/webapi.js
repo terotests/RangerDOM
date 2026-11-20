@@ -2214,12 +2214,18 @@
     }
     set cssText(t) {
       this._p = {}; this._prio = {}; this._order = [];
-      var decls = parseDeclarations(String(t || ''));
+      var decls = declsMemo(String(t || ''));
       for (var i = 0; i < decls.length; i++) {
-        var dv = specifiedText(decls[i].name, decls[i].value);
-        var lh = expandShorthand(decls[i].name, dv);
-        if (lh) for (var k in lh) this._set(k, lh[k], decls[i].important ? 'important' : '');
-        else this._set(decls[i].name, dv, decls[i].important ? 'important' : '');
+        var d = decls[i], ex = d.ex;
+        // (its longhands as names and values, worked out once)
+        if (ex === undefined) {
+          var dv = specifiedText(d.name, d.value);
+          var lh = expandShorthand(d.name, dv);
+          ex = [];
+          if (lh) { for (var k in lh) ex.push(k, lh[k]); } else ex.push(d.name, dv);
+          d.ex = ex;
+        }
+        for (var x = 0; x < ex.length; x += 2) this._set(ex[x], ex[x + 1], d.important ? 'important' : '');
       }
       this._sync();
     }
@@ -2321,7 +2327,9 @@
   var BORDER_STYLES = /^(none|hidden|dotted|dashed|solid|double|groove|ridge|inset|outset)$/;
   function isColorWord(t) { return /^(#|rgb|hsl|hwb|lab|lch|oklab|oklch|color\(|var\()/.test(t) || NAMED_COLORS[t.toLowerCase()] !== undefined || t === 'transparent' || t === 'currentcolor' || t === 'currentColor'; }
   function isLength(t) { return /^[+-]?[\d.]+(px|em|rem|%|vh|vw|vmin|vmax|pt|pc|in|cm|mm|q|ch|ex)?$/i.test(t) || /^(calc|min|max|clamp)\(/.test(t) || t === 'thin' || t === 'medium' || t === 'thick'; }
+  var SHORTHANDS = { margin: 1, padding: 1, inset: 1, 'border-width': 1, 'border-style': 1, 'border-color': 1, border: 1, 'border-top': 1, 'border-right': 1, 'border-bottom': 1, 'border-left': 1, 'border-radius': 1, flex: 1, gap: 1, overflow: 1, 'flex-flow': 1, 'place-items': 1, 'place-content': 1, 'place-self': 1, 'grid-gap': 1, 'grid-row-gap': 1, 'grid-column-gap': 1, 'grid-template': 1, grid: 1, outline: 1, 'list-style': 1, font: 1 };
   function shorthandParts(n) {
+    if (SHORTHANDS[n] !== 1) return null;
     if (n === 'margin' || n === 'padding') return SIDES.map(function (s) { return n + '-' + s; });
     if (n === 'inset') return SIDES.slice();
     if (n === 'border-width' || n === 'border-style' || n === 'border-color') { var w = n.slice(7); return SIDES.map(function (s) { return 'border-' + s + '-' + w; }); }
@@ -6996,21 +7004,39 @@
     return out + v.slice(i);
   }
   function parseDeclarations(text) {
+    var ms = declsMemo(text), out = [];
+    for (var k = 0; k < ms.length; k++) out.push({ name: ms[k].name, value: ms[k].value, important: ms[k].important });
+    return out;
+  }
+  // the declarations of a text, each one parsed once for all texts it is
+  // in: a game's boxes are written whole as each is made ("position:
+  // absolute; left: 12px; ..."), and the same declarations came again and
+  // again through the checks below. The objects are shared: not changed.
+  var declMemo = Object.create(null), declMemoN = 0;
+  function declsMemo(text) {
     var out = [];
     // (split at the semicolons outside strings, escapes and blocks)
-    var parts = [];
     for (var i = 0; i <= text.length;) {
       var e = cssScan(text, i, ';');
-      parts.push(text.slice(i, e));
+      var p = text.slice(i, e);
       i = e + 1;
+      var m = declMemo[p];
+      if (m === undefined) {
+        m = parseDecl1(p);
+        if (declMemoN >= 8192) { declMemo = Object.create(null); declMemoN = 0; }
+        declMemo[p] = m; declMemoN++;
+      }
+      if (m !== null) out.push(m);
     }
-    for (var k = 0; k < parts.length; k++) {
-      var p = parts[k];
+    return out;
+  }
+  function parseDecl1(p) {
+    {
       var c = p.indexOf(':');
-      if (c < 0) continue;
+      if (c < 0) return null;
       var name = p.slice(0, c).trim();
       var value = p.slice(c + 1).trim();
-      if (!name) continue;
+      if (!name) return null;
       // (escapes in the name, and in a value outside its strings, stand
       // for their characters: one that stands for a delimiter is not one)
       if (name.indexOf('\\') >= 0) name = unescapeIdent(name);
@@ -7019,18 +7045,18 @@
       // the declaration with it invalid)
       if (/url\(/i.test(value) && name.slice(0, 2) !== '--') {
         var uv = urlsQuoted(value);
-        if (uv === null) continue;
+        if (uv === null) return null;
         value = uv;
       }
       if (value.indexOf('\\') >= 0 && name.slice(0, 2) !== '--') {
         var vs = value.split(/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/);
         for (var vi = 0; vi < vs.length; vi += 2) vs[vi] = unescapeIdent(vs[vi]);
         var bare = vs.filter(function (x, xi) { return xi % 2 === 0; }).join('');
-        if (/[;{}]/.test(bare)) continue;
+        if (/[;{}]/.test(bare)) return null;
         // (an escaped space is part of its identifier: `\0020yellow` is
         // no colour name)
         var rawBare = value.split(/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/).filter(function (x, xi) { return xi % 2 === 0; }).join('');
-        if (/\\(0{0,4}(20|9|a|c|d)(?![0-9a-f])|[ \t])/i.test(rawBare) && !/url\(/i.test(rawBare)) continue;
+        if (/\\(0{0,4}(20|9|a|c|d)(?![0-9a-f])|[ \t])/i.test(rawBare) && !/url\(/i.test(rawBare)) return null;
         value = vs.join('').replace(/[\x00-\x08\x0b\x0e-\x1f\x7f]/g, '\ufffd');
       }
       if (name.slice(0, 2) !== '--') name = name.toLowerCase();
@@ -7041,12 +7067,11 @@
       if (im) { important = true; value = value.slice(0, im.index).trim(); }
       // (any other `!` outside a string makes the declaration invalid:
       // `200!invalid`)
-      if (value.indexOf('!') >= 0 && name.slice(0, 2) !== '--' && /!/.test(value.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, ''))) continue;
-      if (value === '' && name.slice(0, 2) !== '--') continue;
-      if (!sizeValueOk(name, value) || (name === 'display' && !displayOk(value)) || !lengthsOk(name, value) || (name === 'font-family' && !familiesOk(value)) || (name === 'background-image' && !imagesOk(value)) || (/^border(-(top|right|bottom|left))?$/.test(name) && !borderOk(value)) || ((name === 'color' || name === 'background-color') && !colorOk(value)) || (name === 'background' && !backgroundOk(value)) || (name === 'font' && !fontOk(value)) || ((name === 'text-decoration' || name === 'text-decoration-line') && !decorationOk(value))) continue;
-      out.push({ name: name, value: value, important: important });
+      if (value.indexOf('!') >= 0 && name.slice(0, 2) !== '--' && /!/.test(value.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, ''))) return null;
+      if (value === '' && name.slice(0, 2) !== '--') return null;
+      if (!sizeValueOk(name, value) || (name === 'display' && !displayOk(value)) || !lengthsOk(name, value) || (name === 'font-family' && !familiesOk(value)) || (name === 'background-image' && !imagesOk(value)) || (/^border(-(top|right|bottom|left))?$/.test(name) && !borderOk(value)) || ((name === 'color' || name === 'background-color') && !colorOk(value)) || (name === 'background' && !backgroundOk(value)) || (name === 'font' && !fontOk(value)) || ((name === 'text-decoration' || name === 'text-decoration-line') && !decorationOk(value))) return null;
+      return { name: name, value: value, important: important, ex: undefined };
     }
-    return out;
   }
   // a colour value: a name, a system colour, #hex of 3, 4, 6 or 8 digits,
   // or a colour function; anything else is an invalid declaration
@@ -8290,33 +8315,69 @@
     // the same rules, inline style and presentational attributes give the
     // same declarations: elements alike (a table's rows and cells) share
     // one object, which computeStyle then knows them by (_sid)
-    var ckey = null;
+    var ckey = null, ckPre = '', ckPost = '';
     if (!pe) {
-      ckey = el.localName;
-      for (var hk = 0; hk < hits.length; hk++) ckey += ',' + (hits[hk].r._uid || (hits[hk].r._uid = ++ruleUid)) + ':' + hits[hk].sheet;
-      ckey += '|' + (attrOf(el, 'style') || '');
-      if (el._style) { var est = el._style; for (var eq = 0; eq < est._order.length; eq++) ckey += ';' + est._order[eq] + ':' + est._p[est._order[eq]] + (est._prio[est._order[eq]] ? '!' : ''); }
-      if (el.namespaceURI !== HTML_NS) ckey += '|' + el.namespaceURI;
+      ckPre = el.localName;
+      for (var hk = 0; hk < hits.length; hk++) ckPre += ',' + (hits[hk].r._uid || (hits[hk].r._uid = ++ruleUid)) + ':' + hits[hk].sheet;
+      var ckInl = '|' + (attrOf(el, 'style') || '');
+      if (el._style) { var est = el._style; for (var eq = 0; eq < est._order.length; eq++) ckInl += ';' + est._order[eq] + ':' + est._p[est._order[eq]] + (est._prio[est._order[eq]] ? '!' : ''); }
+      if (el.namespaceURI !== HTML_NS) ckPost += '|' + el.namespaceURI;
       // (of an HTML element only the attributes presentationalHints reads:
       // AG Grid gives every cell a comp-id of its own, so no two cells
       // shared their declarations)
       var html = el.namespaceURI === HTML_NS;
+      // (of an SVG element likewise only the presentation attributes, and
+      // an outer svg's size: a chart's paths differ in d alone, and each
+      // was styled again from the start)
+      var svgEl = el.namespaceURI === SVG_NS, outerSvg = svgEl && el.localName === 'svg';
       for (var ak = 0; ak < el._attrs.length; ak++) {
         var an = el._attrs[ak].name;
-        if (html ? !HINT_ATTRS[an.toLowerCase()] : an === 'class' || an === 'id' || an === 'style' || an.slice(0, 5) === 'data-' || an.slice(0, 5) === 'aria-') continue;
-        ckey += '|' + an + '=' + el._attrs[ak]._v;
+        if (html ? !HINT_ATTRS[an.toLowerCase()] : svgEl ? !SVG_PRES_ATTR[an] && !(outerSvg && (an === 'width' || an === 'height')) : an === 'class' || an === 'id' || an === 'style' || an.slice(0, 5) === 'data-' || an.slice(0, 5) === 'aria-') continue;
+        ckPost += '|' + an + '=' + el._attrs[ak]._v;
       }
       // (a cell's hints come from its table's attributes too)
       if (html && (el.localName === 'td' || el.localName === 'th')) {
         var tb0 = el.parentNode;
         while (tb0 && tb0.nodeType === 1 && tb0.localName !== 'table') tb0 = tb0.parentNode;
-        if (tb0 && tb0.nodeType === 1) ckey += '|t:' + tb0.getAttribute('cellpadding') + ',' + tb0.getAttribute('border');
+        if (tb0 && tb0.nodeType === 1) ckPost += '|t:' + tb0.getAttribute('cellpadding') + ',' + tb0.getAttribute('border');
       }
+      ckey = ckPre + ckInl + ckPost;
       var inl = !!(el._style && el._style._order.length) || !!attrOf(el, 'style');
       if (specCache.gen !== styleGen) specCache = { gen: styleGen, map: {}, n: 0 };
       if (inl && (specInline.gen !== styleGen || specInline.n >= INLINE_KEPT)) { specInline = { gen: styleGen, map: {}, n: 0 }; sharedInline = { gen: styleGen, map: {}, n: 0 }; }
       var hit = (inl ? specInline : specCache).map[ckey];
       if (hit) return hit;
+      // an inline style of a box's own place and size (left, top, width…,
+      // OVERLAY): the declarations without those, which the boxes alike
+      // share with their computed style, and those over them
+      // (computeStyle). A game writes every box whole, each with a place
+      // of its own, and each was styled from the start.
+      var ov = inl && !shadowCount && overlayOn ? inlineOverlay(el, hits) : null;
+      if (ov) {
+        var bk = ckPre + '|~' + ov.rest + ckPost, bmap = ov.rest ? specInline : specCache;
+        var base = bmap.map[bk];
+        if (!base) {
+          base = buildSpec(el, hits, ov.names);
+          Object.defineProperty(base, '_sid', { value: ++specUid, enumerable: false });
+          if (ov.rest) Object.defineProperty(base, '_inl', { value: true, enumerable: false });
+          if (ov.rest || specCache.n < 20000) { bmap.map[bk] = base; bmap.n++; }
+        }
+        var full = {};
+        for (var bn in base) full[bn] = base[bn];
+        for (var on in ov.vals) full[on] = ov.vals[on];
+        // (the inline ones set last, as the cascade sets them)
+        var fseq = {}, nsq = 0;
+        for (var sk in base._seq) { fseq[sk] = base._seq[sk]; if (fseq[sk] > nsq) nsq = fseq[sk]; }
+        for (var on0 in ov.vals) fseq[on0] = ++nsq;
+        Object.defineProperty(full, '_seq', { value: fseq, enumerable: false });
+        Object.defineProperty(full, '_auth', { value: base._auth, enumerable: false });
+        Object.defineProperty(full, '_base', { value: base, enumerable: false });
+        Object.defineProperty(full, '_ov', { value: ov.vals, enumerable: false });
+        Object.defineProperty(full, '_sid', { value: ++specUid, enumerable: false });
+        Object.defineProperty(full, '_inl', { value: true, enumerable: false });
+        specInline.map[ckey] = full; specInline.n++;
+        return full;
+      }
     }
     // (a pseudo-element's declarations come from its rules alone: one
     // object for all with the same rules, as specCache is for elements. A
@@ -8329,7 +8390,73 @@
       if (peSpec.gen !== styleGen) peSpec = { gen: styleGen, map: {}, n: 0 };
       var peHit = peSpec.map[pek];
       if (peHit) { if (scw) { scw.out = peHit; scw.og = styleGen; } return peHit; }
+      var po = buildSpec(el, hits, null, pe);
+      if (peSpec.n < 20000) { Object.defineProperty(po, '_sid', { value: ++specUid, enumerable: false }); peSpec.map[pek] = po; peSpec.n++; if (scw) { scw.out = po; scw.og = styleGen; } }
+      return po;
     }
+    var out = buildSpec(el, hits, null);
+    if (ckey !== null && (inl || specCache.n < 20000)) {
+      Object.defineProperty(out, '_sid', { value: ++specUid, enumerable: false });
+      if (inl) { Object.defineProperty(out, '_inl', { value: true, enumerable: false }); specInline.map[ckey] = out; specInline.n++; }
+      else { specCache.map[ckey] = out; specCache.n++; }
+    }
+    return out;
+  }
+  // the inline declarations of el that are only its own place, size or
+  // look (PATCHED: nothing else is computed from them) with plain values,
+  // which no matched rule sets: { names, vals, rest: the others as text },
+  // or null when there are none
+  // (off for a test to compare with: __webdom.overlay(false))
+  var overlayOn = true;
+  function inlineOverlay(el, hits) {
+    var st = el._style;
+    if (!st) { el.style; st = el._style; }
+    if (!st || !st._order.length) return null;
+    var names = null, vals = null, rest = '';
+    for (var i = 0; i < st._order.length; i++) {
+      var n = st._order[i], v = st._p[n];
+      if (PATCHED[n] && !st._prio[n] && overlayValueOk(v)) {
+        if (!ruleSets(hits, n)) { (names || (names = {}))[n] = 1; (vals || (vals = {}))[n] = v; continue; }
+      }
+      rest += ';' + n + ':' + v + (st._prio[n] ? '!' : '');
+    }
+    // (a logical property in the same style may come after its physical
+    // one and win: the cascade's order then)
+    if (names && /;([a-z-]*-(inline|block)(-[a-z]+)*|(min-|max-)?(inline|block)-size):/.test(rest)) return null;
+    return names ? { names: names, vals: vals, rest: rest } : null;
+  }
+  var ovValOk = Object.create(null), ovValN = 0;
+  function overlayValueOk(v) {
+    var ok = ovValOk[v];
+    if (ok !== undefined) return ok;
+    ok = !(v.indexOf('var(') >= 0 || v.indexOf('%') >= 0 || /^(inherit|initial|unset|revert|revert-layer)$/i.test(v) || /\d(ch|ex|cap|ic|lh|rlh|em|rem)\b|currentcolor|calc|env\(|attr\(/i.test(v));
+    if (ovValN >= 4096) { ovValOk = Object.create(null); ovValN = 0; }
+    ovValOk[v] = ok; ovValN++;
+    return ok;
+  }
+  // whether some matched rule declares n (or a shorthand of it, or all)
+  function ruleSets(hits, n) {
+    for (var h = 0; h < hits.length; h++) {
+      var r = hits[h].r, m = r._dn;
+      if (m === undefined) {
+        m = {};
+        var ds = r.decls;
+        for (var j = 0; j < ds.length; j++) {
+          var nm = ds[j].name;
+          m[nm] = 1;
+          var lh = expandShorthand(nm, ds[j].value);
+          if (lh) for (var k in lh) m[k] = 1;
+          else if (nm === 'all') { for (var pk in PATCHED) m[pk] = 1; }
+        }
+        r._dn = m;
+      }
+      if (m[n] === 1) return true;
+    }
+    return false;
+  }
+  // the declarations from the matched rules (sorted here), the inline
+  // style but the names in skip, and the presentational hints
+  function buildSpec(el, hits, skip, pe) {
     hits.sort(function (a, b) { return (a.ua === b.ua ? 0 : a.ua ? -1 : 1) || (!a.inner === !b.inner ? 0 : a.inner ? -1 : 1) || cmpSpec(a.r.sel.spec, b.r.sel.spec) || a.sheet - b.sheet || a.r.order - b.r.order; });
     // (seq: when each key was last set, for computeStyle to tell a logical
     // longhand and the physical property it maps to apart, the later winning)
@@ -8357,14 +8484,13 @@
         var dp = hits[hp].r.decls;
         for (var jp = 0; jp < dp.length; jp++) if (dp[jp].important) put(dp[jp].name, dp[jp].value, true, hits[hp].ua);
       }
-      if (peSpec.n < 20000) { Object.defineProperty(out, '_sid', { value: ++specUid, enumerable: false }); peSpec.map[pek] = out; peSpec.n++; if (scw) { scw.out = out; scw.og = styleGen; } }
       return out;
     }
     // inline style
     if (el._style || attrOf(el, 'style') !== null) {
       var st = el._style;
       if (!st) { el.style; st = el._style; }
-      for (var q = 0; q < st._order.length; q++) { var nm = st._order[q]; if (!imp[nm]) { out[nm] = st._p[nm]; seq[nm] = ++nseq; auth[nm] = 1; } }
+      for (var q = 0; q < st._order.length; q++) { var nm = st._order[q]; if (skip && skip[nm]) continue; if (!imp[nm]) { out[nm] = st._p[nm]; seq[nm] = ++nseq; auth[nm] = 1; } }
     }
     // !important: author important over inline over normal
     for (var h2 = 0; h2 < hits.length; h2++) {
@@ -8373,14 +8499,9 @@
     }
     if (el._style) {
       var st2 = el._style;
-      for (var q2 = 0; q2 < st2._order.length; q2++) { var n2 = st2._order[q2]; if (st2._prio[n2]) { out[n2] = st2._p[n2]; seq[n2] = ++nseq; auth[n2] = 1; } }
+      for (var q2 = 0; q2 < st2._order.length; q2++) { var n2 = st2._order[q2]; if (skip && skip[n2]) continue; if (st2._prio[n2]) { out[n2] = st2._p[n2]; seq[n2] = ++nseq; auth[n2] = 1; } }
     }
     presentationalHints(el, out);
-    if (ckey !== null && (inl || specCache.n < 20000)) {
-      Object.defineProperty(out, '_sid', { value: ++specUid, enumerable: false });
-      if (inl) { Object.defineProperty(out, '_inl', { value: true, enumerable: false }); specInline.map[ckey] = out; specInline.n++; }
-      else { specCache.map[ckey] = out; specCache.n++; }
-    }
     return out;
   }
   var ruleUid = 0, specUid = 0, styleUid = 0;
@@ -8420,12 +8541,18 @@
     Object.defineProperty(ps, '_ik', { value: k, enumerable: false });
     return k;
   }
+  // the SVG attributes presentationalHints reads (cascade's key: the same)
+  var SVG_PRES = ['fill', 'stroke', 'stroke-width', 'opacity', 'fill-opacity', 'stroke-opacity', 'display', 'visibility', 'transform', 'fill-rule', 'stroke-linecap', 'stroke-linejoin', 'stop-color', 'stop-opacity'];
+  var SVG_PRES_ATTR = {};
+  for (var spi = 0; spi < SVG_PRES.length; spi++) SVG_PRES_ATTR[SVG_PRES[spi]] = 1;
   function presentationalHints(el, out) {
     if (el.namespaceURI === SVG_NS) {
-      var pres = ['fill', 'stroke', 'stroke-width', 'opacity', 'fill-opacity', 'stroke-opacity', 'display', 'visibility', 'transform', 'fill-rule', 'stroke-linecap', 'stroke-linejoin', 'stop-color', 'stop-opacity'];
-      for (var i = 0; i < pres.length; i++) { var v = el.getAttribute(pres[i]); if (v !== null && out[pres[i]] === undefined) out[pres[i]] = v; }
+      // (one pass over the attributes: a path has three or four, and asking
+      // for each of the fourteen names was a fifth of a chart's styling)
+      var sa = el._attrs;
+      for (var i = 0; i < sa.length; i++) { var an = sa[i].name; if (SVG_PRES_ATTR[an] === 1 && out[an] === undefined) out[an] = sa[i]._v; }
       if (el.localName === 'svg') {
-        var w = el.getAttribute('width'), h = el.getAttribute('height');
+        var w = attrOf(el, 'width'), h = attrOf(el, 'height');
         if (w !== null && out.width === undefined) out.width = /^[\d.]+$/.test(w) ? w + 'px' : w;
         if (h !== null && out.height === undefined) out.height = /^[\d.]+$/.test(h) ? h + 'px' : h;
       }
@@ -9345,6 +9472,39 @@
 
   function computeStyle(el, parent, pe, extra) {
     var spec = pe ? cascade(el, pe) : cascade(el);
+    // (an inline place and size over declarations boxes alike share: their
+    // style, shared too, with those computed over it; see cascade1)
+    if (spec && spec._base && !pe && !extra && parent && parent._sid && !(el._waapi && el._waapi.length) && el !== (doc && doc.documentElement)) {
+      // (kept as any shared style: the same inline style under the same
+      // parent style is the same object, which its children share by)
+      if (sharedInline.gen !== styleGen) sharedInline = { gen: styleGen, map: {}, n: 0 };
+      var ok0 = spec._sid + ':' + parent._sid, os = sharedInline.map[ok0];
+      if (os) { el._ia = os._ia0; return os; }
+      os = overlayStyle(computeStyle1(el, parent, null, null, spec._base), spec._ov, parent);
+      if (os) {
+        Object.defineProperty(os, '_ia0', { value: el._ia, enumerable: false });
+        sharedInline.map[ok0] = os; sharedInline.n++;
+        return os;
+      }
+    }
+    return computeStyle1(el, parent, pe, extra, spec);
+  }
+  // a computed style with the plain values vals (PATCHED properties, see
+  // inlineOverlay) computed over it, as patchedStyle does; null when that
+  // cannot be told
+  function overlayStyle(b, vals, parent) {
+    var tr = b.transition, td = b['transition-duration'];
+    if ((tr && tr !== 'none' && /[1-9]/.test(tr)) || (td && /[1-9]/.test(td)) || (b.animation && b.animation !== 'none') || (b['animation-name'] && b['animation-name'] !== 'none')) return null;
+    if (b.display === 'table-cell' || b._boxDep) return null;
+    var out = {};
+    for (var k in b) out[k] = b[k];
+    var ctx = { em: b._fontPx, rem: rootFontPx(), vw: viewport.w / 100, vh: viewport.h / 100 };
+    for (var n in vals) out[n] = computeValue(n, vals[n], ctx, parent, out);
+    if (b._cc) Object.defineProperty(out, '_cc', { value: b._cc, enumerable: false, configurable: true, writable: true });
+    Object.defineProperty(out, '_sid', { value: ++styleUid, enumerable: false });
+    return out;
+  }
+  function computeStyle1(el, parent, pe, extra, spec) {
     var skey = null, ikey = null, tookOwn = false;
     // (a pseudo-element's style too: it takes nothing from its element but
     // the element's style, its parent here)
@@ -14587,7 +14747,7 @@
     return 'ok';
   };
   G.__querySelector = function (s) { var e = doc && doc.querySelector(s); return e ? String(e.__id) : ''; };
-  G.__webdom = { restyleAll: function () { changed(); }, computedOf: computedOf, cascade: cascade, parseSelectorList: parseSelectorList, normalizeColor: normalizeColor, resolveURL: resolveURL, nodeById: nodeById, lengthPx: lengthPx };
+  G.__webdom = { restyleAll: function () { changed(); }, overlay: function (on) { overlayOn = !!on; changed(); }, computedOf: computedOf, cascade: cascade, parseSelectorList: parseSelectorList, normalizeColor: normalizeColor, resolveURL: resolveURL, nodeById: nodeById, lengthPx: lengthPx };
 
   // ---- interfaces and members found missing against Chromium --------------
   // (bench/cases/webapi-survey: the globals and prototype members UI
