@@ -243,6 +243,12 @@ class RealmTest {
         def got (r.eval((this.file("tests/a11y.js"))))
         this.check(("a11y: roles, names and states from HTML and ARIA (" + got + ")") (got == "navigation:Main|link:Home|text:no href|main:|heading:Title:lv=1|heading:Sub:lv=4|paragraph:Some text|button:Save disk|img:disk|button:Close|button:Bold:pr=2|text:Name|textbox:Name:v=Ann,rq=1|text:Agree|checkbox:Agree:ck=2|slider:Volume:vn=3|combobox:Fruit:hp=listbox,v=Pear|option:Apple|option:Pear:se=2|tablist:|tab:One:se=2|tab:Two|button:Menu:ex=1,hp=menu|text:Search box|textbox:Search box:d=type here|list:|listitem:One|table:|rowgroup:|row:|columnheader:H|row:|cell:C"))
     }
+    fn lazyStyle:void () {
+        def r:DomRealm (this.realm("<html><head><style>circle[r='5']{stroke:rgb(4,5,6)} path{fill:rgb(1,2,3)}</style></head><body><div id=w style='margin:1px 2px;width:10px;--v:3'><svg width=10 height=10 viewBox='0 0 10 10'><path id=p d='M0 0 L1 1'/><circle id=c r='4'/></svg><span>x</span></div></body></html>"))
+        r.runScripts()
+        def got (r.eval((this.file("tests/lazystyle.js"))))
+        this.check(("computed style read lazily, SVG geometry drawn again without a restyle, several inline properties as one change (" + got + ")") (got == "true,0,2px,1px 2px,3,true,true,true,rgb(4, 5, 6),true,margin-top: 1px; margin-right: 2px; margin-bottom: 1px; width: 20px; --v: 3; height: 7px;,7px,true"))
+    }
     fn run:void () {
         this.plainDom()
         this.react()
@@ -262,6 +268,7 @@ class RealmTest {
         this.controls()
         this.focus()
         this.a11y()
+        this.lazyStyle()
         print ("passed " + (to_string passes) + ", failed " + (to_string fails))
     }
 
