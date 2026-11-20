@@ -230,6 +230,16 @@ impl JsonValue {
         }
         fallback
     }
+    /// a number's (or a string's) value as an integer, else fallback
+    pub fn intOf(v: &Rc<RefCell<JsonValue>>, fallback: i64) -> i64 {
+        if v.borrow().kind == 2 || v.borrow().kind == 3 {
+            let n: Option<i64> = v.borrow().text().trim().to_string().parse::<i64>().ok();
+            if n.is_some() {
+                return n.unwrap();
+            }
+        }
+        fallback
+    }
     pub fn getBool(&self, key: &str, fallback: bool) -> bool {
         let v: Rc<RefCell<JsonValue>> = self.get(key);
         if v.borrow().kind == 1 {
@@ -275,12 +285,23 @@ impl JsonValue {
 /// styles) a reader has parsed, by their text: the same text again is the
 /// same object, not parsed again. A page's boxes share a few styles (a
 /// game's 266 boxes, 30 styles), and a delta sends them again each frame.
+///
+/// With a style table (webapi.js __wire) a style is a reference instead:
+/// "s":7 is base 7 of the table, "s":[7,{"left":"3px"}] base 7 with the
+/// members given; "st":{"e":epoch,"d":[[7,{...}],...]} before the page's
+/// root adds bases (a new epoch starts the table and the memo again).
 #[derive(Clone)]
 pub struct JsonMemo {
     pub key: String,
     pub map: HashMap<String, Rc<RefCell<JsonValue>>>,
     pub hits: i64,
     pub misses: i64,
+    /// the style table's bases by number, the epoch they are of (-1: none)
+    pub table: HashMap<i64, Rc<RefCell<JsonValue>>>,
+    pub epoch: i64,
+    /// a reference named a base the table does not have (the page is to
+    /// be asked for whole)
+    pub missing: bool,
 }
 
 impl JsonMemo {
@@ -290,10 +311,73 @@ impl JsonMemo {
             map: HashMap::new(),
             hits: 0,
             misses: 0,
+            table: HashMap::new(),
+            epoch: -1,
+            missing: false,
         }
     }
     pub fn clear(&mut self) {
         self.map = HashMap::new();
+    }
+    /// a new epoch: the table and the memo start again
+    pub fn restart(&mut self, epoch: i64) {
+        self.map = HashMap::new();
+        self.table = HashMap::new();
+        self.epoch = epoch;
+    }
+    /// "st": the bases it adds to the table
+    pub fn addTable(&mut self, st: &Rc<RefCell<JsonValue>>) {
+        if st.borrow().kind != 5 {
+            return;
+        }
+        let e: i64 = st.borrow().getInt("e", -1);
+        if e != self.epoch {
+            self.restart(e);
+        }
+        let d: Rc<RefCell<JsonValue>> = st.borrow().get("d");
+        let __it_d = d.borrow().items.clone();
+        for def in __it_d.iter().cloned() {
+            if def.borrow().kind != 4 || (def.borrow().items.len() as i64) < 2 {
+                continue;
+            }
+            let id: i64 = JsonValue::intOf(&def.borrow().items[0].clone(), -1);
+            let base: Rc<RefCell<JsonValue>> = def.borrow().items[1].clone();
+            self.table.insert(id, base);
+        }
+    }
+    /// a reference (a number, or [number, members]) as the style it names;
+    /// null and missing when the table has no such base
+    pub fn resolve(&mut self, r: &Rc<RefCell<JsonValue>>) -> Rc<RefCell<JsonValue>> {
+        let kind: i64 = r.borrow().kind;
+        let mut idv: Rc<RefCell<JsonValue>> = Rc::clone(r);
+        if kind == 4 {
+            idv = r.borrow().item(0);
+        }
+        let id: i64 = JsonValue::intOf(&idv, -1);
+        let base: Option<Rc<RefCell<JsonValue>>> = self.table.get(&id).cloned();
+        if base.is_none() {
+            self.missing = true;
+            return JsonValue::mkNull();
+        }
+        let b: Rc<RefCell<JsonValue>> = base.unwrap();
+        if kind != 4 {
+            return b;
+        }
+        let ov: Rc<RefCell<JsonValue>> = r.borrow().item(1);
+        let o: Rc<RefCell<JsonValue>> = JsonValue::mkObj();
+        o.borrow_mut().keys = b.borrow().keys.clone();
+        o.borrow_mut().items = b.borrow().items.clone();
+        if ov.borrow().kind == 5 {
+            let n: i64 = ov.borrow().keys.len() as i64;
+            let mut i: i64 = 0;
+            while i < n {
+                let k: String = ov.borrow().keys[i as usize].clone();
+                let v: Rc<RefCell<JsonValue>> = ov.borrow().items[i as usize].clone();
+                o.borrow_mut().put(&k, v);
+                i += 1;
+            }
+        }
+        o
     }
 }
 
@@ -451,10 +535,21 @@ impl JsonParser {
             self.pos += 1;
             self.ws();
             let mut v: Rc<RefCell<JsonValue>> = Rc::new(RefCell::new(JsonValue::new()));
-            if self.memo.is_some() && self.peek() == 123 && key == self.memo.as_ref().unwrap().borrow().key {
-                v = self.readMemo();
+            let pk: i64 = self.peek();
+            if self.memo.is_some() && key == self.memo.as_ref().unwrap().borrow().key && (pk == 123 || pk == 91 || (pk >= 48 && pk <= 57)) {
+                if pk >= 48 && pk <= 57 {
+                    let r: Rc<RefCell<JsonValue>> = self.readValue();
+                    let memo: Rc<RefCell<JsonMemo>> = Rc::clone(self.memo.as_ref().unwrap());
+                    v = memo.borrow_mut().resolve(&r);
+                } else {
+                    v = self.readMemo();
+                }
             } else {
                 v = self.readValue();
+                if self.memo.is_some() && key == "st" {
+                    let memo: Rc<RefCell<JsonMemo>> = Rc::clone(self.memo.as_ref().unwrap());
+                    memo.borrow_mut().addTable(&v);
+                }
             }
             o.borrow_mut().put(&key, v.clone());
             self.ws();
@@ -487,7 +582,13 @@ impl JsonParser {
             memo.borrow_mut().hits += 1;
             return hit.unwrap();
         }
-        let v: Rc<RefCell<JsonValue>> = self.readValue();
+        let mut v: Rc<RefCell<JsonValue>> = self.readValue();
+        if self.ok && v.borrow().kind == 4 {
+            v = memo.borrow_mut().resolve(&v);
+            if memo.borrow().missing {
+                return v;
+            }
+        }
         if self.ok && self.pos == end {
             if (memo.borrow().map.len() as i64) >= 8192 {
                 memo.borrow_mut().clear();

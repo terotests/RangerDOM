@@ -255,6 +255,12 @@ class RealmTest {
         def got (r.eval((this.file("tests/overlay.js"))))
         this.check(("inline place and size over a shared style, SVG paths alike share, declarations parsed once (" + got + ")") (got == "true,true,rgb(0, 0, 255),position: absolute; left: 5px; top: 6px; width: 20px; height: 10px; background-color: red;,height: 12px; left: 1px !important;,height: 13px; z-index: 2; opacity: 0.5;,true,true,7px,20px,4px,rgb(9, 9, 9)"))
     }
+    fn wire:void () {
+        def r:DomRealm (this.realm("<html><head><style>.box{color:rgb(1,2,3);border:1px solid rgb(4,5,6);font-size:9px} path{stroke:black}</style></head><body><div id=r style='position:relative'></div></body></html>"))
+        r.runScripts()
+        def got (r.eval((this.file("tests/wire.js"))))
+        this.check(("style table: the delta render with styles as references puts together the whole render (" + got + ")") (got == "true,true,true,true,no style,true,true,true,true,true,true,false,true"))
+    }
     fn run:void () {
         this.plainDom()
         this.react()
@@ -276,6 +282,7 @@ class RealmTest {
         this.a11y()
         this.lazyStyle()
         this.overlay()
+        this.wire()
         print ("passed " + (to_string passes) + ", failed " + (to_string fails))
     }
 
