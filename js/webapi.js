@@ -14856,7 +14856,10 @@
     return 'ok';
   };
   G.__querySelector = function (s) { var e = doc && doc.querySelector(s); return e ? String(e.__id) : ''; };
-  G.__webdom = { restyleAll: function () { changed(); }, overlay: function (on) { overlayOn = !!on; changed(); }, computedOf: computedOf, cascade: cascade, parseSelectorList: parseSelectorList, normalizeColor: normalizeColor, resolveURL: resolveURL, nodeById: nodeById, lengthPx: lengthPx };
+  G.__webdom = { restyleAll: function () { changed(); }, overlay: function (on) { overlayOn = !!on; changed(); }, computedOf: computedOf, cascade: cascade, parseSelectorList: parseSelectorList, normalizeColor: normalizeColor, resolveURL: resolveURL, nodeById: nodeById, lengthPx: lengthPx,
+    // an <svg>'s markup as the render tree gives it ("svg"): a host that
+    // changed only a shape in it sends this as a paint patch
+    svgMarkup: function (n) { return serializeSvg(n, true); } };
 
   // ---- interfaces and members found missing against Chromium --------------
   // (bench/cases/webapi-survey: the globals and prototype members UI
