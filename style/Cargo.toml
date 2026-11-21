@@ -1,0 +1,17 @@
+# RangerDOM's style as a crate (src/lib.rs): webapi.js's elements as the
+# selectors see them, and the matching of a page's rules to them, for a
+# host that answers webapi.js's __hostSync. Placed in Ranger's
+# gallery/domstyle beside gallery/domjson; a host's crate names it as a
+# path dependency.
+[package]
+name = "rangerdom_style"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+ranger = { path = "../../runtime/rust/ranger" }
+rangerdom_json = { path = "../domjson" }

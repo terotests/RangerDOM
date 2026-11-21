@@ -53,7 +53,7 @@
   var viewport = { w: 1024, h: 768 };
   var doc = null;
 
-  function changed() { generation++; styleGen++; sheetGen++; ancEpoch++; sigEpoch++; }
+  function changed() { generation++; styleGen++; sheetGen++; ancEpoch++; sigEpoch++; rsxChg++; }
   // bumped with styleGen, and alone when a <style> came, went or changed
   // with rules that only some elements can match (styleSheetChanged): what
   // is read from the sheets (their list, rule sets, selectorReach, the
@@ -105,6 +105,10 @@
   // presentationalHints; viewBox of the outer <svg> sizes it, not here)
   var SVG_GEOMETRY = { d: 1, points: 1, x: 1, y: 1, x1: 1, y1: 1, x2: 1, y2: 1, cx: 1, cy: 1, r: 1, rx: 1, ry: 1, dx: 1, dy: 1, pathLength: 1, viewBox: 1, preserveAspectRatio: 1 };
   function attrChanged(el, name, was, now) {
+    // (what DomStyle was told of it: the attribute names, and the values
+    // of class, id and the ones its selectors read; a style attribute's
+    // new text is not)
+    if (name !== undefined && (was === null || now === null || was === undefined || now === undefined || name === 'class' || name === 'id' || (rsxSa !== null && rsxSa[name] === 1) || (rsxSa !== null && rsxSa[name.toLowerCase()] === 1))) { el._av = (el._av || 0) + 1; rsxChg++; }
     if (name === 'class' || name === 'id' || name === undefined) ancEpoch++;
     if (name !== 'style') sigEpoch++;
     var conn = el.isConnected;
@@ -386,7 +390,7 @@
   // added or moved restyled every node.
   // (detach: gone, the element taken out, and at, where it was)
   function treeChanged(p, c, gone, at) {
-    ancEpoch++; sigEpoch++;
+    ancEpoch++; sigEpoch++; rsxChg++;
     // (a styled element put under ones never styled: they hold one now)
     if (c && c._es) for (var es = p; es && !es._es; es = es.parentNode) es._es = true;
     if (shadowCount && (p.nodeType === 11 && p.host || inShadowScope(p))) { changed(); scheduleSlots(p._sr && (c || gone) ? assignedSlotOf(c || gone) : null); return; }
@@ -8219,6 +8223,192 @@
     p._ka = set; p._kaE = ancEpoch;
     return set;
   }
+  // ---- Rust style: the host matches the page's rules (DomStyle,
+  // style/ rangerdom_style). Any engine the page runs on gives it
+  // __hostSync; a request starting with U+0001 'S' is DomStyle's. An
+  // element is described to it when its style is asked for (its tag, the
+  // attributes the selectors read, its parent and its places among its
+  // siblings), and again only when one of those changed; so are its
+  // ancestors. DomStyle answers which rules match, and leaves the ones that
+  // read what webapi.js holds (:hover, :checked, :has(), a sibling
+  // combinator...) for cascade1 to match. Nothing it keeps is the page's: a
+  // new host (a restored snapshot) is told again. Off until
+  // __webdom.rsx(true) finds a host that answers; a page with shadow roots
+  // takes webapi.js's own matching.
+  // (rsxChg: attributes or the tree changed somewhere, attrChanged,
+  // treeChanged)
+  var rsxChg = 0, rsxOn = false, rsxOps = [], rsxDoc = null, rsxRs = null, rsxW = null, rsxFlags = null;
+  var rsxHits = new Map(), rsxSession = 0, rsxCheckOn = false, rsxBad = [], rsxN = { q: 0, fb: 0, sync: 0, rules: 0, desc: 0 };
+  // (the selectors read places among siblings: :first-child, :nth-child()...)
+  var rsxStruct = false;
+  function rsxClean(v) { v = String(v); return v.indexOf('\u0000') < 0 && v.indexOf('\u0001') < 0 ? v : v.replace(/[\u0000\u0001]/g, '�'); }
+  // (the value of an attribute no selector of the rule set reads is not
+  // sent, only that the element has it)
+  var rsxSa = null;
+  // el and its ancestors as DomStyle has them, told again where they
+  // changed: el._av counts el's attribute changes (attrChanged), a
+  // parent's _cv its children's
+  function rsxDescribe(el) {
+    for (var e = el; e && e.nodeType === 1; e = e.parentNode) {
+      // (all of it checked since the last change anywhere)
+      if (e._rxE === rsxChg && e._rxS === rsxSession) return;
+      var p = e.parentNode, cv = p ? p._cv || 0 : -1;
+      if (e._rxS === rsxSession && e._rxAv === (e._av || 0) && e._rxP === p && (!rsxStruct || e._rxCv === cv)) { e._rxE = rsxChg; continue; }
+      var pe = 0, pee = 0, pt = 0, pte = 0;
+      if (rsxStruct && p && p._c) { kidPositions(p); pe = e._posE; pee = e._posEE; pt = e._posT; pte = e._posTE; }
+      var html = e.namespaceURI === HTML_NS, at = e._attrs;
+      var rec = 'N\u0001' + e.__id + '\u0001' + (!p ? -1 : p.nodeType === 9 ? 0 : p.nodeType === 1 ? p.__id : -1) + '\u0001' + (html ? '' : e.namespaceURI || '-') + '\u0001' + e.localName + '\u0001' + pe + '\u0001' + pee + '\u0001' + pt + '\u0001' + pte;
+      for (var a = 0; a < at.length; a++) {
+        var an = at[a].name;
+        rec += '\u0001' + rsxClean(an) + '\u0001' + (an === 'class' || an === 'id' || rsxSa[html ? an : an.toLowerCase()] === 1 ? rsxClean(at[a]._v) : '');
+      }
+      rsxOps.push(rec);
+      rsxN.desc++;
+      e._rxS = rsxSession; e._rxAv = e._av || 0; e._rxP = p; e._rxCv = cv; e._rxE = rsxChg;
+    }
+  }
+  // the page again, from the start (a new document, a new host, more
+  // attribute values to send)
+  var rsxSel = new Map(), rsxSelSt = [], rsxHostN = 0;
+  function rsxStart() {
+    rsxOps = ['R\u0001' + (doc.contentType === 'application/xhtml+xml' ? '1' : '') + '\u0001' + (++rsxSession)];
+    rsxDoc = doc; rsxRs = null; rsxN.sync++; rsxSel = new Map(); rsxSelSt = []; rsxStruct = false; rsxHostN++;
+  }
+  // the rule set (scopeRuleSet): its rules (each w once), their flags and
+  // webapi.js's index of them
+  function rsxFlagOf(w, pe) {
+    var r = w.r, ok = !r.media || mediaMatches(r.media);
+    if (pe && !(pe === 'backdrop' ? w.sh._backdrop : w.sh._pseudo)) ok = false;
+    return (ok ? 1 : 0) | (w.multi ? 2 : 0);
+  }
+  var RSX_STRUCT = /"n":"(first-|last-|only-|nth-)/;
+  function rsxRules(rs) {
+    // (one sent before in this session: named by its number)
+    if (rs._rxS === rsxHostN) {
+      rsxOps.push('U\u0001' + rs._rxn);
+      rsxUse(rs, rs._rxSt);
+      if (rs._rxVW !== viewport.w || rs._rxVH !== viewport.h) rsxMedia();
+      return;
+    }
+    var ws = [], pes = [], sels = [], flags = [], idx = {}, pidx = {}, stamp = ++candStamp, st = false;
+    function list(from, pe) {
+      var o = {};
+      for (var k in from) {
+        var l = from[k], out = [];
+        for (var i = 0; i < l.length; i++) {
+          var w = l[i];
+          if (w._rxs !== stamp) {
+            w._rxs = stamp; w._rx = ws.length; ws.push(w);
+            // (each selector sent once a session, then named by its number)
+            var sl = w.r.sel, no = rsxSel.get(sl);
+            if (no === undefined) {
+              var t = JSON.stringify(sl);
+              no = rsxSelSt.length; rsxSel.set(sl, no); rsxSelSt.push(RSX_STRUCT.test(t));
+              rsxOps.push('S\u0001' + no + '\u0001' + t);
+            }
+            if (rsxSelSt[no]) st = true;
+            sels.push(no); flags.push(rsxFlagOf(w, pe)); pes.push(pe);
+          }
+          out.push(w._rx);
+        }
+        o[k] = out;
+      }
+      return o;
+    }
+    idx = list(rs.idx, '');
+    for (var pn in rs.pidx) pidx[pn] = list(rs.pidx[pn], pn);
+    rs._rxW = ws; rs._rxPe = pes; rs._rxF = flags; rs._rxH = new Map(); rs._rxSt = st;
+    rs._rxn = ++rsxSetN;
+    rsxN.rules++;
+    rs._rxVW = viewport.w; rs._rxVH = viewport.h;
+    rsxOps.push('L\u0001' + rs._rxn + '\u0001{"w":[' + sels.join(',') + '],"f":' + JSON.stringify(flags) + ',"idx":' + JSON.stringify(idx) + ',"pidx":' + JSON.stringify(pidx) + '}');
+    rs._rxS = rsxHostN;
+    rsxUse(rs, st);
+  }
+  var rsxSetN = 0, rsxPe = null;
+  function rsxUse(rs, st) {
+    rsxW = rs._rxW; rsxPe = rs._rxPe; rsxFlags = rs._rxF; rsxHits = rs._rxH;
+    rsxRs = rs;
+    // (places sent from now on: every element described again)
+    if (st && !rsxStruct) rsxEpoch();
+    rsxStruct = rsxStruct || st;
+  }
+  // a new number for what the page tells DomStyle: each element told again,
+  // the host keeps its selectors and rule sets
+  function rsxEpoch() {
+    rsxOps.push('E\u0001' + rsxSession + '\u0001' + (++rsxSession));
+  }
+  // (the viewport changed: the media queries answered again)
+  function rsxMedia() {
+    var ch = [];
+    for (var i = 0; i < rsxW.length; i++) {
+      var w = rsxW[i];
+      if (!w.r.media) continue;
+      var f = rsxFlagOf(w, rsxPe[i]);
+      if (f !== rsxFlags[i]) { rsxFlags[i] = f; ch.push(i, f); }
+    }
+    if (ch.length) { rsxOps.push('F\u0001' + ch.join(',')); rsxHits = rsxRs._rxH = new Map(); }
+    rsxRs._rxVW = viewport.w; rsxRs._rxVH = viewport.h;
+  }
+  // The rules DomStyle finds for el (or its ::pe): {hits, check} (w
+  // objects of rs: matched, and left to webapi.js), null when it cannot
+  // answer (el not in the page)
+  function rsxQuery(el, rs, pe) {
+    if (rsxRs !== rs) {
+      // (a rule set whose selectors read an attribute the last one's did
+      // not: its values were not sent, so every element is told again)
+      var sa = rs._sa;
+      if (!sa) { sa = rs._sa = (rs._base && rs._base._sa) || selAttrsOf(rs); if (rs._base && !rs._base._sa) rs._base._sa = sa; }
+      // (the names whose values are sent only grow in a session)
+      var more = rsxSa === null;
+      if (!more) for (var an in sa) if (an.charAt(0) !== '#' && rsxSa[an] !== 1) { more = true; break; }
+      if (more) { var un = {}, k; if (rsxSa) for (k in rsxSa) un[k] = rsxSa[k]; for (k in sa) un[k] = sa[k]; rsxSa = un; }
+      if (more && rsxDoc === doc) rsxEpoch();
+    }
+    if (rsxDoc !== doc) rsxStart();
+    if (rsxRs !== rs) rsxRules(rs);
+    else if (rs._rxVW !== viewport.w || rs._rxVH !== viewport.h) rsxMedia();
+    rsxDescribe(el);
+    var q = 'Q\u0001' + el.__id + '\u0001' + (pe || '') + '\u0001' + rsxSession;
+    var ans = __hostSync('\u0001S' + (rsxOps.length ? rsxOps.join('\u0000') + '\u0000' : '') + q);
+    rsxOps = [];
+    rsxN.q++;
+    // (a host that does not know this page: a new one, after a snapshot,
+    // or one that let go of what it had)
+    if (ans === '!') {
+      rsxStart(); rsxRules(rs); rsxDescribe(el);
+      q = 'Q\u0001' + el.__id + '\u0001' + (pe || '') + '\u0001' + rsxSession;
+      ans = __hostSync('\u0001S' + rsxOps.join('\u0000') + '\u0000' + q); rsxOps = [];
+    }
+    if (typeof ans !== 'string' || ans.indexOf('|') < 0) { rsxN.fb++; return null; }
+    var got = rsxHits.get(ans);
+    if (!got) {
+      var bar = ans.indexOf('|'), hs = ans.slice(0, bar), cs = ans.slice(bar + 1), h = [], c = [];
+      if (hs) { var hl = hs.split(','); for (var i = 0; i < hl.length; i++) h.push(rsxW[+hl[i]]); }
+      if (cs) { var cl = cs.split(','); for (var j = 0; j < cl.length; j++) c.push(rsxW[+cl[j]]); }
+      got = { hits: h, check: c };
+      if (rsxHits.size >= 5000) rsxHits.clear();
+      rsxHits.set(ans, got);
+    }
+    return got;
+  }
+  // (the oracle, __webdom.rsxCheck: webapi.js's own matching beside it)
+  function rsxJsHits(el, rs, pe) {
+    var cand = [], out = [];
+    setCandidates(rs, el, cand, pe);
+    for (var i = 0; i < cand.length; i++) {
+      var w = cand[i], r = w.r;
+      if (pe ? r.sel.pseudo !== pe || !(pe === 'backdrop' ? w.sh._backdrop : w.sh._pseudo) : r.sel.pseudo) continue;
+      if (r.media && !mediaMatches(r.media)) continue;
+      if (matchComplex(el, r.sel, null)) out.push(w);
+    }
+    return out;
+  }
+  function rsxCompare(el, pe, got, rs) {
+    var mine = rsxJsHits(el, rs, pe), ids = function (l) { return l.map(function (w) { return (w.r._uid || (w.r._uid = ++ruleUid)) + ':' + w.sheet; }).sort().join(' '); };
+    var a = ids(got), b = ids(mine);
+    if (a !== b && rsxBad.length < 50) rsxBad.push({ el: el.localName + (el.id ? '#' + el.id : '') + (el.className && typeof el.className === 'string' ? '.' + el.className.split(/\s+/).join('.') : ''), id: el.__id, pe: pe || '', rust: a, js: b, sels: mine.concat(got).map(function (w) { return w.r.sel && w.r.sel.text || ''; }) });
+  }
   function cascade1(el, pe) {
     var d = el.ownerDocument || doc;
     var esr = shadowCount ? shadowRootOf(el) : null;
@@ -8234,6 +8424,7 @@
       rs = scopeRuleSet(d, esr);
       // (elements alike in what the plain selectors read, see sigOf: the
       // rules found for the first one; only the others are tried)
+      var rq = null;
       if (!shadowCount && d === doc) {
         // (kept with the element as for a parent: its ::before and ::after
         // ask again)
@@ -8252,7 +8443,21 @@
           scw = sc;
         }
         if (sc) { for (var sh = 0; sh < sc.plain.length; sh++) hits.push(sc.plain[sh]); cand = sc.dyn; }
-        else { setCandidates(rs, el, cand, pe); dyn = []; }
+        else {
+          // (the first of its kind: DomStyle in Rust matches the rules it
+          // can, its plain hits kept for the others as below; the rest,
+          // and the hits that are not plain, tried here)
+          rq = rsxOn ? rsxQuery(el, rs, pe) : null;
+          dyn = [];
+          if (rq) {
+            for (var rh = 0; rh < rq.hits.length; rh++) {
+              var rw = rq.hits[rh], rpl = rw.r.sel._plain;
+              if (rpl === undefined) rpl = plainSel(rw.r.sel);
+              if (rpl) hits.push(rw); else dyn.push(rw);
+            }
+            cand = rq.check;
+          } else setCandidates(rs, el, cand, pe);
+        }
       } else setCandidates(rs, el, cand, pe);
     }
     var anc = shadowCount || !cand.length ? null : ancOf(el);
@@ -8307,6 +8512,7 @@
       }
     }
     shadowCtx = svCtx;
+    if (rq && rsxCheckOn) rsxCompare(el, pe, hits, rs);
     if (kept === undefined) {
       if (shadowCount && !pe) innerHits(el, pe, hits);
       if (!hm || hm.gen !== styleGen) { hm = el._hm = { gen: styleGen, m: {} }; if (!el._es) styledNow(el); }
@@ -14856,7 +15062,20 @@
     return 'ok';
   };
   G.__querySelector = function (s) { var e = doc && doc.querySelector(s); return e ? String(e.__id) : ''; };
-  G.__webdom = { restyleAll: function () { changed(); }, overlay: function (on) { overlayOn = !!on; changed(); }, computedOf: computedOf, cascade: cascade, parseSelectorList: parseSelectorList, normalizeColor: normalizeColor, resolveURL: resolveURL, nodeById: nodeById, lengthPx: lengthPx };
+  G.__webdom = {
+    // Rust style (DomStyle): on when the host answers; rsxCheck(true) puts
+    // webapi.js's own matching beside it and rsxCheck() gives the elements
+    // where they differed
+    rsx: function (on) {
+      if (on === undefined) return rsxOn;
+      var ok = false;
+      if (on && typeof __hostSync === 'function') { try { ok = __hostSync('\u0001SP') === 'rsx1'; } catch (e) { ok = false; } }
+      rsxOn = ok; rsxDoc = null; rsxRs = null; rsxOps = [];
+      changed();
+      return rsxOn;
+    },
+    rsxCheck: function (on) { if (on !== undefined) { rsxCheckOn = !!on; rsxBad = []; if (on) changed(); return rsxCheckOn; } return JSON.stringify({ bad: rsxBad, n: rsxN }); },
+    restyleAll: function () { changed(); }, overlay: function (on) { overlayOn = !!on; changed(); }, computedOf: computedOf, cascade: cascade, parseSelectorList: parseSelectorList, normalizeColor: normalizeColor, resolveURL: resolveURL, nodeById: nodeById, lengthPx: lengthPx };
 
   // ---- interfaces and members found missing against Chromium --------------
   // (bench/cases/webapi-survey: the globals and prototype members UI

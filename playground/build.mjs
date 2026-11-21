@@ -25,7 +25,8 @@
 // rangerdom_pg.wasm, the engine the page uses by default, is playground/wasm
 // (the same engine written as a crate) built with cargo for wasm32-wasip1 in
 // the Ranger tree, where its crates' relative paths lead: lib/evg,
-// gallery/domview and gallery/domjson (view/, json/), gallery/cer (CEr) and
+// gallery/domview, gallery/domjson and gallery/domstyle (view/, json/,
+// style/), gallery/cer (CEr) and
 // gallery/rangerdom_pg (playground/wasm with js/). Needs cargo and
 // `rustup target add wasm32-wasip1`; without them the page falls back to the
 // JavaScript engine.
@@ -179,6 +180,7 @@ function placeEngine() {
   place(EVG, "lib/evg");
   place(path.join(ROOT, "view"), "gallery/domview");
   place(path.join(ROOT, "json"), "gallery/domjson");
+  place(path.join(ROOT, "style"), "gallery/domstyle");
   place(path.join(ROOT, "vendor", "ranger", "cer"), "gallery/cer");
   fs.mkdirSync(path.join(G, "rangerdom_pg"), { recursive: true });
   for (const f of ["Cargo.toml", "src"]) place(path.join(HERE, "wasm", f), `gallery/rangerdom_pg/${f}`);
