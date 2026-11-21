@@ -12,5 +12,6 @@
 #![allow(non_snake_case)]
 
 mod dom_style;
+mod dom_tree;
 
 pub use dom_style::DomStyle;

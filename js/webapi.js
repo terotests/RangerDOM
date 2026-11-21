@@ -53,7 +53,10 @@
   var viewport = { w: 1024, h: 768 };
   var doc = null;
 
-  function changed() { generation++; styleGen++; sheetGen++; ancEpoch++; sigEpoch++; rsxChg++; }
+  // (rxWhole: a change that names no element, RX tells the host the
+  // whole page again, rxTell)
+  var rxWhole = 0;
+  function changed() { generation++; styleGen++; sheetGen++; ancEpoch++; sigEpoch++; rsxChg++; rxWhole++; }
   // bumped with styleGen, and alone when a <style> came, went or changed
   // with rules that only some elements can match (styleSheetChanged): what
   // is read from the sheets (their list, rule sets, selectorReach, the
@@ -8326,6 +8329,7 @@
     rsxN.rules++;
     rs._rxVW = viewport.w; rs._rxVH = viewport.h;
     rsxOps.push('L\u0001' + rs._rxn + '\u0001{"w":[' + sels.join(',') + '],"f":' + JSON.stringify(flags) + ',"idx":' + JSON.stringify(idx) + ',"pidx":' + JSON.stringify(pidx) + '}');
+    if (rxOn) rsxOps.push(rxDecls(rs));
     rs._rxS = rsxHostN;
     rsxUse(rs, st);
   }
@@ -8358,20 +8362,7 @@
   // objects of rs: matched, and left to webapi.js), null when it cannot
   // answer (el not in the page)
   function rsxQuery(el, rs, pe) {
-    if (rsxRs !== rs) {
-      // (a rule set whose selectors read an attribute the last one's did
-      // not: its values were not sent, so every element is told again)
-      var sa = rs._sa;
-      if (!sa) { sa = rs._sa = (rs._base && rs._base._sa) || selAttrsOf(rs); if (rs._base && !rs._base._sa) rs._base._sa = sa; }
-      // (the names whose values are sent only grow in a session)
-      var more = rsxSa === null;
-      if (!more) for (var an in sa) if (an.charAt(0) !== '#' && rsxSa[an] !== 1) { more = true; break; }
-      if (more) { var un = {}, k; if (rsxSa) for (k in rsxSa) un[k] = rsxSa[k]; for (k in sa) un[k] = sa[k]; rsxSa = un; }
-      if (more && rsxDoc === doc) rsxEpoch();
-    }
-    if (rsxDoc !== doc) rsxStart();
-    if (rsxRs !== rs) rsxRules(rs);
-    else if (rs._rxVW !== viewport.w || rs._rxVH !== viewport.h) rsxMedia();
+    rsxPrep(rs);
     rsxDescribe(el);
     var q = 'Q\u0001' + el.__id + '\u0001' + (pe || '') + '\u0001' + rsxSession;
     var ans = __hostSync('\u0001S' + (rsxOps.length ? rsxOps.join('\u0000') + '\u0000' : '') + q);
@@ -8396,6 +8387,38 @@
     }
     return got;
   }
+  // the host told of the page and of rule set rs (in rsxOps, sent with the
+  // next request)
+  function rsxPrep(rs) {
+    if (rsxRs !== rs) {
+      // (a rule set whose selectors read an attribute the last one's did
+      // not: its values were not sent, so every element is told again)
+      var sa = rs._sa;
+      if (!sa) { sa = rs._sa = (rs._base && rs._base._sa) || selAttrsOf(rs); if (rs._base && !rs._base._sa) rs._base._sa = sa; }
+      // (the names whose values are sent only grow in a session)
+      var more = rsxSa === null;
+      if (!more) for (var an in sa) if (an.charAt(0) !== '#' && rsxSa[an] !== 1) { more = true; break; }
+      if (more) { var un = {}, k; if (rsxSa) for (k in rsxSa) un[k] = rsxSa[k]; for (k in sa) un[k] = sa[k]; rsxSa = un; }
+      if (more && rsxDoc === doc) rsxEpoch();
+    }
+    if (rsxDoc !== doc) rsxStart();
+    if (rsxRs !== rs) rsxRules(rs);
+    else if (rs._rxVW !== viewport.w || rs._rxVH !== viewport.h) rsxMedia();
+    // the elements :hover, :active and :focus... are of (W), as matchPseudo
+    // finds them
+    var fa = doc._active && doc._active.nodeType === 1 && doc._active.isConnected ? doc._active : null;
+    var he = hoverEl && hoverEl.nodeType === 1 && hoverEl.isConnected && hoverEl.ownerDocument === doc ? hoverEl : null;
+    var ae = activeEl && activeEl.nodeType === 1 && activeEl.isConnected && activeEl.ownerDocument === doc ? activeEl : null;
+    var fv = fa && (doc._focusVisible !== false || textEntry(fa)) ? 1 : 0;
+    if (rsxStH !== rsxHostN || rsxSt[0] !== he || rsxSt[1] !== ae || rsxSt[2] !== fa || rsxSt[3] !== fv) {
+      if (he) rsxDescribe(he);
+      if (ae) rsxDescribe(ae);
+      if (fa) rsxDescribe(fa);
+      rsxOps.push('W\u0001' + (he ? he.__id : 0) + '\u0001' + (ae ? ae.__id : 0) + '\u0001' + (fa ? fa.__id : 0) + '\u0001' + fv);
+      rsxSt = [he, ae, fa, fv]; rsxStH = rsxHostN;
+    }
+  }
+  var rsxSt = [null, null, null, 0], rsxStH = -1;
   // (the oracle, __webdom.rsxCheck: webapi.js's own matching beside it)
   function rsxJsHits(el, rs, pe) {
     var cand = [], out = [];
@@ -8412,6 +8435,298 @@
     var mine = rsxJsHits(el, rs, pe), ids = function (l) { return l.map(function (w) { return (w.r._uid || (w.r._uid = ++ruleUid)) + ':' + w.sheet; }).sort().join(' '); };
     var a = ids(got), b = ids(mine);
     if (a !== b && rsxBad.length < 50) rsxBad.push({ el: el.localName + (el.id ? '#' + el.id : '') + (el.className && typeof el.className === 'string' ? '.' + el.className.split(/\s+/).join('.') : ''), id: el.__id, pe: pe || '', rust: a, js: b, sels: mine.concat(got).map(function (w) { return w.r.sel && w.r.sel.text || ''; }) });
+  }
+  // ---- RX: computed styles and render nodes in Rust (DomTree, style/
+  // dom_tree.rs). With __webdom.rx(true) (Rust matching on), renderJson
+  // asks the host for an element's subtree: webapi.js tells what changed
+  // under it (B: an element's children, inline style, the attributes and
+  // accessibility its node carries; X: a text), the host styles the
+  // elements as computeStyle does and builds their render nodes itself
+  // (no JSON text between). What it cannot (a hole: a control, a picture,
+  // an svg, a table, a selector of state, a custom property...) webapi.js
+  // renders as before and hands over (J); the host's style of the hole's
+  // parent comes along to render it under. The page's JSON names the
+  // host's node, {"rx": handle}, which the host's DomPage takes. Nothing
+  // the host keeps is the page's: a new host (a restored snapshot) is told
+  // again (V). Off by default; a host that has no DomTree answers "-" and
+  // webapi.js renders.
+  var rxOn = false, rxSuspend = 0, rxTablesH = -1, rxCs = new Map(), rxCsH = -1, rxPsN = 0, rxEls = new Map();
+  var rxN = { walks: 0, rx: 0, fb: 0, holes: 0, b: 0, x: 0, why: {} }, rxCheckOn = false, rxBad = [], rxChecked = 0, rxUsed = false;
+  // elements webapi.js renders itself, whatever their style
+  var RX_HOLE_TAGS = /^(input|textarea|select|img|iframe|canvas|video|audio|object|embed|template|picture|source|table|caption|colgroup|col|thead|tbody|tfoot|tr|td|th|slot|dialog|option|optgroup|frame|frameset|math)$/;
+  function rxHole(e) {
+    if (e.namespaceURI !== HTML_NS || RX_HOLE_TAGS.test(e.localName) || e._sr || e._top || e._virt || e._tr || e._ab || e._anims || (e._waapi && e._waapi.length) || e.__s3d) return true;
+    // (presentational hints: buildSpec's, not the host's)
+    var at = e._attrs;
+    for (var i = 0; i < at.length; i++) if (HINT_ATTRS[at[i].name.toLowerCase()]) return true;
+    return false;
+  }
+  // a rule set's declarations as buildSpec puts them (expanded), by the
+  // place of each rule in rs._rxW, with its place in buildSpec's order
+  function rxDecls(rs) {
+    var ws = rs._rxW, ix = [];
+    for (var i = 0; i < ws.length; i++) ix.push(i);
+    ix.sort(function (x, y) { var a = ws[x], b = ws[y]; return (a.ua === b.ua ? 0 : a.ua ? -1 : 1) || (!a.inner === !b.inner ? 0 : a.inner ? -1 : 1) || cmpSpec(a.r.sel.spec, b.r.sel.spec) || a.sheet - b.sheet || a.r.order - b.r.order || x - y; });
+    var rank = [];
+    for (var k = 0; k < ix.length; k++) rank[ix[k]] = k;
+    var out = [];
+    for (var j = 0; j < ws.length; j++) {
+      var r = ws[j].r, d = r._rxD;
+      if (d === undefined) {
+        var l = [], ds = r.decls;
+        for (var q = 0; q < ds.length; q++) {
+          var nm = ds[q].name, v = ds[q].value, im = ds[q].important ? 1 : 0, lh = expandShorthand(nm, v);
+          if (lh) { for (var lk in lh) if (lh[lk] !== undefined) l.push([lk, lh[lk], im, 0]); if (lh[nm] === undefined) l.push([nm, '', im, 1]); }
+          else l.push([nm, v, im, 0]);
+        }
+        d = r._rxD = JSON.stringify(l);
+      }
+      out.push('[' + rank[j] + ',' + (ws[j].ua ? 1 : 0) + ',' + d + ']');
+    }
+    return 'D\u0001' + rs._rxn + '\u0001[' + out.join(',') + ']';
+  }
+  // the tables computeStyle and renderNode go by
+  function rxTables() {
+    var named = {};
+    for (var c in NAMED_COLORS) if (NAMED_COLORS[c]) named[c] = NAMED_COLORS[c];
+    return 'I\u0001' + JSON.stringify({ inh: Object.keys(INHERITED), init: INITIAL, named: named });
+  }
+  // a webapi.js style the host takes (C), by its number; null: one the host
+  // cannot style under (custom properties)
+  function rxPs(ps) {
+    if (!ps) return 0;
+    if (ps._rxH === rsxHostN) return ps._rxN;
+    if (ps._vars) for (var vk in ps._vars) return null;
+    var p = {}, cc = [];
+    for (var k in ps) if (k.charAt(0) !== '_' && typeof ps[k] === 'string') p[k] = ps[k];
+    if (ps._cc) for (var ck in ps._cc) cc.push(ck);
+    var n = ++rxPsN;
+    rsxOps.push('C\u0001' + n + '\u0001' + JSON.stringify({ p: p, f: ps._fontPx, k: ps._fsKw !== false, c: cc }));
+    Object.defineProperty(ps, '_rxH', { value: rsxHostN, enumerable: false, configurable: true, writable: true });
+    Object.defineProperty(ps, '_rxN', { value: n, enumerable: false, configurable: true, writable: true });
+    return n;
+  }
+  // a host style as a webapi.js one (computeStyle1's shape), the same
+  // object for the same number while the host is the same
+  var rxNoVars = {};
+  function rxCsOf(n, json) {
+    if (rxCsH !== rsxHostN) { rxCs = new Map(); rxCsH = rsxHostN; }
+    var o = rxCs.get(n);
+    if (o) return o;
+    if (json === undefined) return null;
+    var j = JSON.parse(json);
+    o = { _vars: rxNoVars };
+    for (var k in j.p) o[k] = j.p[k];
+    o._fontPx = j.f; o._fsKw = j.k;
+    if (j.c.length) { var cc = {}; for (var i = 0; i < j.c.length; i++) cc[j.c[i]] = true; Object.defineProperty(o, '_cc', { value: cc, enumerable: false, configurable: true, writable: true }); }
+    Object.defineProperty(o, '_sid', { value: ++styleUid, enumerable: false });
+    rxCs.set(n, o);
+    return o;
+  }
+  // renderNode's attributes of an element the host renders
+  function rxAttrs(n) {
+    var a = null;
+    for (var i = 0; i < n._attrs.length; i++) {
+      var an = n._attrs[i].name;
+      if (RENDER_ATTRS[an] || an.slice(0, 5) === 'data-' && (an === 'data-testid' || /^data-(expected|offset)-/.test(an))) { if (!a) a = {}; a[an] = n._attrs[i]._v; }
+    }
+    if (n.localName === 'button' && n.disabled) { if (!a) a = {}; a.disabled = true; }
+    if (doc && doc._active === n) { if (!a) a = {}; a.focused = true; }
+    return a ? JSON.stringify(a) : '';
+  }
+  // what changed under e since the host was told (B, X), e and all under
+  // it that changed (_rv, as renderJson keeps its JSON by); its element
+  // children noted for the holes
+  function rxTell(e) {
+    var sc = e._sTop || e._sLeft ? (e._sTop || 0) + ',' + (e._sLeft || 0) : '0,0';
+    // (told at _rxB, a textStamp: since then nothing changed under it, no
+    // new host and no whole-page change, rxBase. One number an element,
+    // and the scroll offset only for one that scrolled: what is kept here
+    // is in the page's snapshot.)
+    var tb = e._rxB;
+    if (tb >= rxBase && tb >= e._rv && (e._rxBS === undefined ? sc === '0,0' : e._rxBS === sc)) return;
+    rsxDescribe(e);
+    var src = flatKids(e), kids = '', walk = null;
+    // (a box of many with virtual rows: the host renders none of it, see
+    // rxA; its children are not told)
+    var many = false;
+    if (virtOn && src.length >= 32) { var ne = 0; for (var m = 0; m < src.length; m++) if (src[m].nodeType === 1) ne++; many = ne >= 32; }
+    for (var i = 0; i < src.length; i++) {
+      var k = src[i];
+      if (k.nodeType === 3) {
+        if (kids) kids += ',';
+        kids += 't' + k.__id;
+        // (each text of an element told again: the host keeps what it was
+        // told and takes only a change; nothing kept with the text here)
+        rsxOps.push('X\u0001' + k.__id + '\u0001' + rsxClean(k._data || '') + '\u0001' + e.__id); rxN.x++;
+      } else if (k.nodeType === 1) {
+        if (kids) kids += ',';
+        // (the holes by number, for the host's list of them: only those, as
+        // anything kept here stays in the page's heap and its snapshot)
+        if (rxHole(k)) { kids += 'h' + k.__id; rsxDescribe(k); rxEls.set(k.__id, k); }
+        else { kids += 'e' + k.__id; if (!many) (walk || (walk = [])).push(k); }
+      }
+    }
+    var inl = '';
+    if (e._style || attrOf(e, 'style') !== null) {
+      var st = e._style;
+      if (!st) { e.style; st = e._style; }
+      for (var q = 0; q < st._order.length; q++) { var nm = st._order[q]; if (inl) inl += '\u0003'; inl += rsxClean(nm) + '\u0002' + rsxClean(st._p[nm]) + '\u0002' + (st._prio[nm] ? '1' : ''); }
+    }
+    var ax = axOf(e);
+    rsxOps.push('B\u0001' + e.__id + '\u0001' + kids + '\u0001' + inl + '\u0001' + rsxClean(rxAttrs(e)) + '\u0001' + (ax ? rsxClean(JSON.stringify(ax)) : '') + '\u0001' + (e.scrollTop || e.scrollLeft ? '[' + e.scrollLeft + ',' + e.scrollTop + ']' : '') + '\u0001');
+    rxN.b++;
+    e._rxB = textStamp;
+    if (sc !== '0,0' || e._rxBS !== undefined) e._rxBS = sc;
+    if (walk) for (var w = 0; w < walk.length; w++) rxTell(walk[w]);
+  }
+  // (rxBase: told before it, an element is told again: a new host, or a
+  // change that names no element. A step of textStamp of its own: a change
+  // after it stamps above it.)
+  var rxBase = 0, rxBaseHN = -1, rxBaseW = -1;
+  function rxBases() {
+    if (rxBaseHN === rsxHostN && rxBaseW === rxWhole) return;
+    textStamp++;
+    rxBase = textStamp;
+    rxBaseHN = rsxHostN; rxBaseW = rxWhole;
+  }
+  // n's JSON as the host's node ({"rx": handle}), '' when nothing shows,
+  // null when the host does not render it (webapi.js does)
+  function rxRender(n, parentStyle) {
+    if (rxSuspend || shadowCount || !doc || n.ownerDocument !== doc || !n.isConnected || rxHole(n)) return null;
+    // (an inline parent may be split around a block in it, from the JSON)
+    if (parentStyle && (parentStyle.display === 'inline' || parentStyle.display === 'contents')) return null;
+    // (one the host did not render, nothing changed since)
+    // (one the host did not render, nothing changed under it since: what
+    // made it refuse is of the element and what is under it; a new sheet
+    // that would let it is only a render webapi.js does meanwhile)
+    if (n._rxNo === n._rv) return null;
+    // (a child of a box of many with virtual rows: the host renders none of
+    // the box, each child alone was a request of its own)
+    var vp = virtOn ? n.parentNode : null;
+    if (vp && vp._c.length >= 32) return null;
+    // (a parent with custom properties: nothing sent, nothing kept)
+    if (parentStyle && parentStyle._vars && parentStyle._rxH !== rsxHostN) for (var vk in parentStyle._vars) { rxNote('parent custom properties'); return null; }
+    var rs = scopeRuleSet(doc, null);
+    rxPrepAll(rs);
+    var psN = rxPs(parentStyle);
+    if (psN === null) { rxNote('parent custom properties'); return null; }
+    rxBases();
+    rxTell(n);
+    var root = doc.documentElement, rpx = root ? computedOf(root)._fontPx : 16;
+    var z = 'Z\u0001' + n.__id + '\u0001' + psN + '\u0001' + viewport.w + '\u0001' + viewport.h + '\u0001' + rpx + '\u0001' + (virtOn ? '1' : '') + '\u0001' + rsxSession;
+    var ans = __hostSync('\u0001S' + (rsxOps.length ? rsxOps.join('\u0000') + '\u0000' : '') + z);
+    rsxOps = [];
+    rxN.walks++;
+    if (ans === '!') {
+      rsxStart(); rxPrepAll(rs); psN = rxPs(parentStyle); rxBases(); rxTell(n);
+      z = 'Z\u0001' + n.__id + '\u0001' + psN + '\u0001' + viewport.w + '\u0001' + viewport.h + '\u0001' + rpx + '\u0001' + (virtOn ? '1' : '') + '\u0001' + rsxSession;
+      ans = __hostSync('\u0001S' + rsxOps.join('\u0000') + '\u0000' + z); rsxOps = [];
+    }
+    if (typeof ans !== 'string' || !ans || ans.charAt(0) === '-' || ans === '!') { rxNote(typeof ans === 'string' && ans ? ans.slice(1) : 'no answer'); if (ans && ans.charAt(0) === '-') n._rxNo = n._rv; return null; }
+    if (ans === '0') { rxN.rx++; return ''; }
+    var f = ans.split('\u0001'), h;
+    if (f[0] === 'N') h = f[1];
+    else if (f[0] === 'H') {
+      if (f[2]) { var sl = f[2].split('\u0003'); for (var s = 0; s < sl.length; s++) { var sp = sl[s].indexOf('\u0002'); rxCsOf(+sl[s].slice(0, sp), sl[s].slice(sp + 1)); } }
+      var hl = f[1].split(';'), out = [];
+      if (treePending.size) flushTree();
+      if (computedCache.gen !== styleGen) { computedCache = { gen: styleGen, map: {} }; treePending.clear(); }
+      for (var i = 0; i < hl.length; i++) {
+        var c = hl[i].indexOf(','), id = +hl[i].slice(0, c), csn = +hl[i].slice(c + 1), el = rxEls.get(id) || rxFind(n, id);
+        if (!el || !el.isConnected) { rxNote('hole not found'); return null; }
+        var pel = el.parentNode && el.parentNode.nodeType === 1 ? el.parentNode : null, pcs = null;
+        if (pel) {
+          pcs = computedCache.map[pel.__id];
+          if (!pcs) {
+            pcs = rxCsOf(csn);
+            if (!pcs) { rxNote('hole style'); return null; }
+            // (what computedOf would give: the hole's style is computed under it)
+            computedCache.map[pel.__id] = pcs;
+            if (!pel._es) styledNow(pel);
+          }
+        }
+        var dm = marks.length, sv = deltaOff;
+        deltaOff = 1;
+        var hj = renderJson(el, pcs);
+        deltaOff = sv;
+        unmark(dm);
+        out.push('J\u0001' + id + '\u0001' + hj);
+        rxN.holes++;
+      }
+      out.push('K\u0001' + n.__id);
+      h = __hostSync('\u0001S' + (rsxOps.length ? rsxOps.join('\u0000') + '\u0000' : '') + out.join('\u0000'));
+      rsxOps = [];
+    }
+    if (h === '0') { rxN.rx++; return ''; }
+    if (!h) { rxNote('incomplete'); return null; }
+    rxN.rx++;
+    rxUsed = true;
+    return '{"rx":' + h + '}';
+  }
+  // (a hole under n by its number, when the list let go of it)
+  function rxFind(n, id) {
+    var st = [n];
+    while (st.length) {
+      var q = st.pop();
+      if (q.__id === id) { rxEls.set(id, q); return q; }
+      var ks = flatKids(q);
+      for (var i = 0; i < ks.length; i++) if (ks[i].nodeType === 1) st.push(ks[i]);
+    }
+    return null;
+  }
+  // (the oracle, __webdom.rxCheck: the page rendered again by webapi.js
+  // alone, beside the host's nodes put in)
+  function rxCompare(root) {
+    if (root.indexOf('"rx":') < 0) { rxChecked++; return; }
+    var exp = root.replace(/\{"rx":(\d+)\}/g, function (m, h) { return __hostSync('\u0001SY\u0001' + h) || 'null'; });
+    var svD = deltaOn, svM = marks, svC = ctr, svQ = qDepth, svW = rxWhole;
+    deltaOn = false; marks = []; rxSuspend++;
+    changed();
+    var js;
+    try { ctr = {}; qDepth = 0; js = renderJson(doc.documentElement, null); }
+    finally { rxSuspend--; deltaOn = svD; marks = svM; ctr = svC; qDepth = svQ; }
+    changed();
+    rxWhole = svW;
+    rxChecked++;
+    var d = rxDiff(JSON.parse(exp), JSON.parse(js), '');
+    if (d && rxBad.length < 20) rxBad.push(d);
+  }
+  function rxDiff(a, b, path) {
+    if (a === b) return null;
+    if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return path + ': ' + JSON.stringify(a).slice(0, 300) + ' != ' + JSON.stringify(b).slice(0, 300);
+    if (Array.isArray(a) !== Array.isArray(b)) return path + ': array';
+    if (Array.isArray(a)) {
+      if (a.length !== b.length) return path + ': ' + a.length + ' children != ' + b.length + ' [' + a.map(function (x) { return x && x.i; }).join(',') + '] [' + b.map(function (x) { return x && x.i; }).join(',') + ']';
+      for (var i = 0; i < a.length; i++) { var d = rxDiff(a[i], b[i], path + '/' + (a[i] && a[i].i !== undefined ? a[i].i : i)); if (d) return d; }
+      return null;
+    }
+    var ks = {}, k;
+    for (k in a) ks[k] = 1;
+    for (k in b) ks[k] = 1;
+    var who = (b.t || '') + '#' + (b.i !== undefined ? b.i : '');
+    for (k in ks) {
+      if (k === 'c') continue;
+      if (JSON.stringify(sortedJson(JSON.stringify(a[k] === undefined ? null : a[k]))) !== JSON.stringify(sortedJson(JSON.stringify(b[k] === undefined ? null : b[k])))) {
+        if (k === 's' && a.s && b.s) { var sk = {}; for (var q in a.s) sk[q] = 1; for (q in b.s) sk[q] = 1; var o = []; for (q in sk) if (a.s[q] !== b.s[q]) o.push(q + ': ' + a.s[q] + ' != ' + b.s[q]); return path + ' ' + who + ' s ' + o.join('; ').slice(0, 400); }
+        return path + ' ' + who + ' ' + k + ': ' + JSON.stringify(a[k]).slice(0, 200) + ' != ' + JSON.stringify(b[k]).slice(0, 200);
+      }
+    }
+    return rxDiff(a.c || [], b.c || [], path + ' ' + who);
+  }
+  function rxNote(why) { rxN.fb++; var w = String(why); rxN.why[w] = (rxN.why[w] || 0) + 1; }
+  // rsxPrep, and the tables and the declarations the host styles by
+  function rxPrepAll(rs) {
+    rsxPrep(rs);
+    if (rxTablesH !== rsxHostN) { rsxOps.push(rxTables()); rxTablesH = rsxHostN; }
+  }
+  // (a restored page, or a host that let go of what it had: told again,
+  // and nothing named by an earlier host's number)
+  function rxFrame() {
+    if (!rxOn || !rxUsed) return;
+    // (a hole taken out of the page keeps what it was in alive: let go)
+    if (rxEls.size) rxEls.forEach(function (e, k) { if (!e.isConnected || e.ownerDocument !== doc) rxEls.delete(k); });
+    if (__hostSync('\u0001SV\u0001' + rsxSession) !== 'ok') { rxUsed = false; rsxStart(); changed(); }
   }
   function cascade1(el, pe) {
     var d = el.ownerDocument || doc;
@@ -12130,6 +12445,8 @@
   var deltaOn = false, deltaEpoch = 1, deltaSerial = 0, lastDelta = '', renderDj = null, marks = [], deltaOff = 0;
   function deltaOf(k) {
     if (!k.json || deltaOff) { lastDelta = ''; return; }
+    // (the host's node: named by its handle each time, never numbered)
+    if (k.rx) { lastDelta = k.json; return; }
     if (k.sent === deltaEpoch) { lastDelta = '{"r":' + k.n + '}'; return; }
     // (no delta text of its own: its whole text under its number)
     lastDelta = k.dj || '{"n":' + k.n + ',' + k.json.slice(1);
@@ -12990,6 +13307,17 @@
         return moved;
       }
     }
+    // (the host renders it, RX)
+    if (rxOn && n.nodeType === 1) {
+      var rxj = rxRender(n, parentStyle);
+      if (rxj !== null) {
+        var xk = { sg: styleGen, rv: n._rv, ps: parentStyle, sc: sc, json: rxj, ct: false, parts: null, fp: null, rx: 1, n: 0, dj: null, sent: 0, de: deltaEpoch };
+        if (deltaOn) n._rjl = xk;
+        n._rj = xk;
+        if (deltaOn) deltaOf(xk); else lastDelta = '';
+        return rxj;
+      }
+    }
     var t0 = ctrTouch;
     renderParts = null; renderDj = null; renderOwn = null;
     var dm = marks.length;
@@ -13266,10 +13594,12 @@
   function render(delta) {
     if (!doc || !doc.documentElement) return JSON.stringify({ v: generation, root: null });
     flushTree();
+    rxFrame();
     ctr = {}; qDepth = 0;
     marks = []; deltaOff = 0;
     var root = renderJson(doc.documentElement, null);
     var rk = doc.documentElement._rj, dmr = marks.length, topsJson = '';
+    if (rxCheckOn && rxOn && root) rxCompare(root);
     // an editing host's caret, over everything (the top layer's place)
     var cb = editCaretBox();
     caretDrawn = cb ? JSON.stringify(cb) : null;
@@ -15093,6 +15423,20 @@
       changed();
       return rsxOn;
     },
+    // computed styles and render nodes in Rust (RX, needs rsx on);
+    // rxCheck(true) renders each frame again without it and compares,
+    // rxCheck() gives what differed and the counts
+    rx: function (on) {
+      if (on === undefined) return rxOn;
+      var ok = false;
+      if (on && rsxOn) { try { ok = __hostSync('\u0001SV\u00010') !== ''; } catch (e) { ok = false; } }
+      rxOn = ok; rsxDoc = null; rsxRs = null; rsxOps = []; rxUsed = false;
+      changed();
+      return rxOn;
+    },
+    // (the selectors DomStyle leaves to webapi.js for el)
+    rxLeft: function (el) { var q = rsxOn ? rsxQuery(el, scopeRuleSet(doc, null), '') : null; return q ? q.check.map(function (w) { return w.r.sel.text || JSON.stringify(w.r.sel).slice(0, 120); }) : null; },
+    rxCheck: function (on) { if (on !== undefined) { rxCheckOn = !!on; rxBad = []; rxChecked = 0; if (on) changed(); return rxCheckOn; } return JSON.stringify({ bad: rxBad, checked: rxChecked, n: rxN }); },
     rsxCheck: function (on) { if (on !== undefined) { rsxCheckOn = !!on; rsxBad = []; if (on) changed(); return rsxCheckOn; } return JSON.stringify({ bad: rsxBad, n: rsxN }); },
     restyleAll: function () { changed(); }, overlay: function (on) { overlayOn = !!on; changed(); }, computedOf: computedOf, cascade: cascade, parseSelectorList: parseSelectorList, normalizeColor: normalizeColor, resolveURL: resolveURL, nodeById: nodeById, lengthPx: lengthPx,
     // an <svg>'s markup as the render tree gives it ("svg"): a host that
@@ -15576,6 +15920,7 @@
       });
     };
   })();
+
 
   // until __page: an empty document
   doc = newDocument('about:blank');

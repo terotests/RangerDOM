@@ -281,6 +281,20 @@ impl JsonValue {
     }
 }
 
+/// Nodes a host made itself for a page's render tree, by number: a page's
+/// {"rx": n} is the node kept here under n (RangerDOM's DomTree builds
+/// them, DomPage takes them)
+pub struct JsonNodes {
+    pub map: HashMap<i64, Rc<RefCell<JsonValue>>>,
+}
+
+impl JsonNodes {
+    pub fn new() -> Self {
+        Self { map: HashMap::new() }
+    }
+}
+
+
 /// the objects under a key (a render tree's "s", its nodes' computed
 /// styles) a reader has parsed, by their text: the same text again is the
 /// same object, not parsed again. A page's boxes share a few styles (a

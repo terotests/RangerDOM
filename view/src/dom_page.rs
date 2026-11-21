@@ -35,7 +35,7 @@ use std::rc::Rc;
 
 use crate::dom_view::{DomBoxes, DomSvgDocs, DomView};
 use crate::rgr::EVGElement;
-use rangerdom_json::{JsonMemo, JsonParser, JsonValue};
+use rangerdom_json::{JsonMemo, JsonNodes, JsonParser, JsonValue};
 
 pub struct DomPage {
     pub svgs: Rc<RefCell<DomSvgDocs>>,
@@ -78,6 +78,9 @@ pub struct DomPage {
     forget: bool,
     /// the size changed since the last build
     resized: bool,
+    /// the nodes the host's DomStyle built (RX): a page's {"rx": n} is the
+    /// node kept there under n
+    pub ext: Option<Rc<RefCell<JsonNodes>>>,
 }
 
 impl DomPage {
@@ -108,6 +111,7 @@ impl DomPage {
             misses0: 0,
             forget: false,
             resized: false,
+            ext: None,
         }
     }
     /// the viewport's size; a new size builds the page again
@@ -168,6 +172,11 @@ impl DomPage {
             // (a whole page: its nodes are new objects, nothing to take)
             self.byN = HashMap::new();
             self.root = None;
+            if self.ext.is_some() && json.contains("\"rx\":") {
+                let r: Rc<RefCell<JsonValue>> = page.borrow().get("root");
+                let got: Rc<RefCell<JsonValue>> = self.extIn(&r);
+                page.borrow_mut().put("root", got);
+            }
             Rc::clone(&self.svgs.borrow().memo).borrow_mut().on = false;
         }
         self.lastJson = json;
@@ -479,6 +488,13 @@ impl DomPage {
         if n.borrow().kind != 5 {
             return Some(Rc::clone(n));
         }
+        if n.borrow().keyAt("rx") >= 0 {
+            let got: Option<Rc<RefCell<JsonValue>>> = self.extOf(n);
+            if got.is_some() {
+                self.fresh += DomPage::ids(got.as_ref().unwrap());
+            }
+            return got;
+        }
         if n.borrow().keys.len() == 1 && n.borrow().keys[0] == "r" {
             let k: i64 = n.borrow().getInt("r", -1);
             return self.byN.get(&k).cloned();
@@ -511,6 +527,39 @@ impl DomPage {
             self.byN.insert(num, Rc::clone(n));
         }
         Some(Rc::clone(n))
+    }
+    /// the host's node a page's {"rx": n} names (none: not kept)
+    fn extOf(&self, n: &Rc<RefCell<JsonValue>>) -> Option<Rc<RefCell<JsonValue>>> {
+        if self.ext.is_none() {
+            return None;
+        }
+        let h: i64 = n.borrow().getInt("rx", -1);
+        let ext: Rc<RefCell<JsonNodes>> = Rc::clone(self.ext.as_ref().unwrap());
+        let got: Option<Rc<RefCell<JsonValue>>> = ext.borrow().map.get(&h).cloned();
+        got
+    }
+    /// a whole page's {"rx": n} put in (one not kept: an empty node)
+    fn extIn(&self, n: &Rc<RefCell<JsonValue>>) -> Rc<RefCell<JsonValue>> {
+        if n.borrow().kind != 5 {
+            return Rc::clone(n);
+        }
+        if n.borrow().keyAt("rx") >= 0 {
+            let got: Option<Rc<RefCell<JsonValue>>> = self.extOf(n);
+            if got.is_some() {
+                return got.unwrap();
+            }
+            return JsonValue::mkNull();
+        }
+        let c: Rc<RefCell<JsonValue>> = n.borrow().get("c");
+        if c.borrow().kind == 4 {
+            let kids: Vec<Rc<RefCell<JsonValue>>> = c.borrow().items.clone();
+            let mut out: Vec<Rc<RefCell<JsonValue>>> = Vec::new();
+            for k in kids.iter() {
+                out.push(self.extIn(k));
+            }
+            c.borrow_mut().items = out;
+        }
+        Rc::clone(n)
     }
     /// whether this page's elements are noted: mostly is "the page is
     /// mostly the last one". Three noted pages in a row that the next page
