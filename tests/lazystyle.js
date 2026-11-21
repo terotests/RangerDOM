@@ -1,7 +1,8 @@
 // getComputedStyle read one property at a time (ComputedDecl) and filled
 // whole; an SVG shape's geometry that no selector reads (drawn again, not
 // styled again) and one a selector reads; several inline properties as one
-// change (CSSStyleDeclaration _setMany)
+// change (CSSStyleDeclaration _setMany); an <svg>'s markup for a paint
+// patch (__webdom.svgMarkup) is the render tree's, after its shapes changed
 (function () {
   var o = [];
   function canon(v) {
@@ -25,5 +26,17 @@
   o.push(getComputedStyle(c).stroke, same());
   w.style._setMany(['width', 'height', 'margin-left'], ['20px', '7px', '']);
   o.push(w.getAttribute('style'), getComputedStyle(w).height, same());
+  function svgOf(n) {
+    if (!n || typeof n !== 'object') return null;
+    if (n.t === 'svg:svg') return n.svg;
+    var c = n.c || [];
+    for (var k = 0; k < c.length; k++) { var f = svgOf(c[k]); if (f !== null) return f; }
+    return null;
+  }
+  var svg = p.ownerSVGElement;
+  p.setAttribute('d', 'M1 1 L2 9');
+  p.setAttribute('stroke', 'rgb(7,8,9)');
+  var m = __webdom.svgMarkup(svg);
+  o.push(m === svgOf(JSON.parse(__render()).root), /L2 9/.test(m) && /rgb\(7, 8, 9\)/.test(m));
   return o.join(',');
 })()

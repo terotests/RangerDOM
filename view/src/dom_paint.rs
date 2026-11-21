@@ -38,13 +38,20 @@
 //! of the same kind: a word for a word (DomView draws the words of a run
 //! of mixed looks as elements of their own), any text for a text drawn
 //! whole.
+//!
+//! An inline `<svg>` whose markup changed (a shape's `d`, `fill` or
+//! `stroke`, a game's moving pieces) is paint only too, when its opening
+//! tag is the same and has a `viewBox`: the box's size does not come from
+//! what is in it then, and DomView draws the markup as it came. `patchSvg`
+//! writes the new markup and its parsed document on the element (the same
+//! call RangerGames makes for its path patches).
 
 use ranger::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::dom_view::DomView;
-use crate::rgr::{EVGElement, EVGRetain};
+use crate::rgr::{EVGElement, EVGRetain, SvgParser};
 use rangerdom_json::JsonValue;
 
 pub struct DomPaint {
@@ -65,6 +72,9 @@ pub struct DomPaint {
     /// accessible names changed: node ids, their new "ax"
     axIds: Vec<String>,
     axVals: Vec<Rc<RefCell<JsonValue>>>,
+    /// inline pictures whose markup changed: node ids, the new markup
+    pub svgIds: Vec<String>,
+    pub svgVals: Vec<String>,
     /// the parent of the nodes `node` looks at
     parent: String,
     /// the text elements `apply` wrote on: the host lays out the path to
@@ -91,6 +101,8 @@ impl DomPaint {
             renNew: Vec::new(),
             axIds: Vec::new(),
             axVals: Vec::new(),
+            svgIds: Vec::new(),
+            svgVals: Vec::new(),
             parent: String::new(),
             dirty: Vec::new(),
             same: Vec::new(),
@@ -112,11 +124,13 @@ impl DomPaint {
         self.renNew = Vec::new();
         self.axIds = Vec::new();
         self.axVals = Vec::new();
+        self.svgIds = Vec::new();
+        self.svgVals = Vec::new();
         self.parent = String::new();
         self.same = Vec::new();
         self.stamps = Vec::new();
         self.node(was, now);
-        if !self.ok || (self.ids.is_empty() && self.tids.is_empty()) {
+        if !self.ok || (self.ids.is_empty() && self.tids.is_empty() && self.svgIds.is_empty()) {
             return false;
         }
         true
@@ -176,6 +190,8 @@ impl DomPaint {
                 self.style(now, &wv, &nv);
             } else if k == "a" {
                 self.attrs(&wv, &nv);
+            } else if k == "svg" {
+                self.svg(now, &wv, &nv);
             } else if wv.borrow().toJson() != nv.borrow().toJson() {
                 self.ok = false;
             }
@@ -225,6 +241,52 @@ impl DomPaint {
         self.tpars.push(self.parent.clone());
         self.tolds.push(a);
         self.tnews.push(b);
+    }
+    /// an inline picture's markup changed: paint only when the opening
+    /// tags are the same and have a viewBox (the box's size and the
+    /// picture's mapping into it are then the same, and DomView takes the
+    /// markup as it is)
+    fn svg(&mut self, node: &Rc<RefCell<JsonValue>>, wv: &Rc<RefCell<JsonValue>>, nv: &Rc<RefCell<JsonValue>>) {
+        let a: String = wv.borrow().text();
+        let b: String = nv.borrow().text();
+        if a == b {
+            return;
+        }
+        if wv.borrow().kind != 3 || nv.borrow().kind != 3 {
+            self.ok = false;
+            return;
+        }
+        let ta: String = DomPaint::openTag(&a);
+        if ta.is_empty() || ta != DomPaint::openTag(&b) || !ta.contains(" viewBox=") {
+            self.ok = false;
+            return;
+        }
+        self.svgIds.push(node.borrow().getText("i"));
+        self.svgVals.push(b);
+    }
+    /// the markup's first `<svg ...>` tag, "" when it starts otherwise
+    fn openTag(m: &str) -> String {
+        if !m.starts_with("<svg") {
+            return String::new();
+        }
+        let end: Option<usize> = m.find('>');
+        if end.is_none() {
+            return String::new();
+        }
+        m[0..end.unwrap()].to_string()
+    }
+    /// an inline picture's new markup written on the element DomView drew
+    /// it as: the markup and its document, parsed here (what DomView would
+    /// have built from it); the host then measures the paint bounds again
+    /// (`EVGRetain.paintFrame`)
+    #[doc(hidden)]
+    pub fn patchSvg(el: &Rc<RefCell<EVGElement>>, markup: &str) {
+        EVGElement::set_attribute(el, "svg", markup.to_string());
+        let sp: Rc<RefCell<SvgParser>> = Rc::new(RefCell::new(SvgParser::new()));
+        el.borrow_mut().svg_doc = Some(SvgParser::parse(&sp, markup.to_string()));
+        el.borrow_mut().svg_doc_key = markup.to_string();
+        let st: i64 = el.borrow().paint_stamp + 1;
+        el.borrow_mut().paint_stamp = st;
     }
     /// the accessible name, value or description of an element changed
     /// (its text did): written on its element by `apply` as DomView does
@@ -397,6 +459,9 @@ impl DomPaint {
         for id in self.axIds.iter() {
             want.insert(format!("{}{}", pfx, id), true);
         }
+        for id in self.svgIds.iter() {
+            want.insert(format!("{}{}", pfx, id), true);
+        }
         let mut found: HashMap<String, Rc<RefCell<EVGElement>>> = HashMap::new();
         let mut twice: HashMap<String, bool> = HashMap::new();
         DomPaint::find(top, &want, &mut found, &mut twice);
@@ -410,6 +475,17 @@ impl DomPaint {
         for id in self.axIds.iter() {
             let fid: String = format!("{}{}", pfx, id);
             if !found.contains_key(&fid) || twice.contains_key(&fid) {
+                return false;
+            }
+        }
+        for id in self.svgIds.iter() {
+            let fid: String = format!("{}{}", pfx, id);
+            if !found.contains_key(&fid) || twice.contains_key(&fid) {
+                return false;
+            }
+            // (the picture's own element: DomView may have drawn a
+            // fallback in its place)
+            if found.get(&fid).cloned().unwrap().borrow().tag_name != "svg" {
                 return false;
             }
         }
@@ -439,6 +515,11 @@ impl DomPaint {
         for i in 0..an {
             let el: Rc<RefCell<EVGElement>> = found.get(&format!("{}{}", pfx, self.axIds[i as usize])).cloned().unwrap();
             DomView::applyAx(&el, &self.axVals[i as usize]);
+        }
+        let svn: i64 = self.svgIds.len() as i64;
+        for i in 0..svn {
+            let el: Rc<RefCell<EVGElement>> = found.get(&format!("{}{}", pfx, self.svgIds[i as usize])).cloned().unwrap();
+            DomPaint::patchSvg(&el, &self.svgVals[i as usize]);
         }
         for i in 0..tn {
             EVGRetain::patch_text(&texts[i as usize], self.tnews[i as usize].clone());
