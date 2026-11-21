@@ -13,7 +13,7 @@ use cer::Engine;
 use ranger::cell::RefCell;
 use std::collections::HashMap;
 
-use rangerdom_json::{JsonParser, JsonValue};
+use rangerdom_json::{JsonMemo, JsonParser, JsonValue};
 use rangerdom_view::{DomBoxes, DomPaint, DomSvgDocs, DomView};
 use rangerevg::{EVGA11yFromTree, EVGA11yTree, EVGDisplayList, EVGElement, EVGLayout, EVGRetain, EVGUnit};
 
@@ -483,6 +483,7 @@ fn lay_out(page: &Rc<RefCell<JsonValue>>, delta: bool, w: f64, h: f64, kept: &mu
     lap("share");
     kept.svgs.borrow_mut().frame();
     // (the last field's caret goes, its element may be kept)
+    let had_caret = kept.deco.is_some();
     if let Some(old) = kept.deco.take() {
         let ks: Vec<_> = old.borrow().children.iter().filter(|c| { let n = c.borrow().class_name.clone(); n != "mfd-dcaret" && n != "mfd-dsel" }).cloned().collect();
         old.borrow_mut().children = ks;
@@ -500,7 +501,7 @@ fn lay_out(page: &Rc<RefCell<JsonValue>>, delta: bool, w: f64, h: f64, kept: &mu
     // text (DomView::decorate)
     // (a delta's tree is under "root", resolved to the whole page)
     let top = if page.borrow().has("root") { page.borrow().get("root") } else { page.clone() };
-    let ff = DomView::focusedField(&top);
+    let ff = if had_caret || kept.caret_named { DomView::focusedField(&top) } else { Rc::new(RefCell::new(JsonValue::new())) };
     if ff.borrow().kind == 5 {
         let fid = format!("mfd-xd-0-{}", ff.borrow().getText("i"));
         if let Some(fe) = find_el(&b, &fid) {
@@ -610,6 +611,10 @@ fn find_el(el: &Rc<RefCell<EVGElement>>, id: &str) -> Option<Rc<RefCell<EVGEleme
 struct Kept {
     /// the field decorate drew a caret or selection on last time
     deco: Option<Rc<RefCell<EVGElement>>>,
+    /// the page text being laid out names a caret: without it, and without
+    /// a caret drawn last time, no node has one and the tree is not walked
+    /// for it (DomView::focusedField walked all of AG Grid's 2 400 nodes)
+    caret_named: bool,
     svgs: Rc<RefCell<DomSvgDocs>>,
     /// the boxes the page has: what DomView::boxesSince sends is what
     /// changed since (PG_FULLBOXES: all of them every time)
@@ -644,6 +649,14 @@ struct Kept {
     /// elements mostly share a few styles (10 000 table rows: 90 000 style
     /// objects, 23 different), each kept apart was ~1.8 KB.
     pool: HashMap<u64, Rc<RefCell<JsonValue>>>,
+    /// the parser's styles by their text (JsonMemo "s"): the same text is
+    /// the same object as it is read, so pool_style hashes only a style it
+    /// has not met (AG Grid: 1 200 new nodes a step, a few dozen styles)
+    memo: Rc<RefCell<JsonMemo>>,
+    /// the style objects pool_style has met (by address, the object held so
+    /// the address stays its own) and the pooled object in their place;
+    /// cleared when the pool is pruned
+    met: HashMap<usize, (Rc<RefCell<JsonValue>>, Rc<RefCell<JsonValue>>)>,
 }
 
 /// a delta page put together is the whole page (but for the numbers, "n")
@@ -757,7 +770,7 @@ impl Kept {
         let off = std::env::var("PG_NORETAIN").is_ok();
         #[cfg(target_arch = "wasm32")]
         let off = false;
-        Kept { deco: None, svgs: svgs, boxes: Rc::new(RefCell::new(DomBoxes::new())), #[cfg(not(target_arch = "wasm32"))] mirror: HashMap::new(), nodes: HashMap::new(), styles: HashMap::new(), seen: 0, same: 0, off: off, unused: 0, noted: false, hits0: 0, misses0: 0, by_n: HashMap::new(), epoch: 0, total: 0, fresh: 0, live: 0, since_prune: 0, root: None, pool: HashMap::new() }
+        Kept { deco: None, caret_named: true, svgs: svgs, boxes: Rc::new(RefCell::new(DomBoxes::new())), #[cfg(not(target_arch = "wasm32"))] mirror: HashMap::new(), nodes: HashMap::new(), styles: HashMap::new(), seen: 0, same: 0, off: off, unused: 0, noted: false, hits0: 0, misses0: 0, by_n: HashMap::new(), epoch: 0, total: 0, fresh: 0, live: 0, since_prune: 0, root: None, pool: HashMap::new(), memo: Rc::new(RefCell::new(JsonMemo::new("s"))), met: HashMap::new() }
     }
     /// a delta page (webapi.js renderJson): each node it names ({"r": n})
     /// is the node kept under that number, each node with a number is kept.
@@ -771,6 +784,7 @@ impl Kept {
             self.nodes = HashMap::new();
             self.root = None;
             self.pool = HashMap::new();
+            self.met = HashMap::new();
             self.total = 0;
             self.live = 0;
             self.epoch = epoch;
@@ -832,6 +846,7 @@ impl Kept {
                 }
             }
             self.styles.retain(|_, v| Rc::strong_count(&v.1) > 1);
+            self.met = HashMap::new();
             self.pool.retain(|_, v| Rc::strong_count(v) > 1);
             self.live = self.by_n.len();
         }
@@ -851,14 +866,29 @@ impl Kept {
         if s.borrow().kind != 5 {
             return;
         }
-        let hs = hash_value(&s);
-        if let Some(p) = self.pool.get(&hs) {
-            if !Rc::ptr_eq(p, &s) && same_value(p, &s) {
+        // (an object read for this text before: pooled then, or the one
+        // pooled in its place is the object the memo gives)
+        let at = Rc::as_ptr(&s) as usize;
+        if let Some((_, p)) = self.met.get(&at) {
+            if !Rc::ptr_eq(p, &s) {
                 let keep = p.clone();
                 n.borrow_mut().put("s", keep);
             }
             return;
         }
+        if self.met.len() >= 16384 {
+            self.met = HashMap::new();
+        }
+        let hs = hash_value(&s);
+        if let Some(p) = self.pool.get(&hs) {
+            if !Rc::ptr_eq(p, &s) && same_value(p, &s) {
+                let keep = p.clone();
+                self.met.insert(at, (s.clone(), keep.clone()));
+                n.borrow_mut().put("s", keep);
+            }
+            return;
+        }
+        self.met.insert(at, (s.clone(), s.clone()));
         self.pool.insert(hs, s);
     }
     /// pool_style for n and every node under it (sent whole)
@@ -1136,7 +1166,10 @@ impl Synced {
         }
         #[cfg(not(target_arch = "wasm32"))]
         let t0 = std::time::Instant::now();
-        let page = JsonParser::parse(json.to_string()).borrow_mut().value();
+        let parser = JsonParser::parse(json.to_string());
+        parser.borrow_mut().memo = Some(Rc::clone(&self.kept.memo));
+        let page = parser.borrow_mut().value();
+        self.kept.caret_named = json.contains("\"caret\"");
         let delta = page.borrow().has("d");
         if delta {
             let was = self.kept.root.clone();
