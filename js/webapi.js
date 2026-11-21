@@ -2037,8 +2037,12 @@
 
   // ---- attributes ----------------------------------------------------------
 
+  // (true once any element had a contenteditable attribute: until then no
+  // element is editable and isContentEditable needs no walk up the tree,
+  // which focusableByDefault made for every element rendered)
+  var editableSeen = false;
   class Attr {
-    constructor(name, value, owner) { this.name = name; this._v = value; this.ownerElement = owner; this.namespaceURI = null; this.prefix = null; this.specified = true; }
+    constructor(name, value, owner) { this.name = name; this._v = value; this.ownerElement = owner; this.namespaceURI = null; this.prefix = null; this.specified = true; if (name.length === 15 && name.toLowerCase() === 'contenteditable') editableSeen = true; }
     get localName() { return this.name; }
     get value() { return this._v; }
     set value(v) { if (this.ownerElement) this.ownerElement.setAttribute(this.name, v); else this._v = String(v); }
@@ -2847,7 +2851,7 @@
     set draggable(v) { this.setAttribute('draggable', v ? 'true' : 'false'); }
     get contentEditable() { return this.getAttribute('contenteditable') || 'inherit'; }
     set contentEditable(v) { this.setAttribute('contenteditable', v); }
-    get isContentEditable() { for (var n = this; n && n.nodeType === 1; n = n.parentNode) { var c = n.getAttribute('contenteditable'); if (c === '' || c === 'true') return true; if (c === 'false') return false; } return false; }
+    get isContentEditable() { if (!editableSeen) return false; for (var n = this; n && n.nodeType === 1; n = n.parentNode) { var c = n.getAttribute('contenteditable'); if (c === '' || c === 'true') return true; if (c === 'false') return false; } return false; }
     get spellcheck() { return this.getAttribute('spellcheck') !== 'false'; }
     set spellcheck(v) { this.setAttribute('spellcheck', v ? 'true' : 'false'); }
     get innerText() { return innerTextOf(this); }
@@ -10343,7 +10347,7 @@
   function axHasName(n) { return !!(n.getAttribute('aria-label') || n.getAttribute('aria-labelledby') || n.getAttribute('title')); }
   function axGridTable(n) { for (var p = n.parentNode; p && p.nodeType === 1; p = p.parentNode) if (p.localName === 'table') { var r = (p.getAttribute('role') || '').trim(); return r === 'grid' || r === 'treegrid'; } return false; }
   function axRoleOf(n) {
-    var ra = n.getAttribute('role');
+    var ra = attrOf(n, 'role');
     if (ra === null && n._internals && n._internals.role) ra = String(n._internals.role);
     if (ra !== null) {
       var toks = ra.trim().toLowerCase().split(/\s+/);
@@ -10358,13 +10362,15 @@
     }
     return axImplicit(n);
   }
+  // (ARIA names are lower case: read without getAttribute's name folding)
   function axAttr(n, a) {
-    var v = n.getAttribute(a);
+    var v = attrOf(n, a);
     if (v === null && n._internals) { var p = 'aria' + a.slice(5).replace(/(^|-)([a-z])/g, function (m, d, c) { return c.toUpperCase(); }); var iv = n._internals[p]; if (iv !== null && iv !== undefined) v = String(iv); }
     return v;
   }
   function axHidden(n) {
-    if (n.getAttribute('aria-hidden') === 'true' || n.hasAttribute('hidden') && n.getAttribute('hidden') !== 'until-found') return true;
+    var hd;
+    if (attrOf(n, 'aria-hidden') === 'true' || (hd = attrOf(n, 'hidden')) !== null && hd !== 'until-found') return true;
     var cs = computedOf(n);
     return cs.display === 'none' || cs.visibility === 'hidden';
   }
@@ -10395,7 +10401,7 @@
     return out;
   }
   function axRefs(n, attr) {
-    var ids = (n.getAttribute(attr) || '').trim();
+    var ids = (attrOf(n, attr) || '').trim();
     if (!ids) return '';
     var root = n.getRootNode ? n.getRootNode() : doc, out = [];
     ids.split(/\s+/).forEach(function (id) {
@@ -10440,8 +10446,19 @@
   }
   function axTri(v) { return v === 'true' ? 2 : v === 'false' ? 1 : v === 'mixed' ? 3 : 0; }
   // the render tree's `ax` for an element, or null (no role, nothing to say)
+  // an element's aria-* attributes as one object (null: none), so that
+  // axOf's twenty state lookups do not each walk the attribute list
+  function axAriaOf(n) {
+    var a = n._attrs, m = null;
+    for (var i = 0; i < a.length; i++) {
+      var k = a[i].name;
+      if (k.length > 5 && k.charCodeAt(4) === 45 && k.charCodeAt(0) === 97 && k.lastIndexOf('aria-', 0) === 0) { if (!m) m = {}; m[k] = a[i]._v; }
+    }
+    return m;
+  }
+  function axAm(n, am, k) { if (am === undefined) return axAttr(n, k); if (am === null) return null; var v = am[k]; return v === undefined ? null : v; }
   function axOf(n) {
-    if (n.getAttribute('aria-hidden') === 'true') return { h: 1 };
+    if (attrOf(n, 'aria-hidden') === 'true') return { h: 1 };
     var role = axRoleOf(n), o = null;
     if (!role) {
       // static text: a box with text of its own and no role, outside a
@@ -10462,38 +10479,40 @@
     // static text under a role, so what it holds is said as its name)
     if (!nm && (role === 'paragraph' || role === 'listitem')) { nm = axSquash(axText(n, 0, [])); if (nm.length > 2000) nm = nm.slice(0, 2000); }
     if (nm) o.n = nm;
-    var ds = axRefs(n, 'aria-describedby') || axAttr(n, 'aria-description') || (nm !== axSquash(n.getAttribute('title') || '') ? axSquash(n.getAttribute('title') || '') : '');
+    var am = n._internals ? undefined : axAriaOf(n);
+    var ttl = axSquash(attrOf(n, 'title') || '');
+    var ds = axRefs(n, 'aria-describedby') || axAm(n, am, 'aria-description') || (nm !== ttl ? ttl : '');
     if (ds) o.d = ds;
     var t = n.localName;
     // states
-    var ch = axTri(axAttr(n, 'aria-checked'));
+    var ch = axTri(axAm(n, am, 'aria-checked'));
     if (t === 'input' && (n.type === 'checkbox' || n.type === 'radio')) ch = n.indeterminate ? 3 : n.checked ? 2 : 1;
     else if (!ch && /^(checkbox|radio|switch|menuitemcheckbox|menuitemradio)$/.test(role)) ch = 1;
     if (ch) o.ck = ch;
-    var pr2 = axTri(axAttr(n, 'aria-pressed')); if (pr2 && role === 'button') o.pr = pr2;
-    var ex = axTri(axAttr(n, 'aria-expanded'));
+    var pr2 = axTri(axAm(n, am, 'aria-pressed')); if (pr2 && role === 'button') o.pr = pr2;
+    var ex = axTri(axAm(n, am, 'aria-expanded'));
     if (t === 'details') ex = n.open ? 2 : 1;
     else if (t === 'summary' && n.parentNode && n.parentNode.localName === 'details') ex = n.parentNode.open ? 2 : 1;
     if (ex) o.ex = ex;
-    var se = axTri(axAttr(n, 'aria-selected'));
+    var se = axTri(axAm(n, am, 'aria-selected'));
     if (t === 'option') se = n.selected ? 2 : 1;
     if (se === 2) o.se = 2;
-    if (n.disabled || axAttr(n, 'aria-disabled') === 'true') o.di = 1;
+    if (n.disabled || axAm(n, am, 'aria-disabled') === 'true') o.di = 1;
     if (focusableByDefault(n) || n.hasAttribute('tabindex')) o.fo = 1;
-    if ((t === 'dialog' && n._modal) || axAttr(n, 'aria-modal') === 'true') o.mo = 1;
-    var lv = parseInt(axAttr(n, 'aria-level'), 10);
+    if ((t === 'dialog' && n._modal) || axAm(n, am, 'aria-modal') === 'true') o.mo = 1;
+    var lv = parseInt(axAm(n, am, 'aria-level'), 10);
     if (!(lv > 0) && role === 'heading' && /^h[1-6]$/.test(t)) lv = +t.charAt(1);
     if (!(lv > 0) && role === 'heading') lv = 2;
     if (lv > 0) o.lv = lv;
-    var hp = axAttr(n, 'aria-haspopup'); if (hp && hp !== 'false') o.hp = hp === 'true' ? 'menu' : hp;
+    var hp = axAm(n, am, 'aria-haspopup'); if (hp && hp !== 'false') o.hp = hp === 'true' ? 'menu' : hp;
     if (t === 'select' && role === 'combobox') o.hp = 'listbox';
-    var cu = axAttr(n, 'aria-current'); if (cu && cu !== 'false') o.cu = cu;
-    if (n.required || axAttr(n, 'aria-required') === 'true') o.rq = 1;
-    if (axAttr(n, 'aria-invalid') && axAttr(n, 'aria-invalid') !== 'false') o.iv = 1;
-    if (n.readOnly || axAttr(n, 'aria-readonly') === 'true') o.ro = 1;
-    var or = axAttr(n, 'aria-orientation'); if (or) o.or = or;
-    var rd = axAttr(n, 'aria-roledescription'); if (rd) o.rd = rd;
-    var ps = parseInt(axAttr(n, 'aria-posinset'), 10), sz = parseInt(axAttr(n, 'aria-setsize'), 10);
+    var cu = axAm(n, am, 'aria-current'); if (cu && cu !== 'false') o.cu = cu;
+    if (n.required || axAm(n, am, 'aria-required') === 'true') o.rq = 1;
+    if (axAm(n, am, 'aria-invalid') && axAm(n, am, 'aria-invalid') !== 'false') o.iv = 1;
+    if (n.readOnly || axAm(n, am, 'aria-readonly') === 'true') o.ro = 1;
+    var or = axAm(n, am, 'aria-orientation'); if (or) o.or = or;
+    var rd = axAm(n, am, 'aria-roledescription'); if (rd) o.rd = rd;
+    var ps = parseInt(axAm(n, am, 'aria-posinset'), 10), sz = parseInt(axAm(n, am, 'aria-setsize'), 10);
     if (ps > 0) o.ps = ps;
     if (sz > 0) o.sz = sz;
     // value: a field's text, a select's choice, a range's number
@@ -10502,12 +10521,12 @@
       if (val) o.v = val;
     }
     if (role === 'slider' || role === 'spinbutton' || role === 'progressbar' || role === 'separator' && o.fo) {
-      var vn = parseFloat(axAttr(n, 'aria-valuenow')), vmin = parseFloat(axAttr(n, 'aria-valuemin')), vmax = parseFloat(axAttr(n, 'aria-valuemax'));
+      var vn = parseFloat(axAm(n, am, 'aria-valuenow')), vmin = parseFloat(axAm(n, am, 'aria-valuemin')), vmax = parseFloat(axAm(n, am, 'aria-valuemax'));
       if (t === 'input') { vn = parseFloat(n.value); var rb = n.type === 'range' ? rangeBounds(n) : null; if (rb) { vmin = rb[0]; vmax = rb[1]; } }
       if ((t === 'progress' || t === 'meter') && n.hasAttribute('value')) { vn = parseFloat(n.getAttribute('value')); vmin = parseFloat(n.getAttribute('min')) || 0; vmax = parseFloat(n.getAttribute('max')) || 1; }
       if (!isNaN(vn)) o.vn = vn;
       if (!isNaN(vmin) && !isNaN(vmax)) { o.vmin = vmin; o.vmax = vmax; }
-      var vt = axAttr(n, 'aria-valuetext'); if (vt) o.v = vt;
+      var vt = axAm(n, am, 'aria-valuetext'); if (vt) o.v = vt;
     }
     return o;
   }
