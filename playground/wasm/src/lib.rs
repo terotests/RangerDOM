@@ -13,7 +13,7 @@ use cer::Engine;
 use ranger::cell::RefCell;
 use std::collections::HashMap;
 
-use rangerdom_json::{JsonMemo, JsonParser, JsonValue};
+use rangerdom_json::{JsonMemo, JsonNodes, JsonParser, JsonValue};
 use rangerdom_style::DomStyle;
 use rangerdom_view::{DomBoxes, DomPaint, DomSvgDocs, DomView};
 use rangerevg::{EVGA11yFromTree, EVGA11yTree, EVGDisplayList, EVGElement, EVGLayout, EVGRetain, EVGUnit};
@@ -170,6 +170,7 @@ impl Playground {
         let engine = Playground::tuned(Engine::new());
         let synced = Playground::new_synced(800.0, 600.0);
         let style = Rc::new(std::cell::RefCell::new(DomStyle::new()));
+        synced.borrow_mut().kept.ext = Some(style.borrow().ext.clone());
         let mut pg = Playground { engine: engine, scripts: Vec::new(), units: Vec::new(), errors: Vec::new(), w: 800.0, h: 600.0, page_json: String::new(), last_gen: String::new(), root: None, lay: None, synced: synced, whole: false, style: style };
         pg.engine.vm.set_host_sync(Box::new(SyncLayout { s: pg.synced.clone(), style: pg.style.clone() }));
         pg
@@ -228,6 +229,7 @@ impl Playground {
         self.engine = Playground::tuned(engine);
         self.synced = Playground::new_synced(w, h);
         self.style = Rc::new(std::cell::RefCell::new(DomStyle::new()));
+        self.synced.borrow_mut().kept.ext = Some(self.style.borrow().ext.clone());
         self.engine.vm.set_host_sync(Box::new(SyncLayout { s: self.synced.clone(), style: self.style.clone() }));
         self.w = w;
         self.h = h;
@@ -311,6 +313,14 @@ impl Playground {
             self.exec("__webdom.rsx(true)");
             if std::env::var("PG_RSXCHECK").is_ok() {
                 self.exec("__webdom.rsxCheck(true)");
+            }
+            // and the computed styles and render nodes too (RX): PG_RX=1,
+            // PG_RXCHECK compares each render with webapi.js's own
+            if std::env::var("PG_RX").map(|v| v == "1").unwrap_or(false) {
+                self.exec("__webdom.rx(true)");
+                if std::env::var("PG_RXCHECK").is_ok() {
+                    self.exec("__webdom.rxCheck(true)");
+                }
             }
         }
         // a render sends what changed since the last one (Kept::resolve)
@@ -671,6 +681,13 @@ struct Kept {
     /// the address stays its own) and the pooled object in their place;
     /// cleared when the pool is pruned
     met: HashMap<usize, (Rc<RefCell<JsonValue>>, Rc<RefCell<JsonValue>>)>,
+    /// the render nodes DomStyle built (RX, __webdom.rx): a page's
+    /// {"rx": n} is the node kept there under n
+    ext: Option<Rc<RefCell<JsonNodes>>>,
+    /// DomStyle's nodes met before (by address, held): one met again is
+    /// the same node with the same under it (DomStyle builds a new node for
+    /// each change), not counted fresh or pooled again
+    rx_seen: HashMap<usize, Rc<RefCell<JsonValue>>>,
 }
 
 /// a delta page put together is the whole page (but for the numbers, "n")
@@ -784,7 +801,7 @@ impl Kept {
         let off = std::env::var("PG_NORETAIN").is_ok();
         #[cfg(target_arch = "wasm32")]
         let off = false;
-        Kept { deco: None, caret_named: true, svgs: svgs, boxes: Rc::new(RefCell::new(DomBoxes::new())), #[cfg(not(target_arch = "wasm32"))] mirror: HashMap::new(), nodes: HashMap::new(), styles: HashMap::new(), seen: 0, same: 0, off: off, unused: 0, noted: false, hits0: 0, misses0: 0, by_n: HashMap::new(), epoch: 0, total: 0, fresh: 0, live: 0, since_prune: 0, root: None, pool: HashMap::new(), memo: Rc::new(RefCell::new(JsonMemo::new("s"))), met: HashMap::new() }
+        Kept { deco: None, caret_named: true, svgs: svgs, boxes: Rc::new(RefCell::new(DomBoxes::new())), #[cfg(not(target_arch = "wasm32"))] mirror: HashMap::new(), nodes: HashMap::new(), styles: HashMap::new(), seen: 0, same: 0, off: off, unused: 0, noted: false, hits0: 0, misses0: 0, by_n: HashMap::new(), epoch: 0, total: 0, fresh: 0, live: 0, since_prune: 0, root: None, pool: HashMap::new(), memo: Rc::new(RefCell::new(JsonMemo::new("s"))), met: HashMap::new(), ext: None, rx_seen: HashMap::new() }
     }
     /// a delta page (webapi.js renderJson): each node it names ({"r": n})
     /// is the node kept under that number, each node with a number is kept.
@@ -798,6 +815,7 @@ impl Kept {
             self.nodes = HashMap::new();
             self.root = None;
             self.pool = HashMap::new();
+            self.rx_seen = HashMap::new();
             self.met = HashMap::new();
             self.total = 0;
             self.live = 0;
@@ -860,6 +878,7 @@ impl Kept {
                 }
             }
             self.styles.retain(|_, v| Rc::strong_count(&v.1) > 1);
+            self.rx_seen.retain(|_, v| Rc::strong_count(v) > 1);
             self.met = HashMap::new();
             self.pool.retain(|_, v| Rc::strong_count(v) > 1);
             self.live = self.by_n.len();
@@ -933,9 +952,60 @@ impl Kept {
         }
         count
     }
+    /// what node_of does for a node sent whole (counted fresh, its styles
+    /// pooled), for DomStyle's nodes it has not met
+    fn rx_new(&mut self, n: &Rc<RefCell<JsonValue>>) {
+        if n.borrow().kind != 5 {
+            return;
+        }
+        let at = Rc::as_ptr(n) as usize;
+        if self.rx_seen.contains_key(&at) {
+            return;
+        }
+        self.rx_seen.insert(at, n.clone());
+        if n.borrow().keyAt("i") >= 0 {
+            self.fresh += 1;
+        }
+        self.pool_style(n);
+        let c = n.borrow().get("c");
+        if c.borrow().kind == 4 {
+            let kids = c.borrow().items.clone();
+            for k in kids.iter() {
+                self.rx_new(k);
+            }
+        }
+    }
+    /// the node DomStyle built that {"rx": n} names (none: not kept)
+    fn ext_of(&self, n: &Rc<RefCell<JsonValue>>) -> Option<Rc<RefCell<JsonValue>>> {
+        let ext = self.ext.as_ref()?;
+        let h = n.borrow().getInt("rx", -1);
+        let got = ext.borrow().map.get(&h).cloned();
+        got
+    }
+    /// a whole page's {"rx": n} put in (one not kept: null)
+    fn ext_in(&self, n: &Rc<RefCell<JsonValue>>) -> Rc<RefCell<JsonValue>> {
+        if n.borrow().kind != 5 {
+            return n.clone();
+        }
+        if n.borrow().keyAt("rx") >= 0 {
+            return self.ext_of(n).unwrap_or_else(JsonValue::mkNull);
+        }
+        let c = n.borrow().get("c");
+        if c.borrow().kind == 4 {
+            let kids = c.borrow().items.clone();
+            let out: Vec<Rc<RefCell<JsonValue>>> = kids.iter().map(|k| self.ext_in(k)).collect();
+            c.borrow_mut().items = out;
+        }
+        n.clone()
+    }
     fn node_of(&mut self, n: &Rc<RefCell<JsonValue>>) -> Option<Rc<RefCell<JsonValue>>> {
         if n.borrow().kind != 5 {
             return Some(n.clone());
+        }
+        if n.borrow().keyAt("rx") >= 0 {
+            let got = self.ext_of(n)?;
+            self.rx_new(&got);
+            return Some(got);
         }
         if n.borrow().keys.len() == 1 && n.borrow().keys[0] == "r" {
             let id = n.borrow().getInt("r", -1);
@@ -1185,6 +1255,11 @@ impl Synced {
         let page = parser.borrow_mut().value();
         self.kept.caret_named = json.contains("\"caret\"");
         let delta = page.borrow().has("d");
+        if !delta && self.kept.ext.is_some() && json.contains("\"rx\":") {
+            let r = page.borrow().get("root");
+            let got = self.kept.ext_in(&r);
+            page.borrow_mut().put("root", got);
+        }
         if delta {
             let was = self.kept.root.clone();
             let tops = page.borrow().get("tops");
