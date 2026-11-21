@@ -14,6 +14,7 @@ use ranger::cell::RefCell;
 use std::collections::HashMap;
 
 use rangerdom_json::{JsonMemo, JsonParser, JsonValue};
+use rangerdom_style::DomStyle;
 use rangerdom_view::{DomBoxes, DomPaint, DomSvgDocs, DomView};
 use rangerevg::{EVGA11yFromTree, EVGA11yTree, EVGDisplayList, EVGElement, EVGLayout, EVGRetain, EVGUnit};
 
@@ -159,14 +160,18 @@ pub struct Playground {
     /// the next render sends the whole page (after a restore this host
     /// has nothing of it)
     whole: bool,
+    /// the page's elements and rule matching for webapi.js (RangerDOM's
+    /// style in Rust, __webdom.rsx); a restored page tells a new one
+    style: Rc<std::cell::RefCell<DomStyle>>,
 }
 
 impl Playground {
     pub fn new() -> Playground {
         let engine = Playground::tuned(Engine::new());
         let synced = Playground::new_synced(800.0, 600.0);
-        let mut pg = Playground { engine: engine, scripts: Vec::new(), units: Vec::new(), errors: Vec::new(), w: 800.0, h: 600.0, page_json: String::new(), last_gen: String::new(), root: None, lay: None, synced: synced, whole: false };
-        pg.engine.vm.set_host_sync(Box::new(SyncLayout { s: pg.synced.clone() }));
+        let style = Rc::new(std::cell::RefCell::new(DomStyle::new()));
+        let mut pg = Playground { engine: engine, scripts: Vec::new(), units: Vec::new(), errors: Vec::new(), w: 800.0, h: 600.0, page_json: String::new(), last_gen: String::new(), root: None, lay: None, synced: synced, whole: false, style: style };
+        pg.engine.vm.set_host_sync(Box::new(SyncLayout { s: pg.synced.clone(), style: pg.style.clone() }));
         pg
     }
     /// an engine as the playground runs it: the register machine, the
@@ -222,7 +227,8 @@ impl Playground {
         }
         self.engine = Playground::tuned(engine);
         self.synced = Playground::new_synced(w, h);
-        self.engine.vm.set_host_sync(Box::new(SyncLayout { s: self.synced.clone() }));
+        self.style = Rc::new(std::cell::RefCell::new(DomStyle::new()));
+        self.engine.vm.set_host_sync(Box::new(SyncLayout { s: self.synced.clone(), style: self.style.clone() }));
         self.w = w;
         self.h = h;
         self.root = None;
@@ -299,6 +305,14 @@ impl Playground {
         self.exec("__installDefaults()");
         // sizes read after a change are laid out at once (SyncLayout)
         self.exec("__syncLayout(true)");
+        // the rules matched by RangerDOM's style in Rust (DomStyle): PG_RSX=1
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::env::var("PG_RSX").map(|v| v == "1").unwrap_or(false) {
+            self.exec("__webdom.rsx(true)");
+            if std::env::var("PG_RSXCHECK").is_ok() {
+                self.exec("__webdom.rsxCheck(true)");
+            }
+        }
         // a render sends what changed since the last one (Kept::resolve)
         #[cfg(not(target_arch = "wasm32"))]
         let delta = std::env::var("PG_NODELTA").is_err();
@@ -1245,10 +1259,15 @@ impl Synced {
 /// layout does, and the boxes are the answer.
 struct SyncLayout {
     s: Rc<std::cell::RefCell<Synced>>,
+    /// and webapi.js's questions to RangerDOM's style (DomStyle::mine)
+    style: Rc<std::cell::RefCell<DomStyle>>,
 }
 
 impl cer::vm::HostSync for SyncLayout {
     fn call(&mut self, request: &str) -> String {
+        if DomStyle::mine(request) {
+            return self.style.borrow_mut().call(request);
+        }
         match self.s.borrow_mut().lay_out(request) {
             Some(l) => l.0,
             None => "!".to_string(),

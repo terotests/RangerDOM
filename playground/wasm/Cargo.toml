@@ -21,6 +21,7 @@ ranger = { path = "../../runtime/rust/ranger", features = ["shared-cell"] }
 rangerevg = { path = "../../runtime/rust/rangerevg" }
 rangerdom_json = { path = "../domjson" }
 rangerdom_view = { path = "../domview" }
+rangerdom_style = { path = "../domstyle" }
 cer = { path = "../cer" }
 
 # CEr names Ranger's runtime by git; here it is the tree's own
