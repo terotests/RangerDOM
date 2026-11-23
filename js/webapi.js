@@ -20,6 +20,9 @@
 //                         rest named ({"r": n}); see renderJson
 //   __renderDelta(again)  __render() for such a host; again: it lost what
 //                         it kept, the whole page is sent
+//   __deltaPatch(on)      a delta host that puts a box whose transform or
+//                         opacity alone changed together from the node it
+//                         has: {"n":N,"m":M,"ps":{..},"sa":".."}, see movedJson
 //   __wire(on)            a delta host that reads the styles as a table:
 //                         each style's shared part sent once, see wireRef
 //   __styleCheck()        a test's: '' when the page with every style found
@@ -12471,6 +12474,10 @@
   var deltaCheck = false;
   //   deltaOff     > 0 under an element known to go whole (a table with
   //                collapsed borders): no delta texts are made under it
+  //   deltaPatch   the host puts a node together from the one it has
+  //                and the values that changed ({"n":N,"m":M,"ps":{..},
+  //                "sa":".."}, DomPaint.patchedNode): __deltaPatch(on)
+  var deltaPatch = false;
   var deltaOn = false, deltaEpoch = 1, deltaSerial = 0, lastDelta = '', renderDj = null, marks = [], deltaOff = 0;
   function deltaOf(k) {
     if (!k.json || deltaOff) { lastDelta = ''; return; }
@@ -12629,7 +12636,11 @@
     var json = open + cut.kj;
     var nk = { sg: styleGen, rv: n._rv, ps: parentStyle, sc: sc, json: json, ct: false, parts: null, fp: { el: n, own: open + '}', ownW: openW !== null ? openW + '}' : null, kids: fp.kids, kel: fp.kel, cs: cs, st: st, cut: cut, cutW: cutW }, _dm: dm };
     nk.n = ++deltaSerial;
-    nk.dj = '{"n":' + nk.n + ',' + (openW !== null ? openW : open).slice(1) + kd;
+    // (a host that takes patched nodes, __deltaPatch: the node it has of
+    // n under the last number, with the one value and the style attribute
+    // written over; the children are the same texts)
+    if (deltaPatch && openW === null && kd === cut.kd && k.n && k.sent === deltaEpoch && !fastCheck) nk.dj = '{"n":' + nk.n + ',"m":' + k.n + ',"ps":{"' + pn + '":"' + b + '"},"sa":"' + st + '"}';
+    else nk.dj = '{"n":' + nk.n + ',' + (openW !== null ? openW : open).slice(1) + kd;
     nk.sent = 0; nk.de = deltaEpoch;
     n._rjl = nk; n._rj = nk;
     deltaOf(nk);
@@ -15435,6 +15446,7 @@
   // compared with the one its text gives
   G.__wireCheck = function (on) { if (on === undefined) return wireCheck ? JSON.stringify(wireCheck) : ''; wireCheck = on ? { n: 0, bad: 0, first: '' } : null; return ''; };
   G.__wire = function (on) { on = !!on; if (on !== wireOn) { wireOn = on; deltaEpoch++; } return String(wireOn); };
+  G.__deltaPatch = function (on) { on = !!on; if (on !== deltaPatch) { deltaPatch = on; deltaEpoch++; } return String(deltaPatch); };
   G.__deltaRender = function (on) { on = !!on; if (on !== deltaOn) { deltaOn = on; deltaEpoch++; } return String(deltaOn); };
   // the host draws text with the browser's own faces (the playground's
   // canvas), so a line of Arial has Arial's height, not that of the Open

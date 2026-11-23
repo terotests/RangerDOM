@@ -180,9 +180,15 @@ impl DomPaint {
             } else if k == "x" {
                 self.text(&was.borrow().getText("i"), &wv, &nv);
             } else if k == "i" && now.borrow().has("x") {
-                // (a text node set anew: its elements are named again)
-                self.renOld.push(wv.borrow().text());
-                self.renNew.push(nv.borrow().text());
+                // (a text node set anew: its elements are named again; the
+                // same id written again is no rename, and a rename walks
+                // the whole tree)
+                let a: String = wv.borrow().text();
+                let b: String = nv.borrow().text();
+                if a != b {
+                    self.renOld.push(a);
+                    self.renNew.push(b);
+                }
                 continue;
             } else if k == "ax" {
                 self.ax(now, &wv, &nv);
@@ -302,6 +308,7 @@ impl DomPaint {
             return;
         }
         let n: i64 = nk.len() as i64;
+        let mut changed: bool = false;
         for i in 0..n {
             let k: String = nk[i as usize].clone();
             if wk[i as usize] != k {
@@ -313,6 +320,13 @@ impl DomPaint {
                 self.ok = false;
                 return;
             }
+            if !same {
+                changed = true;
+            }
+        }
+        // (the same name, value and description: nothing to write)
+        if !changed {
+            return;
         }
         self.axIds.push(node.borrow().getText("i"));
         self.axVals.push(Rc::clone(na));
@@ -368,6 +382,36 @@ impl DomPaint {
         if Rc::ptr_eq(ws, ns) {
             return;
         }
+        // (the members in the same order, as the same element's style
+        // renders them: compared side by side, without a lookup by name
+        // for each; 500 boxes of 40 members a frame)
+        if DomPaint::sameKeys(ws, ns) {
+            let n: i64 = ns.borrow().keys.len() as i64;
+            for i in 0..n {
+                let wv: Rc<RefCell<JsonValue>> = ws.borrow().items[i as usize].clone();
+                let nv: Rc<RefCell<JsonValue>> = ns.borrow().items[i as usize].clone();
+                if Rc::ptr_eq(&wv, &nv) {
+                    continue;
+                }
+                if wv.borrow().kind == 3 && nv.borrow().kind == 3 && wv.borrow().str == nv.borrow().str {
+                    continue;
+                }
+                let a: String = wv.borrow().text();
+                let b: String = nv.borrow().text();
+                if a == b {
+                    continue;
+                }
+                let k: String = ns.borrow().keys[i as usize].clone();
+                if !DomPaint::paintable(node, ns, &k, &a, &b) {
+                    self.ok = false;
+                    return;
+                }
+                self.ids.push(node.borrow().getText("i"));
+                self.names.push(k);
+                self.vals.push(b);
+            }
+            return;
+        }
         let wk: Vec<String> = ws.borrow().keys.clone();
         for k in wk.iter().cloned() {
             if !ns.borrow().has(&k) {
@@ -391,6 +435,61 @@ impl DomPaint {
             self.names.push(k.clone());
             self.vals.push(b.clone());
         }
+    }
+    /// a delta's patched node ({"n": N, "m": M, "ps": {...}, "sa": "..."},
+    /// webapi.js __deltaPatch): the kept node M with the members of "ps"
+    /// written over its style and "sa" as its style attribute, its
+    /// children and everything else M's, under the number N. A box whose
+    /// transform or opacity alone changed is sent as these few bytes, not
+    /// its whole render.
+    pub fn patchedNode(base: &Rc<RefCell<JsonValue>>, d: &Rc<RefCell<JsonValue>>) -> Rc<RefCell<JsonValue>> {
+        let out: Rc<RefCell<JsonValue>> = DomPaint::copyObj(base);
+        out.borrow_mut().put("n", d.borrow().get("n"));
+        let ps: Rc<RefCell<JsonValue>> = d.borrow().get("ps");
+        if ps.borrow().kind == 5 {
+            let st: Rc<RefCell<JsonValue>> = DomPaint::copyObj(&base.borrow().get("s"));
+            let n: i64 = ps.borrow().keys.len() as i64;
+            for i in 0..n {
+                let k: String = ps.borrow().keys[i as usize].clone();
+                let v: Rc<RefCell<JsonValue>> = ps.borrow().items[i as usize].clone();
+                st.borrow_mut().put(&k, v);
+            }
+            out.borrow_mut().put("s", st);
+        }
+        if d.borrow().has("sa") {
+            let at: Rc<RefCell<JsonValue>> = DomPaint::copyObj(&base.borrow().get("a"));
+            at.borrow_mut().put("style", d.borrow().get("sa"));
+            out.borrow_mut().put("a", at);
+        }
+        out
+    }
+    /// an object's members in a new object (the values shared)
+    fn copyObj(o: &Rc<RefCell<JsonValue>>) -> Rc<RefCell<JsonValue>> {
+        let out: Rc<RefCell<JsonValue>> = JsonValue::mkObj();
+        if o.borrow().kind != 5 {
+            return out;
+        }
+        let n: i64 = o.borrow().keys.len() as i64;
+        for i in 0..n {
+            let k: String = o.borrow().keys[i as usize].clone();
+            out.borrow_mut().keys.push(k);
+            let v: Rc<RefCell<JsonValue>> = o.borrow().items[i as usize].clone();
+            out.borrow_mut().items.push(v);
+        }
+        out
+    }
+    /// whether two objects have the same member names in the same order
+    fn sameKeys(a: &Rc<RefCell<JsonValue>>, b: &Rc<RefCell<JsonValue>>) -> bool {
+        let n: i64 = a.borrow().keys.len() as i64;
+        if (b.borrow().keys.len() as i64) != n {
+            return false;
+        }
+        for i in 0..n {
+            if a.borrow().keys[i as usize] != b.borrow().keys[i as usize] {
+                return false;
+            }
+        }
+        true
     }
     /// a node's member names but its number ("n"), which a delta gives
     /// anew to every node it sends
