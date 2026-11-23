@@ -7573,7 +7573,8 @@ impl DomView {
         let t: String = ax.borrow().getText(k);
         t.trim().to_string().parse::<f64>().ok()
     }
-    fn applyAx(e: &Rc<RefCell<EVGElement>>, ax: &Rc<RefCell<JsonValue>>) {
+    #[doc(hidden)]
+    pub fn applyAx(e: &Rc<RefCell<EVGElement>>, ax: &Rc<RefCell<JsonValue>>) {
         if ax.borrow().getInt("h", 0) == 1 {
             e.borrow_mut().a11y_hidden = true;
             return;

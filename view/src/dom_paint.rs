@@ -29,12 +29,29 @@
 //! of an ordinary tag, not hidden, clipped or the page's root or body.
 //! Removed properties and changed attributes (but the `style` one, which
 //! the computed style already holds) take the full path.
+//!
+//! A text node's text changed is EVGRetain's tier 2: written on the one
+//! text element DomView drew it as (`EVGRetain.patchText`), and the host
+//! lays out only the path to it (`EVGRetain.layoutFrame`), as RangerGames
+//! does. Only when that element holds the node's whole text as it came
+//! (no white space DomView would collapse or trim), and the new text is
+//! of the same kind: a word for a word (DomView draws the words of a run
+//! of mixed looks as elements of their own), any text for a text drawn
+//! whole.
+//!
+//! An inline `<svg>` whose markup changed (a shape's `d`, `fill` or
+//! `stroke`, a game's moving pieces) is paint only too, when its opening
+//! tag is the same and has a `viewBox`: the box's size does not come from
+//! what is in it then, and DomView draws the markup as it came. `patchSvg`
+//! writes the new markup and its parsed document on the element (the same
+//! call RangerGames makes for its path patches).
 
 use ranger::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::rgr::{EVGElement, EVGRetain};
+use crate::dom_view::DomView;
+use crate::rgr::{EVGElement, EVGRetain, SvgParser};
 use rangerdom_json::JsonValue;
 
 pub struct DomPaint {
@@ -43,6 +60,27 @@ pub struct DomPaint {
     pub names: Vec<String>,
     pub vals: Vec<String>,
     pub ok: bool,
+    /// texts changed: the text node's id (its last one) and its parent's,
+    /// the ids DomView names its element by, the text drawn, the new text
+    pub tids: Vec<String>,
+    pub tpars: Vec<String>,
+    pub tolds: Vec<String>,
+    pub tnews: Vec<String>,
+    /// text nodes set anew: their old and new ids
+    renOld: Vec<String>,
+    renNew: Vec<String>,
+    /// accessible names changed: node ids, their new "ax"
+    axIds: Vec<String>,
+    axVals: Vec<Rc<RefCell<JsonValue>>>,
+    /// inline pictures whose markup changed: node ids, the new markup
+    pub svgIds: Vec<String>,
+    pub svgVals: Vec<String>,
+    /// the parent of the nodes `node` looks at
+    parent: String,
+    /// the text elements `apply` wrote on: the host lays out the path to
+    /// them (empty: paint only)
+    #[doc(hidden)]
+    pub dirty: Vec<Rc<RefCell<EVGElement>>>,
     /// the nodes found the same and the stamps they get once all is found
     same: Vec<Rc<RefCell<JsonValue>>>,
     stamps: Vec<i64>,
@@ -55,29 +93,45 @@ impl DomPaint {
             names: Vec::new(),
             vals: Vec::new(),
             ok: true,
+            tids: Vec::new(),
+            tpars: Vec::new(),
+            tolds: Vec::new(),
+            tnews: Vec::new(),
+            renOld: Vec::new(),
+            renNew: Vec::new(),
+            axIds: Vec::new(),
+            axVals: Vec::new(),
+            svgIds: Vec::new(),
+            svgVals: Vec::new(),
+            parent: String::new(),
+            dirty: Vec::new(),
             same: Vec::new(),
             stamps: Vec::new(),
         }
     }
     /// whether the render tree `now` is `was` but for paint properties of
-    /// boxes (noted for `apply`). The nodes found the same get the stamps
-    /// of the last tree's, so the next full build takes their elements.
+    /// boxes and texts (noted for `apply`)
     pub fn compare(&mut self, was: &Rc<RefCell<JsonValue>>, now: &Rc<RefCell<JsonValue>>) -> bool {
         self.ids = Vec::new();
         self.names = Vec::new();
         self.vals = Vec::new();
         self.ok = true;
+        self.tids = Vec::new();
+        self.tpars = Vec::new();
+        self.tolds = Vec::new();
+        self.tnews = Vec::new();
+        self.renOld = Vec::new();
+        self.renNew = Vec::new();
+        self.axIds = Vec::new();
+        self.axVals = Vec::new();
+        self.svgIds = Vec::new();
+        self.svgVals = Vec::new();
+        self.parent = String::new();
         self.same = Vec::new();
         self.stamps = Vec::new();
         self.node(was, now);
-        if !self.ok || self.ids.is_empty() {
+        if !self.ok || (self.ids.is_empty() && self.tids.is_empty() && self.svgIds.is_empty()) {
             return false;
-        }
-        // (only now: a node whose elements a full build would take must
-        // have its paint changes written on them)
-        let n: i64 = self.same.len() as i64;
-        for i in 0..n {
-            self.same[i as usize].borrow_mut().stamp = self.stamps[i as usize];
         }
         true
     }
@@ -119,11 +173,25 @@ impl DomPaint {
                 continue;
             }
             if k == "c" {
+                let up: String = self.parent.clone();
+                self.parent = now.borrow().getText("i");
                 self.kids(&wv, &nv);
+                self.parent = up;
+            } else if k == "x" {
+                self.text(&was.borrow().getText("i"), &wv, &nv);
+            } else if k == "i" && now.borrow().has("x") {
+                // (a text node set anew: its elements are named again)
+                self.renOld.push(wv.borrow().text());
+                self.renNew.push(nv.borrow().text());
+                continue;
+            } else if k == "ax" {
+                self.ax(now, &wv, &nv);
             } else if k == "s" {
                 self.style(now, &wv, &nv);
             } else if k == "a" {
                 self.attrs(&wv, &nv);
+            } else if k == "svg" {
+                self.svg(now, &wv, &nv);
             } else if wv.borrow().toJson() != nv.borrow().toJson() {
                 self.ok = false;
             }
@@ -154,6 +222,117 @@ impl DomPaint {
             }
         }
     }
+    fn text(&mut self, own: &str, wv: &Rc<RefCell<JsonValue>>, nv: &Rc<RefCell<JsonValue>>) {
+        let a: String = wv.borrow().text();
+        let b: String = nv.borrow().text();
+        if a == b {
+            return;
+        }
+        if wv.borrow().kind != 3 || nv.borrow().kind != 3 || self.parent.is_empty() || !DomPaint::plainText(&a) || !DomPaint::plainText(&b) {
+            self.ok = false;
+            return;
+        }
+        // (a word for a word: a word may be one of a run's words)
+        if !DomPaint::spaced(&a) && DomPaint::spaced(&b) {
+            self.ok = false;
+            return;
+        }
+        self.tids.push(own.to_string());
+        self.tpars.push(self.parent.clone());
+        self.tolds.push(a);
+        self.tnews.push(b);
+    }
+    /// an inline picture's markup changed: paint only when the opening
+    /// tags are the same and have a viewBox (the box's size and the
+    /// picture's mapping into it are then the same, and DomView takes the
+    /// markup as it is)
+    fn svg(&mut self, node: &Rc<RefCell<JsonValue>>, wv: &Rc<RefCell<JsonValue>>, nv: &Rc<RefCell<JsonValue>>) {
+        let a: String = wv.borrow().text();
+        let b: String = nv.borrow().text();
+        if a == b {
+            return;
+        }
+        if wv.borrow().kind != 3 || nv.borrow().kind != 3 {
+            self.ok = false;
+            return;
+        }
+        let ta: String = DomPaint::openTag(&a);
+        if ta.is_empty() || ta != DomPaint::openTag(&b) || !ta.contains(" viewBox=") {
+            self.ok = false;
+            return;
+        }
+        self.svgIds.push(node.borrow().getText("i"));
+        self.svgVals.push(b);
+    }
+    /// the markup's first `<svg ...>` tag, "" when it starts otherwise
+    fn openTag(m: &str) -> String {
+        if !m.starts_with("<svg") {
+            return String::new();
+        }
+        let end: Option<usize> = m.find('>');
+        if end.is_none() {
+            return String::new();
+        }
+        m[0..end.unwrap()].to_string()
+    }
+    /// an inline picture's new markup written on the element DomView drew
+    /// it as: the markup and its document, parsed here (what DomView would
+    /// have built from it); the host then measures the paint bounds again
+    /// (`EVGRetain.paintFrame`)
+    #[doc(hidden)]
+    pub fn patchSvg(el: &Rc<RefCell<EVGElement>>, markup: &str) {
+        EVGElement::set_attribute(el, "svg", markup.to_string());
+        let sp: Rc<RefCell<SvgParser>> = Rc::new(RefCell::new(SvgParser::new()));
+        el.borrow_mut().svg_doc = Some(SvgParser::parse(&sp, markup.to_string()));
+        el.borrow_mut().svg_doc_key = markup.to_string();
+        let st: i64 = el.borrow().paint_stamp + 1;
+        el.borrow_mut().paint_stamp = st;
+    }
+    /// the accessible name, value or description of an element changed
+    /// (its text did): written on its element by `apply` as DomView does
+    fn ax(&mut self, node: &Rc<RefCell<JsonValue>>, wa: &Rc<RefCell<JsonValue>>, na: &Rc<RefCell<JsonValue>>) {
+        if wa.borrow().kind != 5 || na.borrow().kind != 5 {
+            self.ok = false;
+            return;
+        }
+        let wk: Vec<String> = wa.borrow().keys.clone();
+        let nk: Vec<String> = na.borrow().keys.clone();
+        if wk.len() != nk.len() {
+            self.ok = false;
+            return;
+        }
+        let n: i64 = nk.len() as i64;
+        for i in 0..n {
+            let k: String = nk[i as usize].clone();
+            if wk[i as usize] != k {
+                self.ok = false;
+                return;
+            }
+            let same: bool = wa.borrow().get(&k).borrow().toJson() == na.borrow().get(&k).borrow().toJson();
+            if !same && k != "n" && k != "v" && k != "d" {
+                self.ok = false;
+                return;
+            }
+        }
+        self.axIds.push(node.borrow().getText("i"));
+        self.axVals.push(Rc::clone(na));
+    }
+    /// text DomView draws as it is: no white space but single spaces
+    /// between words
+    fn plainText(t: &str) -> bool {
+        if t.is_empty() || t.starts_with(' ') || t.ends_with(' ') || t.contains("  ") {
+            return false;
+        }
+        for c in t.chars() {
+            if c == '\n' || c == '\t' || c == '\r' || c == '\u{a0}' || c == '\u{ad}' || c == '\u{200b}' {
+                return false;
+            }
+        }
+        true
+    }
+    fn spaced(t: &str) -> bool {
+        t.contains(' ')
+    }
     fn attrs(&mut self, wa: &Rc<RefCell<JsonValue>>, na: &Rc<RefCell<JsonValue>>) {
         if wa.borrow().kind != 5 || na.borrow().kind != 5 {
             if wa.borrow().toJson() != na.borrow().toJson() {
@@ -183,6 +362,10 @@ impl DomPaint {
     fn style(&mut self, node: &Rc<RefCell<JsonValue>>, ws: &Rc<RefCell<JsonValue>>, ns: &Rc<RefCell<JsonValue>>) {
         if ws.borrow().kind != 5 || ns.borrow().kind != 5 {
             self.ok = false;
+            return;
+        }
+        // (the same text is the same object, JsonMemo)
+        if Rc::ptr_eq(ws, ns) {
             return;
         }
         let wk: Vec<String> = ws.borrow().keys.clone();
@@ -262,12 +445,21 @@ impl DomPaint {
     }
     /// what `compare` noted, written on the elements DomView built under
     /// `top` (ids mfd-xd-<index>-<node>): false, and nothing written, when
-    /// a node's element is not there
+    /// a node's element is not there. Once written, the nodes `compare`
+    /// found the same get the stamps of the last tree's, so the next full
+    /// build takes their elements.
     #[doc(hidden)]
-    pub fn apply(&self, top: &Rc<RefCell<EVGElement>>, index: i64) -> bool {
+    pub fn apply(&mut self, top: &Rc<RefCell<EVGElement>>, index: i64) -> bool {
+        self.dirty = Vec::new();
         let pfx: String = format!("mfd-xd-{}-", index);
         let mut want: HashMap<String, bool> = HashMap::new();
         for id in self.ids.iter() {
+            want.insert(format!("{}{}", pfx, id), true);
+        }
+        for id in self.axIds.iter() {
+            want.insert(format!("{}{}", pfx, id), true);
+        }
+        for id in self.svgIds.iter() {
             want.insert(format!("{}{}", pfx, id), true);
         }
         let mut found: HashMap<String, Rc<RefCell<EVGElement>>> = HashMap::new();
@@ -280,11 +472,102 @@ impl DomPaint {
                 return false;
             }
         }
+        for id in self.axIds.iter() {
+            let fid: String = format!("{}{}", pfx, id);
+            if !found.contains_key(&fid) || twice.contains_key(&fid) {
+                return false;
+            }
+        }
+        for id in self.svgIds.iter() {
+            let fid: String = format!("{}{}", pfx, id);
+            if !found.contains_key(&fid) || twice.contains_key(&fid) {
+                return false;
+            }
+            // (the picture's own element: DomView may have drawn a
+            // fallback in its place)
+            if found.get(&fid).cloned().unwrap().borrow().tag_name != "svg" {
+                return false;
+            }
+        }
+        let mut texts: Vec<Rc<RefCell<EVGElement>>> = Vec::new();
+        let tn: i64 = self.tids.len() as i64;
+        for i in 0..tn {
+            let mut t: Option<Rc<RefCell<EVGElement>>> = DomPaint::textOf(top, &format!("{}{}", pfx, self.tids[i as usize]), &self.tolds[i as usize]);
+            if t.is_none() {
+                t = DomPaint::textOf(top, &format!("{}{}", pfx, self.tpars[i as usize]), &self.tolds[i as usize]);
+            }
+            if t.is_none() {
+                return false;
+            }
+            let te: Rc<RefCell<EVGElement>> = t.unwrap();
+            for d in texts.iter() {
+                if Rc::ptr_eq(d, &te) {
+                    return false;
+                }
+            }
+            texts.push(te);
+        }
         for i in 0..n {
             let el: Rc<RefCell<EVGElement>> = found.get(&format!("{}{}", pfx, self.ids[i as usize])).cloned().unwrap();
             EVGRetain::patch(&el, &self.names[i as usize], &self.vals[i as usize]);
         }
+        let an: i64 = self.axIds.len() as i64;
+        for i in 0..an {
+            let el: Rc<RefCell<EVGElement>> = found.get(&format!("{}{}", pfx, self.axIds[i as usize])).cloned().unwrap();
+            DomView::applyAx(&el, &self.axVals[i as usize]);
+        }
+        let svn: i64 = self.svgIds.len() as i64;
+        for i in 0..svn {
+            let el: Rc<RefCell<EVGElement>> = found.get(&format!("{}{}", pfx, self.svgIds[i as usize])).cloned().unwrap();
+            DomPaint::patchSvg(&el, &self.svgVals[i as usize]);
+        }
+        for i in 0..tn {
+            EVGRetain::patch_text(&texts[i as usize], self.tnews[i as usize].clone());
+        }
+        let rn: i64 = self.renOld.len() as i64;
+        for i in 0..rn {
+            DomPaint::rename(top, &format!("{}{}", pfx, self.renOld[i as usize]), &format!("{}{}", pfx, self.renNew[i as usize]));
+        }
+        self.dirty = texts;
+        // (only now: a node whose elements a full build would take must
+        // have its changes written on them)
+        let sn: i64 = self.same.len() as i64;
+        for i in 0..sn {
+            self.same[i as usize].borrow_mut().stamp = self.stamps[i as usize];
+        }
         true
+    }
+    /// the one element under `top` with this id and a text, when its text
+    /// is `text`
+    fn textOf(top: &Rc<RefCell<EVGElement>>, id: &str, text: &str) -> Option<Rc<RefCell<EVGElement>>> {
+        let mut all: Vec<Rc<RefCell<EVGElement>>> = Vec::new();
+        DomPaint::texts(top, id, &mut all);
+        if all.len() != 1 {
+            return None;
+        }
+        let el: Rc<RefCell<EVGElement>> = all[0].clone();
+        if el.borrow().text_content != text || !el.borrow().children.is_empty() {
+            return None;
+        }
+        Some(el)
+    }
+    fn rename(el: &Rc<RefCell<EVGElement>>, was: &str, now: &str) {
+        if el.borrow().id == was {
+            el.borrow_mut().id = now.to_string();
+        }
+        let ks: Vec<Rc<RefCell<EVGElement>>> = el.borrow().children.clone();
+        for k in ks.iter() {
+            DomPaint::rename(k, was, now);
+        }
+    }
+    fn texts(el: &Rc<RefCell<EVGElement>>, id: &str, out: &mut Vec<Rc<RefCell<EVGElement>>>) {
+        if el.borrow().id == id && !el.borrow().text_content.is_empty() {
+            out.push(Rc::clone(el));
+        }
+        let ks: Vec<Rc<RefCell<EVGElement>>> = el.borrow().children.clone();
+        for k in ks.iter() {
+            DomPaint::texts(k, id, out);
+        }
     }
     #[doc(hidden)]
     fn find(el: &Rc<RefCell<EVGElement>>, want: &HashMap<String, bool>, found: &mut HashMap<String, Rc<RefCell<EVGElement>>>, twice: &mut HashMap<String, bool>) {
