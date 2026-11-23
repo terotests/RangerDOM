@@ -7833,6 +7833,16 @@ impl DomView {
             if (sox.is_empty() || sox == "visible") && (soy.is_empty() || soy == "visible") {
                 p.borrow_mut().class_name = "mfd-svgvis".to_string();
             }
+            // positioned, it paints over its in-flow siblings as a box does
+            // (below): a search field's icon set over the field
+            let svpz: String = s.borrow().getText("z-index");
+            if (spos == "absolute" || (spos == "fixed" || (spos == "relative" || spos == "sticky"))) && !svpz.starts_with("-") {
+                EVGElement::set_attribute(&p, "paint-late", "true".to_string());
+                if svpz.parse::<i64>().ok().is_some() && svpz != "0" {
+                    EVGElement::set_attribute(&p, "paint-z", svpz.clone());
+                }
+                self.lateCount += 1;
+            }
             return p;
         }
         let e: Rc<RefCell<EVGElement>> = EVGElement::create_div();
