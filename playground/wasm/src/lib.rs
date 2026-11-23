@@ -330,6 +330,15 @@ impl Playground {
         let delta = true;
         if delta {
             self.exec("__deltaRender(true)");
+            // (a box whose transform or opacity alone changed comes as the
+            // values over the node kept: Kept::node_of; PG_NOPATCH off)
+            #[cfg(not(target_arch = "wasm32"))]
+            let patch = std::env::var("PG_NOPATCH").is_err();
+            #[cfg(target_arch = "wasm32")]
+            let patch = true;
+            if patch {
+                self.exec("__deltaPatch(true)");
+            }
         }
         // virtual rows: this host renders again before it paints when they
         // ask (layout); PG_NOVIRT renders every child
@@ -1010,6 +1019,22 @@ impl Kept {
         if n.borrow().keys.len() == 1 && n.borrow().keys[0] == "r" {
             let id = n.borrow().getInt("r", -1);
             return self.by_n.get(&id).cloned();
+        }
+        // (a kept node with a value or two written over, __deltaPatch)
+        if n.borrow().keyAt("m") >= 0 {
+            let m = n.borrow().getInt("m", -1);
+            let base = self.by_n.get(&m).cloned()?;
+            let p = DomPaint::patchedNode(&base, n);
+            if p.borrow().keyAt("i") >= 0 {
+                self.fresh += 1;
+            }
+            // (its style not pooled: a copy of the kept one with a value
+            // of its own, hashed and compared for nothing)
+            let num = p.borrow().getInt("n", -1);
+            if num >= 0 {
+                self.by_n.insert(num, p.clone());
+            }
+            return Some(p);
         }
         // (a node without a number was sent whole: nothing under it is
         // named or kept by itself)
