@@ -7281,16 +7281,30 @@
       var tmp = parseSheetText(String(text), this);
       if (!tmp.cssRules.length && !/^\s*@/.test(text)) throw DOMException("Failed to execute 'insertRule' on 'CSSStyleSheet': Failed to parse the rule '" + text + "'.", 'SyntaxError');
       Array.prototype.splice.apply(this.cssRules, [index, 0].concat(tmp.cssRules));
-      this._rebuild();
+      this._later();
       return index;
     }
-    deleteRule(index) { this.cssRules.splice(index, 1); this._rebuild(); }
+    deleteRule(index) { this.cssRules.splice(index, 1); this._later(); }
     addRule(sel, body, index) { return this.insertRule(sel + '{' + body + '}', index === undefined ? this.cssRules.length : index); }
     removeRule(i) { this.deleteRule(i); }
     replaceSync(text) { var tmp = parseSheetText(String(text), this); this.cssRules = tmp.cssRules; this._rebuild(); }
     replace(text) { this.replaceSync(text); return Promise.resolve(this); }
-    _rebuild() {
-      this._rules = [];
+    // (a CSS-in-JS library adds its rules one by one, each where its group
+    // is: the rules are read and indexed again when they are next used, not
+    // for each; a rebuild for each made a page's 2 000 rules take seconds)
+    _later() { this._dirty = true; if (!sheetQuiet) changed(); }
+    _flush() { if (this._dirty) { this._dirty = false; var q = sheetQuiet; sheetQuiet = true; try { this._rebuild(); } finally { sheetQuiet = q; } } }
+    get _rules() { this._flush(); return this.__rules; }
+    set _rules(v) { this.__rules = v; }
+    get _index() { this._flush(); return this.__index; }
+    set _index(v) { this.__index = v; }
+    get _pindex() { this._flush(); return this.__pindex; }
+    set _pindex(v) { this.__pindex = v; }
+    get _pseudo() { this._flush(); return this.__pseudo; }
+    set _pseudo(v) { this.__pseudo = v; }
+    get _backdrop() { this._flush(); return this.__backdrop; }
+    set _backdrop(v) { this.__backdrop = v; }
+    _collect(top) {
       var self = this;
       (function add(rules, media) {
         for (var i = 0; i < rules.length; i++) {
@@ -7303,7 +7317,12 @@
           else if (r.type === 12 && r._ok) add(r.cssRules, media);
           else if (r._layer) add(r.cssRules, media);
         }
-      })(this.cssRules, '');
+      })(top, '');
+    }
+    _rebuild() {
+      this._dirty = false;
+      this._rules = [];
+      this._collect(this.cssRules);
       indexSheet(this);
       if (!sheetQuiet) changed();
     }
@@ -7554,8 +7573,12 @@
     // (a pseudo-element's rules apart, by its name: an element's cascade
     // and its ::before's each go through their own only)
     var idx = {}, pidx = {};
-    for (var i = 0; i < sheet._rules.length; i++) {
-      var r = sheet._rules[i];
+    for (var i = 0; i < sheet._rules.length; i++) indexRule(sheet, sheet._rules[i], i, idx, pidx);
+    sheet._index = idx;
+    sheet._pindex = pidx;
+  }
+  function indexRule(sheet, r, i, idx, pidx) {
+    {
       r.order = i;
       var k = r.sel.key;
       // (a subject that is only :is() or :where(), as a theme's
@@ -7573,8 +7596,6 @@
       if (r.sel.pseudo === 'before' || r.sel.pseudo === 'after' || r.sel.pseudo === 'first-letter' || r.sel.pseudo === 'first-line') sheet._pseudo = true;
       if (r.sel.pseudo === 'backdrop') sheet._backdrop = true;
     }
-    sheet._index = idx;
-    sheet._pindex = pidx;
   }
   // the keys (#id, .class, tag) of a compound whose own are only in its
   // :is() or :where(): one per selector of the list, null when one of them
