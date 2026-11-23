@@ -375,6 +375,11 @@ async function nativeRun(call) {
 //     in the same rectangle of the canvas. Catches a body drawn blank.
 // The probe says what the page reports; this says what it shows.
 const PIC_GRID = 24; // px between flat points
+// The picture check (flat colours and text runs through elementsFromPoint,
+// readPixels) takes longer than most steps, so it runs only when asked:
+// the "Check picture" box, ?picture=1, or an automatic run (the battery).
+// It runs after a step's times are taken either way.
+const picOn = () => { const b = $("picture"); return b ? b.checked : false; };
 const PIC_TOL = 48; // |dr| + |dg| + |db|
 // (a colour of another space, oklch() or color-mix(), as the browser
 // draws it in sRGB: one pixel of a 2D canvas)
@@ -760,7 +765,7 @@ async function open(name) {
   const rdDrawn = performance.now() - t0;
   state = { steps: (native.line && native.line.steps) || (rdLine && rdLine.steps) || [], next: 0, rows: [] };
   const r = { name: "load + setup", native: { js: native.line && native.line.setup, drawn: nLoad + native.drawn }, rd: { js: rdLine && rdLine.setup, render: acc.render, layout: acc.layout, paint: acc.paint, gl: acc.gl, drawn: rLoad + rdDrawn }, nativeProbe: native.probe, rdProbe: rdProbe() };
-  r.picture = pictureCheck();
+  r.picture = picOn() ? pictureCheck() : null;
   state.rows.push(r);
   row(r);
   showErrors();
@@ -785,7 +790,7 @@ async function step() {
     const line = await rdRun(`__bench.run(${k})`, 20000);
     const drawn = performance.now() - t0;
     r = { name: state.steps[k], native: { js: native.line && native.line.total, drawn: native.drawn, frames: native.frames, gap: native.gap }, rd: { js: line && line.total, render: acc.render, layout: acc.layout, paint: acc.paint, gl: acc.gl, frames: acc.frames, gap: acc.gap, gaps: acc.gaps, drawn }, nativeProbe: native.probe, rdProbe: rdProbe() };
-    r.picture = pictureCheck();
+    r.picture = picOn() ? pictureCheck() : null;
     if (BUDGET > 0 && drawn > BUDGET) state.over = true;
   }
   state.rows.push(r);
@@ -1037,6 +1042,7 @@ $("load").onclick = () => loadState();
     b.onclick = () => { if (!busy) open(c.name); };
     nav.appendChild(b);
   }
+  $("picture").checked = params.has("picture") ? params.get("picture") !== "0" : !!params.get("auto");
   await open(params.get("case") || cases[0].name);
   idle();
   if (params.get("auto")) {
