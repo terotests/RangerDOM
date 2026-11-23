@@ -13653,7 +13653,52 @@
   // mark names or { start, end, duration } (Monaco's input latency reads
   // its measures back by name)
   var perfEntries = [];
-  function perfAdd(e) { perfEntries.push(e); if (perfEntries.length > 1000) perfEntries.splice(0, perfEntries.length - 1000); return e; }
+  function perfAdd(e) { perfEntries.push(e); if (perfEntries.length > 1000) perfEntries.splice(0, perfEntries.length - 1000); perfNotify(e); return e; }
+  // PerformanceObserver: marks and measures reach the observers that asked
+  // for their type, in a microtask, as a list. The other types (paint,
+  // largest-contentful-paint, longtask...) are accepted and never come.
+  // Without it a page's web-vitals code threw a ReferenceError in a React
+  // effect and React took the whole page down (yle.fi).
+  var perfObservers = [];
+  function perfNotify(e) {
+    for (var i = 0; i < perfObservers.length; i++) {
+      var o = perfObservers[i];
+      if (o._types.indexOf(e.entryType) < 0) continue;
+      o._queue.push(e);
+      if (!o._due) { o._due = true; G.queueMicrotask(o._flush); }
+    }
+  }
+  function PerformanceObserverEntryList(list) { this._list = list; }
+  PerformanceObserverEntryList.prototype.getEntries = function () { return this._list.slice(); };
+  PerformanceObserverEntryList.prototype.getEntriesByType = function (t) { return this._list.filter(function (e) { return e.entryType === t; }); };
+  PerformanceObserverEntryList.prototype.getEntriesByName = function (n, t) { return this._list.filter(function (e) { return e.name === String(n) && (t === undefined || e.entryType === t); }); };
+  class PerformanceObserver {
+    constructor(cb) {
+      if (typeof cb !== 'function') throw new TypeError("Failed to construct 'PerformanceObserver': The callback provided as parameter 1 is not a function.");
+      var self = this;
+      this._cb = cb; this._types = []; this._queue = []; this._due = false;
+      this._flush = function () {
+        self._due = false;
+        if (!self._queue.length) return;
+        var list = self._queue; self._queue = [];
+        try { self._cb.call(self, new PerformanceObserverEntryList(list), self); } catch (err) { reportError(err); }
+      };
+    }
+    observe(opts) {
+      opts = opts || {};
+      var types = opts.entryTypes ? Array.prototype.slice.call(opts.entryTypes) : opts.type !== undefined ? [opts.type] : [];
+      for (var i = 0; i < types.length; i++) if (this._types.indexOf(String(types[i])) < 0) this._types.push(String(types[i]));
+      if (perfObservers.indexOf(this) < 0) perfObservers.push(this);
+      if (opts.buffered) {
+        var me = this;
+        perfEntries.forEach(function (e) { if (me._types.indexOf(e.entryType) >= 0) me._queue.push(e); });
+        if (this._queue.length && !this._due) { this._due = true; G.queueMicrotask(this._flush); }
+      }
+    }
+    disconnect() { var i = perfObservers.indexOf(this); if (i >= 0) perfObservers.splice(i, 1); this._queue = []; this._types = []; }
+    takeRecords() { var q = this._queue; this._queue = []; return q; }
+  }
+  PerformanceObserver.supportedEntryTypes = ['mark', 'measure'];
   function perfTime(v, dflt) {
     if (v === undefined || v === null) return dflt;
     if (typeof v === 'number') return v;
@@ -14048,7 +14093,7 @@
     SVGElement: SVGElement, SVGGraphicsElement: SVGGraphicsElement, SVGSVGElement: SVGSVGElement, SVGPathElement: SVGPathElement,
     Document: Document, HTMLDocument: HTMLDocument, XMLDocument: XMLDocument, NodeFilter: NodeFilter, TreeWalker: TreeWalker,
     NodeIterator: NodeIterator, Range: Range, StaticRange: StaticRange, MutationObserver: MutationObserver, MutationRecord: MutationRecord,
-    ResizeObserver: ResizeObserver, IntersectionObserver: IntersectionObserver, DOMRect: DOMRect, DOMRectReadOnly: DOMRect, DOMMatrix: DOMMatrix, DOMMatrixReadOnly: DOMMatrix, WebKitCSSMatrix: DOMMatrix, DOMPoint: DOMPoint, DOMPointReadOnly: DOMPoint, SVGMatrix: DOMMatrix, SVGPoint: DOMPoint, DOMParser: DOMParser,
+    ResizeObserver: ResizeObserver, IntersectionObserver: IntersectionObserver, PerformanceObserver: PerformanceObserver, PerformanceObserverEntryList: PerformanceObserverEntryList, DOMRect: DOMRect, DOMRectReadOnly: DOMRect, DOMMatrix: DOMMatrix, DOMMatrixReadOnly: DOMMatrix, WebKitCSSMatrix: DOMMatrix, DOMPoint: DOMPoint, DOMPointReadOnly: DOMPoint, SVGMatrix: DOMMatrix, SVGPoint: DOMPoint, DOMParser: DOMParser,
     XMLSerializer: XMLSerializer, CSSRule: CSSRule, CSSStyleRule: CSSStyleRule, CSSMediaRule: CSSMediaRule, CSSStyleSheet: CSSStyleSheet,
     StyleSheet: CSSStyleSheet, MediaQueryList: MediaQueryList, URL: URL, URLSearchParams: URLSearchParams, TextEncoder: TextEncoder,
     TextDecoder: TextDecoder, Blob: Blob, File: File, FileReader: FileReader, AbortController: AbortController, AbortSignal: AbortSignal,
