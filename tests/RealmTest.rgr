@@ -271,7 +271,14 @@ class RealmTest {
         def got (r.eval((this.file("tests/wire.js"))))
         this.check(("style table: the delta render with styles as references puts together the whole render (" + got + ")") (got == "true,true,true,true,no style,true,true,true,true,true,true,false,true"))
     }
+    fn insertRule:void () {
+        def r:DomRealm (this.realm("<html><head><style id=s></style></head><body><p class=a>x</p></body></html>"))
+        r.runScripts()
+        def got (r.eval((this.file("tests/insertrule.js"))))
+        this.check(("insertRule and deleteRule anywhere in a sheet (" + got + ")") (got == "rgb(255, 0, 0),rgb(0, 0, 255),rgb(0, 0, 255),3,rgb(255, 0, 0),rgb(1, 2, 3)"))
+    }
     fn run:void () {
+        this.insertRule()
         this.plainDom()
         this.react()
         this.timers()
