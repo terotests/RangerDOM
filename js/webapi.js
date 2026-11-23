@@ -10426,6 +10426,10 @@
       if (firstBody === n && (rootCs['overflow-x'] || 'visible') === 'visible' && (rootCs['overflow-y'] || 'visible') === 'visible') { delete s['overflow-x']; delete s['overflow-y']; }
     }
     if (/^(inline-)?grid-lanes$/.test(cs.display)) lanesStyle(cs, s);
+    // an outer <svg> with one side set and the other auto takes the other
+    // from its viewBox (its intrinsic ratio, CSS Images 3, 5.2): the host
+    // lays an auto side out as 0 and an icon beside a label overflowed
+    if (o.t === 'svg:svg' && n.ownerSVGElement === null) svgRatioSide(n, cs, s);
     // (width does not apply to rows and row groups, height not to columns
     // and column groups, CSS 2 10.2 and 10.5)
     var tblBox = (!cs.float || cs.float === 'none') && cs.position !== 'absolute' && cs.position !== 'fixed' && !(parentStyle && /flex|grid/.test(parentStyle.display || ''));
@@ -12495,6 +12499,15 @@
     var r = { w: w !== null ? w : b[2], h: h !== null ? h : b[3] };
     svg._usedBox = r.w + ',' + r.h;
     return r;
+  }
+  function svgRatioSide(n, cs, s) {
+    var w = /^([\d.]+)px$/.exec(cs.width || ''), h = /^([\d.]+)px$/.exec(cs.height || '');
+    if ((w && h) || (!w && !h)) return false;
+    var vb = (n.getAttribute('viewBox') || '').trim().split(/[\s,]+/).map(parseFloat);
+    if (vb.length !== 4 || !(vb[2] > 0) || !(vb[3] > 0)) return false;
+    if (w && (!cs.height || cs.height === 'auto')) { s.height = fmtNum(parseFloat(w[1]) * vb[3] / vb[2]) + 'px'; return true; }
+    if (h && (!cs.width || cs.width === 'auto')) { s.width = fmtNum(parseFloat(h[1]) * vb[2] / vb[3]) + 'px'; return true; }
+    return false;
   }
   function svgLength(v, total) {
     if (v === null || v === undefined || v === '') return 0;
