@@ -8464,6 +8464,9 @@
   // again (V). Off by default; a host that has no DomTree answers "-" and
   // webapi.js renders.
   var rxOn = false, rxSuspend = 0, rxTablesH = -1, rxCs = new Map(), rxCsH = -1, rxPsN = 0, rxEls = new Map();
+  // (rxHoleDelta: a host whose DomStyle puts in the nodes it keeps by
+  // number takes the holes as deltas, __webdom.rxHoleDelta)
+  var rxHoleDelta = false;
   var rxN = { walks: 0, rx: 0, fb: 0, holes: 0, b: 0, x: 0, why: {} }, rxCheckOn = false, rxBad = [], rxChecked = 0, rxUsed = false;
   // elements webapi.js renders itself, whatever their style
   var RX_HOLE_TAGS = /^(input|textarea|select|img|iframe|canvas|video|audio|object|embed|template|picture|source|table|caption|colgroup|col|thead|tbody|tfoot|tr|td|th|slot|dialog|option|optgroup|frame|frameset|math)$/;
@@ -8669,28 +8672,32 @@
     if (f[0] === 'N') h = f[1];
     else if (f[0] === 'H') {
       if (f[2]) { var sl = f[2].split('\u0003'); for (var s = 0; s < sl.length; s++) { var sp = sl[s].indexOf('\u0002'); rxCsOf(+sl[s].slice(0, sp), sl[s].slice(sp + 1)); } }
-      var hl = f[1].split(';'), out = [];
+      var hl = f[1].split(';'), out = [], hm0 = marks.length;
       if (treePending.size) flushTree();
       if (computedCache.gen !== styleGen) { computedCache = { gen: styleGen, map: {} }; treePending.clear(); }
       for (var i = 0; i < hl.length; i++) {
         var c = hl[i].indexOf(','), id = +hl[i].slice(0, c), csn = +hl[i].slice(c + 1), el = rxEls.get(id) || rxFind(n, id);
-        if (!el || !el.isConnected) { rxNote('hole not found'); return null; }
+        if (!el || !el.isConnected) { unmark(hm0); rxNote('hole not found'); return null; }
         var pel = el.parentNode && el.parentNode.nodeType === 1 ? el.parentNode : null, pcs = null;
         if (pel) {
           pcs = computedCache.map[pel.__id];
           if (!pcs) {
             pcs = rxCsOf(csn);
-            if (!pcs) { rxNote('hole style'); return null; }
+            if (!pcs) { unmark(hm0); rxNote('hole style'); return null; }
             // (what computedOf would give: the hole's style is computed under it)
             computedCache.map[pel.__id] = pcs;
             if (!pel._es) styledNow(pel);
           }
         }
-        var dm = marks.length, sv = deltaOff;
-        deltaOff = 1;
+        // (as a delta when the host shares the nodes it keeps, rxHoleDelta:
+        // what it has is named, {"r": n}; values over a kept node are not
+        // sent, as DomStyle does not put them together)
+        var hd = rxHoleDelta && deltaOn && !deltaOff && !wireOn;
+        var dm = marks.length, sv = deltaOff, svp = deltaPatch;
+        if (hd) deltaPatch = false; else deltaOff = 1;
         var hj = renderJson(el, pcs);
-        deltaOff = sv;
-        unmark(dm);
+        if (hd) { deltaPatch = svp; if (lastDelta) hj = lastDelta; }
+        else { deltaOff = sv; unmark(dm); }
         out.push('J\u0001' + id + '\u0001' + hj);
         rxN.holes++;
       }
@@ -8699,7 +8706,7 @@
       rsxOps = [];
     }
     if (h === '0') { rxN.rx++; return ''; }
-    if (!h) { rxNote('incomplete'); return null; }
+    if (!h) { if (hm0 !== undefined) unmark(hm0); rxNote('incomplete'); return null; }
     rxN.rx++;
     rxUsed = true;
     return '{"rx":' + h + '}';
@@ -15559,6 +15566,7 @@
     },
     // (the selectors DomStyle leaves to webapi.js for el)
     rxLeft: function (el) { var q = rsxOn ? rsxQuery(el, scopeRuleSet(doc, null), '') : null; return q ? q.check.map(function (w) { return w.r.sel.text || JSON.stringify(w.r.sel).slice(0, 120); }) : null; },
+    rxHoleDelta: function (on) { rxHoleDelta = !!on; return rxHoleDelta; },
     rxCheck: function (on) { if (on !== undefined) { rxCheckOn = !!on; rxBad = []; rxChecked = 0; if (on) changed(); return rxCheckOn; } return JSON.stringify({ bad: rxBad, checked: rxChecked, n: rxN }); },
     rsxCheck: function (on) { if (on !== undefined) { rsxCheckOn = !!on; rsxBad = []; if (on) changed(); return rsxCheckOn; } return JSON.stringify({ bad: rsxBad, n: rsxN }); },
     restyleAll: function () { changed(); }, overlay: function (on) { overlayOn = !!on; changed(); }, computedOf: computedOf, cascade: cascade, parseSelectorList: parseSelectorList, normalizeColor: normalizeColor, resolveURL: resolveURL, nodeById: nodeById, lengthPx: lengthPx,

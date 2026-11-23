@@ -371,6 +371,8 @@ pub struct DomStyle {
     psMap: HashMap<i64, usize>,
     /// the walks' nodes by handle, for the page's {"rx": n} (DomPage)
     pub ext: Rc<RefCell<JsonNodes>>,
+    /// a node a hole's delta named that the host does not keep
+    holeMiss: bool,
     jsonMemo: HashMap<String, Rc<RefCell<JsonValue>>>,
     rxHoles: Vec<(i64, usize)>,
     handleN: i64,
@@ -430,6 +432,7 @@ impl DomStyle {
             holeJson: HashMap::new(),
             psMap: HashMap::new(),
             ext: Rc::new(RefCell::new(JsonNodes::new())),
+            holeMiss: false,
             jsonMemo: HashMap::new(),
             rxHoles: Vec::new(),
             handleN: 0,
@@ -1686,13 +1689,33 @@ impl DomStyle {
         if !p.borrow().ok {
             return None;
         }
-        if text.contains("\"rx\":") {
-            return Some(self.rxResolve(&v));
+        // (a delta: the nodes it names, {"r": n}, the host keeps; one it
+        // does not keep, and the hole is not had)
+        let refs = text.contains("{\"r\":");
+        if refs && !self.ext.borrow().shares {
+            return None;
+        }
+        if refs || text.contains("\"rx\":") {
+            self.holeMiss = false;
+            let r = self.rxResolve(&v);
+            if self.holeMiss {
+                return None;
+            }
+            return Some(r);
         }
         Some(v)
     }
     fn rxResolve(&mut self, n: &Rc<RefCell<JsonValue>>) -> Rc<RefCell<JsonValue>> {
         if n.borrow().kind != 5 {
+            return n.clone();
+        }
+        if n.borrow().keys.len() == 1 && n.borrow().keys[0] == "r" {
+            let k = n.borrow().getInt("r", -1);
+            let got = self.ext.borrow().by_n.get(&k).cloned();
+            if got.is_some() {
+                return got.unwrap();
+            }
+            self.holeMiss = true;
             return n.clone();
         }
         if n.borrow().keyAt("rx") >= 0 {
@@ -1728,6 +1751,30 @@ impl DomStyle {
             return;
         }
         let n = self.rxHoleNode(&t);
+        // (a delta that names a node the host does not keep, or bad text:
+        // not had, the walk incomplete; webapi.js renders it then)
+        if n.is_none() && !t.is_empty() {
+            let r = &mut self.rx[k];
+            r.got = false;
+            r.complete = false;
+            r.holeText = String::new();
+            r.node = None;
+            r.kidNodes = Vec::new();
+            r.ownKey = String::new();
+            r.fresh = true;
+            return;
+        }
+        // (the node it had, named now: nothing changed)
+        let mut same = false;
+        if n.is_some() && self.rx[k].node.is_some() {
+            let a = n.clone().unwrap();
+            let b = self.rx[k].node.clone().unwrap();
+            same = Rc::ptr_eq(&a, &b);
+        }
+        if same {
+            self.rx[k].holeText = t;
+            return;
+        }
         let r = &mut self.rx[k];
         r.holeText = t;
         r.node = n;
