@@ -202,6 +202,20 @@ if (withWasm) {
     console.error("rangerdom_pg.wasm was not built (cargo with the wasm32-wasip1 target?): the page will use rangerdom_pg.js");
     if (process.env.CI) process.exit(1);
   }
+  // The same with CEr's baseline JIT (cer/src/wjit.rs, ?jit=1): the
+  // modules it writes call back into this one through its function table,
+  // so the table is exported and growable.
+  console.log("==> rangerdom_pg-jit.wasm (cargo, wasm32-wasip1, --features wjit)");
+  try {
+    execFileSync("cargo", ["build", "--release", "--lib", "--target", "wasm32-wasip1", "--features", "wjit", "--target-dir", path.join(crate, "target-jit")], {
+      cwd: crate, stdio: ["ignore", "inherit", "inherit"],
+      env: { ...process.env, RUSTFLAGS: "-C link-arg=-zstack-size=33554432 -C link-arg=--export-table -C link-arg=--growable-table" },
+    });
+    fs.copyFileSync(path.join(crate, "target-jit", "wasm32-wasip1", "release", "rangerdom_pg.wasm"), path.join(OUT, "rangerdom_pg-jit.wasm"));
+  } catch (e) {
+    console.error("rangerdom_pg-jit.wasm was not built: ?jit=1 runs without the JIT");
+    if (process.env.CI) process.exit(1);
+  }
 }
 
 // The desktop program: playground/native (an SDL3 window that draws EVG's

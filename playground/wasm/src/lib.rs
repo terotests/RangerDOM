@@ -182,6 +182,8 @@ impl Playground {
     fn tuned(mut engine: Engine) -> Engine {
         // (CEr's register machine: its default is still the stack machine)
         engine.vm.regs = true;
+        // CEr's baseline JIT (pg_jit; a build with the `wjit` feature)
+        JIT.with(|j| { let (on, min) = j.get(); engine.vm.jit_on = on && cer::wjit::available(); engine.vm.jit_min = min; });
         // Date's local time zone: the browser's (pg_set_time_zone), kept
         // over pg_reset
         TIME_ZONE.with(|z| { let z = z.borrow(); if !z.is_empty() { engine.set_time_zone(&z); } });
@@ -1474,6 +1476,27 @@ pub extern "C" fn pg_set_time_zone(zp: *mut u8, zl: usize) -> u32 {
     let z = text(zp, zl);
     TIME_ZONE.with(|t| *t.borrow_mut() = z.clone());
     PG.with(|p| if p.borrow_mut().engine.set_time_zone(&z) { 1 } else { 0 })
+}
+thread_local! {
+    static JIT: std::cell::Cell<(bool, i64)> = const { std::cell::Cell::new((false, 64)) };
+}
+/// CEr's baseline JIT (cer::wjit): `on` 1 compiles a function's hot loops
+/// to WebAssembly after `min` back edges, for this engine and the ones
+/// pg_reset and pg_restore make. Needs a build with the `wjit` feature and
+/// the host's cerxes_jit.install; 1 when this build can run compiled code.
+#[no_mangle]
+pub extern "C" fn pg_jit(on: i32, min: i32) -> i32 {
+    let ok = cer::wjit::available();
+    JIT.with(|j| j.set((on != 0 && ok, if min > 0 { min as i64 } else { 64 })));
+    PG.with(|p| { let mut p = p.borrow_mut(); p.engine.vm.jit_on = on != 0 && ok; p.engine.vm.jit_min = if min > 0 { min as i64 } else { 64 }; });
+    ok as i32
+}
+/// the JIT's counters as JSON: functions compiled and refused, code bytes,
+/// entries into compiled code
+#[no_mangle]
+pub extern "C" fn pg_jit_stats() -> usize {
+    let s = cer::wjit::stats();
+    answer(format!("{{\"compiled\":{},\"refused\":{},\"dropped\":{},\"bytes\":{},\"entries\":{}}}", s.compiled, s.refused, s.dropped, s.bytes, s.entries))
 }
 #[no_mangle]
 pub extern "C" fn pg_reset() {
