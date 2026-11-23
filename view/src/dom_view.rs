@@ -6529,6 +6529,12 @@ impl DomView {
                 if !sbw.is_empty() {
                     EVGElement::set_attribute(&e, "scrollbar-width", sbw.clone());
                 }
+                // (hidden and clip cut without a bar: only auto and scroll
+                // are scrolled by the user; EVG draws one on every clip that
+                // overflows, so yle.fi's two-line titles each had a bar)
+                if (o == "hidden" || o == "clip") && sbw.is_empty() {
+                    EVGElement::set_attribute(&e, "scrollbar-width", "none".to_string());
+                }
                 if sbw != "none" {
                     if oy == "scroll" {
                         let rhs_7 = format!("{} mfd-dscroll", e.borrow().class_name);
@@ -9268,7 +9274,11 @@ impl DomView {
         let was_maybe: bool = self.defHMaybe;
         let mpos: String = s.borrow().getText("position");
         let mh: String = s.borrow().getText("height");
-        self.defHMaybe = ((self.inFlex || (mpos == "absolute" || mpos == "fixed")) || (display == "table-cell" || display == "table")) || !mh.is_empty() && mh != "auto";
+        // (a percentage of a parent whose height is not definite is auto,
+        // and says nothing: swiper's wrapper, height 100% in a block of
+        // auto height, made its 100% slides 0 px tall, yle.fi's news row)
+        let pct_indef: bool = mh.ends_with("%") && DomText::index_of(&mh, "(") < 0 && was_def_h < 0.0 && !was_maybe;
+        self.defHMaybe = ((self.inFlex || (mpos == "absolute" || mpos == "fixed")) || (display == "table-cell" || display == "table")) || !mh.is_empty() && mh != "auto" && !pct_indef;
         if indef_item {
             self.defHMaybe = false;
         }

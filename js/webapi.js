@@ -2949,9 +2949,11 @@
   class HTMLImageElement extends HTMLElement {
     constructor(q) { super(q); this.complete = true; }
     // (the picture's own size where its data says it, a data: URL's SVG,
-    // PNG or GIF; else the laid-out box)
-    get naturalWidth() { var n = intrinsicOf(this.getAttribute('src')); return n ? n[0] : this.width; }
-    get naturalHeight() { var n = intrinsicOf(this.getAttribute('src')); return n ? n[1] : this.height; }
+    // PNG or GIF; else the laid-out box; a picture with a src is never 0 by
+    // 0, which is what pages read as broken: yle.fi's cards swapped every
+    // photo for their placeholder when naturalHeight was 0 before layout)
+    get naturalWidth() { var n = intrinsicOf(this.getAttribute('src')); if (n) return n[0]; var w = this.width; return w > 0 || !this.getAttribute('src') ? w : 300; }
+    get naturalHeight() { var n = intrinsicOf(this.getAttribute('src')); if (n) return n[1]; var h = this.height; return h > 0 || !this.getAttribute('src') ? h : 150; }
     get width() { var a = this.getAttribute('width'); return a !== null ? parseInt(a, 10) || 0 : rectOf(this).width; }
     set width(v) { this.setAttribute('width', v); }
     get height() { var a = this.getAttribute('height'); return a !== null ? parseInt(a, 10) || 0 : rectOf(this).height; }
