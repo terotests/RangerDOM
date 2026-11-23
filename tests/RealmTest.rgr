@@ -225,6 +225,16 @@ class RealmTest {
         def got (r.eval("__deltaRender(true); __renderDelta(); __fastRenderCheck(true); var a = document.getElementById('a'), b = document.getElementById('b'), sp = document.getElementById('in'), o = []; for (var i = 0; i < 4; i++) { a.style.transform = 'translate(' + i + 'px, 2px) rotate(' + i + 'deg)'; b.style.transform = 'rotate(' + (i + 4) + 'deg)'; __renderDelta(); } o.push(JSON.parse(__fastRenderCheck()).n); for (i = 0; i < 3; i++) { b.style.opacity = String(0.4 + i / 10); __renderDelta(); } o.push(JSON.parse(__fastRenderCheck()).n); sp.className = 'red'; b.style.transform = 'rotate(20deg)'; var t = __renderDelta(); o.push(JSON.parse(__fastRenderCheck()).n, /rotate\\(20deg\\)/.test(t), /rgb\\(9, 0, 0\\)/.test(t)); a.style.transform = 'none'; __renderDelta(); a.style.transform = 'translate(50%, 0)'; __renderDelta(); a.textContent = 'z'; a.style.transform = 'rotate(1deg)'; t = __renderDelta(); o.push(JSON.parse(__fastRenderCheck()).n, /\"x\":\"z\"/.test(t), JSON.parse(__fastRenderCheck()).bad); o.join(',')"))
         this.check("only a transform or an opacity set: the kept render with the new value, the same as a whole render" (got == "8,11,11,true,true,11,true,0"))
     }
+    ; a host that takes patched nodes (__deltaPatch): a box whose transform
+    ; alone changed comes as the number it was sent under and the new value,
+    ; again on the next frame; a box with an element in it, or one never
+    ; sent, comes whole
+    fn movedPatch:void () {
+        def r:DomRealm (this.realm("<html><head><style>.b{position:absolute;width:40px;height:30px}</style></head><body><div id=w><div class=b id=a style='transform:translate(1px,2px)'>a</div><div class=b id=b style='transform:rotate(3deg)'><span>in</span></div></div></body></html>"))
+        r.runScripts()
+        def got (r.eval("__deltaRender(true); __deltaPatch(true); __renderDelta(); var a = document.getElementById('a'), b = document.getElementById('b'), o = [], t, m; a.style.transform = 'translate(1px, 2px) rotate(1deg)'; __renderDelta(); a.style.transform = 'translate(5px, 2px)'; t = __renderDelta(); m = /\\{\"n\":(\\d+),\"m\":(\\d+),\"ps\":\\{\"transform\":\"translate\\(5px, 2px\\)\"\\},\"sa\":\"transform: translate\\(5px, 2px\\);\"\\}/.exec(t); o.push(!!m); a.style.transform = 'translate(6px, 2px)'; t = __renderDelta(); o.push(m !== null && t.indexOf('\"m\":' + m[1] + ',') >= 0); b.style.transform = 'rotate(4deg)'; t = __renderDelta(); o.push(/\"m\":/.test(t), /rotate\\(4deg\\)/.test(t)); __deltaPatch(false); a.style.transform = 'translate(7px, 2px)'; t = __renderDelta(); o.push(/\"m\":/.test(t)); o.join(',')"))
+        this.check(("a box's new transform as a patched node (" + got + ")") (got == "true,true,false,true,false"))
+    }
     fn controls:void () {
         def r:DomRealm (this.realm("<html><body style='margin:0;font:10px Arial'><input type=range id=r min=0 max=100 step=10 value=0><select id=m multiple style='font-size:10px;line-height:10px;border:0;padding:0'><option value=1>1<option value=2>2<option value=3>3<option value=4>4</select><div id=ce contenteditable style='font-size:10px'>abc</div><input id=t value=hello style='font-size:10px;padding:0;border:0'><input id=n type=number value=10 step=2><input id=d type=date value=2026-11-15><input id=tm type=time value=13:45><input id=c type=color value='#3366cc'><input id=f type=file></body></html>"))
         r.runScripts()
@@ -277,6 +287,7 @@ class RealmTest {
         this.scopedStyles()
         this.detachedImage()
         this.movedRender()
+        this.movedPatch()
         this.controls()
         this.focus()
         this.a11y()

@@ -33,6 +33,7 @@ use ranger::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::dom_paint::DomPaint;
 use crate::dom_view::{DomBoxes, DomSvgDocs, DomView};
 use crate::rgr::EVGElement;
 use rangerdom_json::{JsonMemo, JsonNodes, JsonParser, JsonValue};
@@ -498,6 +499,23 @@ impl DomPage {
         if n.borrow().keys.len() == 1 && n.borrow().keys[0] == "r" {
             let k: i64 = n.borrow().getInt("r", -1);
             return self.byN.get(&k).cloned();
+        }
+        // (a kept node with a value or two written over, __deltaPatch)
+        if n.borrow().keyAt("m") >= 0 {
+            let m: i64 = n.borrow().getInt("m", -1);
+            let base: Option<Rc<RefCell<JsonValue>>> = self.byN.get(&m).cloned();
+            if base.is_none() {
+                return None;
+            }
+            let p: Rc<RefCell<JsonValue>> = DomPaint::patchedNode(base.as_ref().unwrap(), n);
+            if p.borrow().keyAt("i") >= 0 {
+                self.fresh += 1;
+            }
+            let num: i64 = p.borrow().getInt("n", -1);
+            if num >= 0 {
+                self.byN.insert(num, Rc::clone(&p));
+            }
+            return Some(p);
         }
         // (a node without a number was sent whole: nothing under it is
         // named or kept by itself)
