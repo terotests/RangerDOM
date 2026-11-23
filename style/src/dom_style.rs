@@ -253,6 +253,11 @@ pub struct RxEl {
     /// children in painting order
     pub order: Vec<i64>,
     pub holeText: String,
+    /// a hole DomTree could not style whose node turned out to need its
+    /// parent rendered by webapi.js (a table part, an inline holding a
+    /// block, a stacking child): its parent is a hole then, till it is
+    /// described again
+    pub holeBad: bool,
     pub node: Option<Rc<RefCell<JsonValue>>>,
     pub kidNodes: Vec<Rc<RefCell<JsonValue>>>,
     pub ownKey: String,
@@ -295,6 +300,7 @@ impl RxEl {
             state: 0,
             order: Vec::new(),
             holeText: String::new(),
+            holeBad: false,
             node: None,
             kidNodes: Vec::new(),
             ownKey: String::new(),
@@ -837,6 +843,7 @@ impl DomStyle {
             let r = &mut self.rx[k];
             r.patchOk = false;
             r.patch = Vec::new();
+            r.holeBad = false;
             r.kids = kids.clone();
             r.inline = inl;
             r.a = f[4].to_string();
@@ -1336,10 +1343,12 @@ impl DomStyle {
                     let ks = self.slotOf(code / 4);
                     let kc = kcs[i];
                     if kc == 0 {
-                        // (one DomTree could not style: only a picture or a
+                        // (one DomTree could not style: a picture or a
                         // control, which no rule below makes a table part or
-                        // an inline holding a block)
-                        if !self.rxPlainHole(ks) {
+                        // an inline holding a block; another is a hole too,
+                        // its node checked once webapi.js rendered it, rxB,
+                        // unless that found it needs this box rendered there)
+                        if !self.rxPlainHole(ks) && (self.rx[ks].holeBad || pd == "inline" || pd == "contents") {
                             ok = false;
                             why = "unknown child".to_string();
                         }
@@ -1466,6 +1475,67 @@ impl DomStyle {
         t == "img" || t == "input" || t == "textarea" || t == "select" || t == "button" || t == "br" || t == "iframe" || t == "video" || t == "audio" || t == "canvas" || t == "svg"
     }
 
+    /// whether a hole's node (webapi.js's render of a child DomTree could
+    /// not style) sits in box `at`'s node as it is: no table part out of a
+    /// flex or grid box, no inline holding a block, nothing that the box's
+    /// painting order would move (a z-index)
+    fn rxHoleFits(&mut self, at: usize, n: &Rc<RefCell<JsonValue>>) -> bool {
+        if n.borrow().kind != 5 {
+            return false;
+        }
+        let s = n.borrow().get("s");
+        if s.borrow().kind != 5 {
+            return false;
+        }
+        let d = s.borrow().getText("display");
+        let pos = s.borrow().getText("position");
+        let z = s.borrow().getText("z-index");
+        let cs = self.rx[at].cs;
+        let pd = if cs == 0 { String::new() } else { self.tree.text(self.tree.styles[cs].get(self.tree.nDisplay)) };
+        let fg = pd == "flex" || pd == "inline-flex" || pd == "grid" || pd == "inline-grid";
+        if d.is_empty() || d == "contents" || (!fg && d.starts_with("table")) {
+            return false;
+        }
+        if pos != "" && pos != "static" && z != "" && z != "auto" {
+            return false;
+        }
+        if d == "inline" && DomStyle::holdsBlockJson(n) {
+            return false;
+        }
+        true
+    }
+    /// a rendered inline's node holding an in-flow block (through inlines)
+    fn holdsBlockJson(n: &Rc<RefCell<JsonValue>>) -> bool {
+        let c = n.borrow().get("c");
+        if c.borrow().kind != 4 {
+            return false;
+        }
+        let items = c.borrow().items.clone();
+        for k in items.iter() {
+            if k.borrow().kind != 5 || k.borrow().keyAt("x") >= 0 {
+                continue;
+            }
+            let s = k.borrow().get("s");
+            if s.borrow().kind != 5 {
+                return true;
+            }
+            let d = s.borrow().getText("display");
+            let pos = s.borrow().getText("position");
+            if pos == "absolute" || pos == "fixed" || d == "none" {
+                continue;
+            }
+            if d == "inline" || d == "contents" {
+                if DomStyle::holdsBlockJson(k) {
+                    return true;
+                }
+                continue;
+            }
+            if !d.starts_with("inline-") {
+                return true;
+            }
+        }
+        false
+    }
     /// webapi.js holdsBlock: an inline (in HTML) holding an in-flow block
     fn rxHoldsBlock(&mut self, ks: usize, kc: usize) -> bool {
         if !self.els[ks].html {
@@ -1916,6 +1986,14 @@ impl DomStyle {
                 continue;
             }
             if let Some(n) = self.rxB(ks) {
+                // (a hole DomTree could not style: one webapi.js's render of
+                // this box would treat apart is not taken, and this box is
+                // a hole the next walk)
+                if self.rx[ks].state == 3 && self.rx[ks].cs == 0 && !self.rxPlainHole(ks) && !self.rxHoleFits(at, &n) {
+                    self.rx[ks].holeBad = true;
+                    self.rx[at].dirty = true;
+                    all = false;
+                }
                 kidNodes.push(n);
             }
             if !self.rx[ks].complete {
