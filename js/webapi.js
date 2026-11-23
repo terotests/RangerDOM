@@ -11205,6 +11205,9 @@
     // the individual transforms (translate, rotate, scale) before the
     // transform list, CSS Transforms 2, 6.1: the host takes one list
     if ((cs.translate && cs.translate !== 'none') || (cs.rotate && cs.rotate !== 'none') || (cs.scale && cs.scale !== 'none')) s.transform = individualTransforms(n, cs);
+    // an empty box with a mask-image over its background colour is that
+    // picture in the colour (maskBackground), as a pseudo-element is
+    if ((s['mask-image'] || s['-webkit-mask-image']) && !n._c.some(function (k) { return k.nodeType === 1 || (k.nodeType === 3 && /\S/.test(k._data || '')); })) maskBackground(s);
     // (a top layer box's static position is the initial containing block's
     // start corner in the root's writing mode, CSS Position 3, 4.1)
     if (n._top && (cs.position === 'absolute' || cs.position === 'fixed') && ['top', 'right', 'bottom', 'left'].every(function (k) { return !cs[k] || cs[k] === 'auto'; })) {
@@ -12225,7 +12228,20 @@
     // (encodeURIComponent leaves ( ) ' alone: a quoted url runs to its quote)
     var m = /^url\(\s*(['"])(data:image\/svg\+xml[\s\S]*)\1\s*\)$/i.exec(mi.trim()) || /^url\(\s*()(data:image\/svg\+xml[^)]*)\)$/i.exec(mi.trim());
     var bg = s['background-color'];
-    if (!m || !bg || bg === 'transparent' || bg === 'rgba(0, 0, 0, 0)') return '';
+    if (!bg || bg === 'transparent' || bg === 'rgba(0, 0, 0, 0)') return '';
+    // A FETCHED PICTURE (Tailwind's mask-[url(/logo.svg)]: client logos,
+    // icons in the page's colour) is not read here: its URL goes with
+    // #evg-mask=rrggbbaa, and the host paints the picture's opaque parts in
+    // that colour
+    if (!m) {
+      var um = /^url\(\s*(['"]?)([^'")]*)\1\s*\)$/i.exec(mi.trim()), col = colorRGBA(bg);
+      if (!um || !col || !(col[3] > 0) || /^data:/i.test(um[2])) return '';
+      var mu = resolveURL(um[2]);
+      if (!/^https?:/i.test(mu)) return '';
+      var hx = function (v) { return ('0' + Math.max(0, Math.min(255, Math.round(v))).toString(16)).slice(-2); };
+      delete s['background-color'];
+      return mu.split('#')[0] + '#evg-mask=' + hx(col[0]) + hx(col[1]) + hx(col[2]) + hx(col[3] * 255);
+    }
     var uri = m[2], comma = uri.indexOf(','), svg;
     if (comma < 0) return '';
     try { svg = /;base64$/i.test(uri.slice(0, comma)) ? atob(uri.slice(comma + 1)) : decodeURIComponent(uri.slice(comma + 1)); } catch (e) { return ''; }
@@ -12235,6 +12251,26 @@
     if (tag && !/\sfill\s*=/i.test(tag[0])) svg = svg.replace(/<svg\b/i, '<svg fill="' + bg + '"');
     delete s['background-color'];
     return 'data:image/svg+xml,' + encodeURIComponent(svg);
+  }
+  // a masked box keeps its own size, the picture painted in it where the
+  // mask would be: its position, size and repeat as a background's. The
+  // picture (maskAsImage), '' when the box is not one.
+  function maskBackground(s) {
+    var mpic = maskAsImage(s);
+    if (mpic) {
+      s['background-image'] = 'url("' + mpic + '")';
+      // (kept for a host that asks the page which pictures it shows: a
+      // forced layout's tree never reaches it)
+      var mpl = G.__rdMaskPictures || (G.__rdMaskPictures = []);
+      if (mpl.indexOf(s['background-image']) < 0) { mpl.push(s['background-image']); if (mpl.length > 256) mpl.shift(); }
+      var mk = ['position', 'size', 'repeat'];
+      for (var mj = 0; mj < 3; mj++) {
+        var mv = s['mask-' + mk[mj]] || s['-webkit-mask-' + mk[mj]];
+        if (mv) s['background-' + mk[mj]] = mv;
+      }
+      if (!s['background-repeat']) s['background-repeat'] = 'repeat';
+    }
+    return mpic;
   }
   // An empty box drawn by its borders alone, some sides transparent: a
   // CSS triangle (Bootstrap's dropdown caret, a tooltip's arrow), whose
@@ -12323,20 +12359,7 @@
     if (!s.display) s.display = 'inline';
     // (a masked box keeps its own size, the picture painted in it where
     // the mask would be: its position, size and repeat as a background's)
-    var mpic = text ? '' : maskAsImage(s);
-    if (mpic) {
-      s['background-image'] = 'url("' + mpic + '")';
-      // (kept for a host that asks the page which pictures it shows: a
-      // forced layout's tree never reaches it)
-      var mpl = G.__rdMaskPictures || (G.__rdMaskPictures = []);
-      if (mpl.indexOf(s['background-image']) < 0) { mpl.push(s['background-image']); if (mpl.length > 256) mpl.shift(); }
-      var mk = ['position', 'size', 'repeat'];
-      for (var mj = 0; mj < 3; mj++) {
-        var mv = s['mask-' + mk[mj]] || s['-webkit-mask-' + mk[mj]];
-        if (mv) s['background-' + mk[mj]] = mv;
-      }
-      if (!s['background-repeat']) s['background-repeat'] = 'repeat';
-    }
+    var mpic = text ? '' : maskBackground(s);
     var mask = text || mpic ? '' : borderPicture(s, ps.color);
     if (mask) { o.t = 'img'; o.a = { src: mask }; }
     o.s = s;
