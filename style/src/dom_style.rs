@@ -41,7 +41,7 @@
 //! The rules come as webapi.js parsed them (parseComplex), so both match
 //! the same selectors; the index (key to rules) is webapi.js's too.
 
-use crate::dom_tree::{is_nan, parse_float, parse_int, Cs, DomTree};
+use crate::dom_tree::{is_nan, parse_float, parse_int, Cs, Ctx, DomTree};
 use ranger::cell::RefCell;
 use rangerdom_json::{JsonNodes, JsonParser, JsonValue};
 use std::collections::HashMap;
@@ -267,6 +267,14 @@ pub struct RxEl {
     /// element: every node under it was there at the last phase B
     pub got: bool,
     pub complete: bool,
+    /// inline values G set since its style was found, and nothing else
+    /// changed in it (patchOk): name, the value before, the value now.
+    /// Its next style is the last one with those values (rxPatch), not a
+    /// whole cascade.
+    pub patch: Vec<(usize, i64, i64)>,
+    pub patchOk: bool,
+    /// the names rxPatch wrote: phase B writes them over its last node
+    pub patched: Vec<usize>,
 }
 
 impl RxEl {
@@ -297,6 +305,9 @@ impl RxEl {
             fresh: true,
             got: false,
             complete: false,
+            patch: Vec::new(),
+            patchOk: false,
+            patched: Vec::new(),
         }
     }
 }
@@ -570,6 +581,11 @@ impl DomStyle {
                         self.rxDescribe(&f);
                     }
                 }
+                "G" => {
+                    if f.len() >= 3 {
+                        self.rxInline(&f);
+                    }
+                }
                 "X" => {
                     // (a text told again as it was: nothing changed)
                     let changed = if f.len() >= 4 {
@@ -585,6 +601,9 @@ impl DomStyle {
                         let p = num(f[3]);
                         if let Some(&ps) = self.slot.get(&p) {
                             self.rxTick += 1;
+                            // (its node's children change: not patched)
+                            self.rxEl(ps);
+                            self.rx[ps].patchOk = false;
                             self.rxTouchUp(ps);
                         }
                     }
@@ -813,6 +832,8 @@ impl DomStyle {
         };
         if !same {
             let r = &mut self.rx[k];
+            r.patchOk = false;
+            r.patch = Vec::new();
             r.kids = kids.clone();
             r.inline = inl;
             r.a = f[4].to_string();
@@ -829,6 +850,68 @@ impl DomStyle {
                 self.rx[ks].touch = self.rxTick;
             }
         }
+        self.rxTouchUp(k);
+    }
+
+    /// G: inline properties set on an element told before, and nothing
+    /// else changed at or under it: written over its inline style (a new
+    /// name goes last, as webapi.js orders them)
+    fn rxInline(&mut self, f: &Vec<&str>) {
+        let id = num(f[1]);
+        let k = self.slotOf(id);
+        self.rxEl(k);
+        if !self.rx[k].told {
+            return;
+        }
+        for d in f[2].split('\u{3}') {
+            let p: Vec<&str> = d.split('\u{2}').collect();
+            if p.len() < 3 {
+                continue;
+            }
+            let n = self.tree.name(p[0]);
+            let v = self.tree.value(p[1]);
+            let imp = p[2] == "1";
+            let mut at: i64 = -1;
+            let cnt = self.rx[k].inline.len();
+            let mut i = 0;
+            while i < cnt {
+                if self.rx[k].inline[i].0 == n {
+                    at = i as i64;
+                    break;
+                }
+                i += 1;
+            }
+            if at >= 0 {
+                let old = self.rx[k].inline[at as usize];
+                if old.2 || imp {
+                    self.rx[k].patchOk = false;
+                } else if self.rx[k].patchOk {
+                    let mut seen = false;
+                    let pn = self.rx[k].patch.len();
+                    let mut q = 0;
+                    while q < pn {
+                        if self.rx[k].patch[q].0 == n {
+                            self.rx[k].patch[q].2 = v;
+                            seen = true;
+                        }
+                        q += 1;
+                    }
+                    if !seen {
+                        self.rx[k].patch.push((n, old.1, v));
+                    }
+                }
+                self.rx[k].inline[at as usize] = (n, v, imp);
+            } else {
+                self.rx[k].patchOk = false;
+                self.rx[k].inline.push((n, v, imp));
+            }
+        }
+        // (and the attributes its node carries: the style attribute's text)
+        if f.len() >= 4 {
+            self.rx[k].a = f[3].to_string();
+        }
+        self.rx[k].dirty = true;
+        self.rxTick += 1;
         self.rxTouchUp(k);
     }
 
@@ -991,6 +1074,54 @@ impl DomStyle {
         cs
     }
 
+    /// rxStyle for an element whose inline transform or opacity alone
+    /// changed (RxEl.patch): its last style cs with the new values, when
+    /// the old ones were what won the cascade and the new ones need no
+    /// more than the element's own font size; 0 when not so
+    fn rxPatch(&mut self, at: usize, cs: usize) -> usize {
+        let old = self.tree.style(cs);
+        let nT = self.tree.name("transform");
+        let nO = self.tree.name("opacity");
+        let ctx = Ctx::new(old.fontPx, self.rxRootPx, self.rxVw / 100.0, self.rxVh / 100.0);
+        let pc = self.tree.style(self.rx[at].pcs);
+        let hasP = self.rx[at].pcs != 0;
+        let mut out = Cs::new();
+        out.order = old.order.clone();
+        out.vals = old.vals.clone();
+        out.fontPx = old.fontPx;
+        out.fsKw = old.fsKw;
+        out.cc = old.cc.clone();
+        out.ia = old.ia;
+        let ps = self.rx[at].patch.clone();
+        for &(n, a, b) in ps.iter() {
+            if n != nT && n != nO {
+                return 0;
+            }
+            let at0 = self.tree.text(a);
+            let bt = self.tree.text(b);
+            if !rx_patchable(&at0) || !rx_patchable(&bt) {
+                return 0;
+            }
+            self.tree.bad = false;
+            let ca = self.tree.computeValue(n, &at0, &ctx, &pc, hasP);
+            if self.tree.bad || old.get(n) < 0 || self.tree.text(old.get(n)) != ca {
+                return 0;
+            }
+            let cb = self.tree.computeValue(n, &bt, &ctx, &pc, hasP);
+            if self.tree.bad {
+                return 0;
+            }
+            let vid = self.tree.value(&cb);
+            // (to or from the initial value the node gains or loses the
+            // member: built whole)
+            if vid == self.tree.initial[n] {
+                return 0;
+            }
+            out.set(n, vid);
+        }
+        self.tree.intern(out)
+    }
+
     /// whether DomTree draws an element of computed style cs as webapi.js
     /// would (the parts of renderNode it does)
     fn rxDrawable(&mut self, cs: usize) -> bool {
@@ -1042,6 +1173,8 @@ impl DomStyle {
             }
         }
         let again = force || self.rx[at].dirty || self.rx[at].pcs != pcs || self.rx[at].ep != self.rxEp || self.rx[at].state == 0;
+        let samePcs = self.rx[at].pcs == pcs;
+        let sameEp = self.rx[at].ep == self.rxEp;
         self.rx[at].walked = self.rx[at].touch;
         self.rx[at].fresh = true;
         self.rx[at].complete = false;
@@ -1051,7 +1184,24 @@ impl DomStyle {
             self.rx[at].pcs = pcs;
             self.rx[at].ep = self.rxEp;
             self.rx[at].why = String::new();
-            cs = if self.rx[at].told { self.rxStyle(at, id, pcs) } else { 0 };
+            // (only inline values G set, under the same parent style and
+            // rules: the last style with those values)
+            let pc0 = self.rx[at].cs;
+            let canPatch = !force && self.rx[at].patchOk && !self.rx[at].patch.is_empty() && self.rx[at].state == 1 && pc0 != 0 && samePcs && sameEp;
+            let mut pcsx: usize = 0;
+            if canPatch {
+                pcsx = self.rxPatch(at, pc0);
+            }
+            self.rx[at].patched = Vec::new();
+            if pcsx != 0 {
+                let ps = self.rx[at].patch.clone();
+                for &(n, _a, _b) in ps.iter() {
+                    self.rx[at].patched.push(n);
+                }
+            }
+            self.rx[at].patch = Vec::new();
+            self.rx[at].patchOk = true;
+            cs = if pcsx != 0 { pcsx } else if self.rx[at].told { self.rxStyle(at, id, pcs) } else { 0 };
             self.rx[at].cs = cs;
             if cs == 0 {
                 let w = if self.rx[at].told { self.tree.why.clone() } else { "not described".to_string() };
@@ -1086,7 +1236,10 @@ impl DomStyle {
         let leaf = self.rx[at].flags.contains('L');
         // (a box of many children with virtual rows: webapi.js renders it,
         // none of them styled here first)
-        if self.rxVirt && !leaf {
+        // (O: webapi.js found its children all absolutely placed, which no
+        // virtual rows leave out: checked below once they are styled)
+        let outKids = self.rx[at].flags.contains('O');
+        if self.rxVirt && !leaf && !outKids {
             let mut ne = 0;
             for &code in kids.iter() {
                 if code % 4 != 1 {
@@ -1155,8 +1308,20 @@ impl DomStyle {
             }
         }
         if nEl >= 32 && self.rxVirt {
-            ok = false;
-            why = "many children".to_string();
+            let mut out = outKids;
+            let mut i = 0;
+            while out && i < kids.len() {
+                if kids[i] % 4 != 1 {
+                    let kc = kcs[i];
+                    let pos = if kc == 0 { String::new() } else { self.tree.text(self.tree.styles[kc].get(self.tree.nPosition)) };
+                    out = pos == "absolute" || pos == "fixed";
+                }
+                i += 1;
+            }
+            if !out {
+                ok = false;
+                why = "many children".to_string();
+            }
         }
         if ok && !leaf {
             let pd = self.tree.text(c.get(self.tree.nDisplay));
@@ -1573,6 +1738,63 @@ impl DomStyle {
 
     /// Phase B: the element's node (none: display none), its children's
     /// first; the node of the last walk again when nothing in it changed
+    /// rxB for an element rxPatch styled: a copy of its last node with
+    /// the patched members of its style and its attributes anew, when its
+    /// children are the nodes they were (None: built as rxB builds it)
+    fn rxPatchNode(&mut self, at: usize, cs: usize) -> Option<Rc<RefCell<JsonValue>>> {
+        let old = self.rx[at].node.clone()?;
+        let codes = self.rx[at].order.clone();
+        for &code in codes.iter() {
+            let kind = code % 4;
+            if kind == 1 {
+                // (a text changed under it: X touched it, and it is styled whole)
+                continue;
+            }
+            if kind == 2 {
+                return None;
+            }
+            let ks = self.slotOf(code / 4);
+            if ks >= self.rx.len() || self.rx[ks].fresh || self.rx[ks].walked != self.rx[ks].touch || !self.rx[ks].complete {
+                return None;
+            }
+        }
+        let os = old.borrow().get("s");
+        if os.borrow().kind != 5 {
+            return None;
+        }
+        let c = self.tree.style(cs);
+        let ns = JsonValue::mkObj();
+        ns.borrow_mut().keys = os.borrow().keys.clone();
+        ns.borrow_mut().items = os.borrow().items.clone();
+        let names = self.rx[at].patched.clone();
+        for &n in names.iter() {
+            let key = self.tree.names[n].clone();
+            if !ns.borrow().has(&key) {
+                return None;
+            }
+            let v = c.get(n);
+            if v < 0 {
+                return None;
+            }
+            let t = self.tree.values[v as usize].clone();
+            ns.borrow_mut().put(&key, JsonValue::mkStr(t));
+        }
+        let o = JsonValue::mkObj();
+        o.borrow_mut().keys = old.borrow().keys.clone();
+        o.borrow_mut().items = old.borrow().items.clone();
+        o.borrow_mut().put("s", ns);
+        let a = self.rx[at].a.clone();
+        if let Some(av) = self.rxJson(&a) {
+            o.borrow_mut().put("a", av);
+        }
+        self.rx[at].patched = Vec::new();
+        // (the next whole build compares with nothing: built anew)
+        self.rx[at].ownKey = String::new();
+        self.rx[at].node = Some(o.clone());
+        self.rx[at].complete = true;
+        Some(o)
+    }
+
     fn rxB(&mut self, at: usize) -> Option<Rc<RefCell<JsonValue>>> {
         let state = self.rx[at].state;
         if state == 2 {
@@ -1592,6 +1814,13 @@ impl DomStyle {
         self.rx[at].fresh = false;
         let cs = self.rx[at].cs;
         let pcs = self.rx[at].pcs;
+        // (a style rxPatch made: the last node with those members written
+        // over, its children the same nodes when they are)
+        if !self.rx[at].patched.is_empty() {
+            if let Some(n) = self.rxPatchNode(at, cs) {
+                return Some(n);
+            }
+        }
         let sText = self.rxOwn(at, cs, pcs);
         let ia = self.tree.styles[cs].ia;
         let r = &self.rx[at];
@@ -2465,4 +2694,22 @@ fn itemOf(v: &Rc<RefCell<JsonValue>>) -> Item {
         }
     }
     it
+}
+
+/// an inline value rxPatch takes: none that depends on more than the
+/// element's own font size (webapi.js patchedStyle's checks)
+fn rx_patchable(v: &str) -> bool {
+    if v.is_empty() || v.contains('%') || v.contains("var(") || v.contains("calc(") {
+        return false;
+    }
+    let l = v.to_lowercase();
+    if l == "inherit" || l == "initial" || l == "unset" || l == "revert" || l == "revert-layer" || l.contains("currentcolor") {
+        return false;
+    }
+    for u in ["ch", "ex", "cap", "ic", "lh", "rlh", "vw", "vh", "vmin", "vmax", "rem"].iter() {
+        if l.contains(u) {
+            return false;
+        }
+    }
+    true
 }

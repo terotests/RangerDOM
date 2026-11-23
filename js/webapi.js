@@ -139,6 +139,14 @@
     // el._tf0: what el._rv was before the first of such changes in a row;
     // a render of el from then on has only el's transform to change,
     // movedJson)
+    // (el._rxIP: inline properties set on el since the host was last told
+    // of it, and nothing else at or under el: rxTell sends only those, G)
+    if (rxOn && name === 'style' && el._styleSync && el._styleChg) {
+      var rp = el._rxIP;
+      if (!rp || rp.v !== el._rv) rp = el._rxIP = { v: 0, p0: el._rv || 0, n: {} };
+      for (var rpi = 0; rpi < el._styleChg.length; rpi++) rp.n[el._styleChg[rpi]] = 1;
+      rp.v = textStamp;
+    }
     if (name === 'style' && el._styleSync && el._styleChg && el._styleChg.length === 1 && (el._styleChg[0] === 'transform' || el._styleChg[0] === 'opacity')) { if (el._rv !== el._tfv || el._tfn !== el._styleChg[0]) { el._tf0 = el._rv || 0; el._tfn = el._styleChg[0]; } el._tfv = textStamp; }
     for (var p = el; p; p = p.parentNode) p._rv = textStamp;
     if (computedCache.gen !== styleGen) return;
@@ -8550,12 +8558,39 @@
     // is in the page's snapshot.)
     var tb = e._rxB;
     if (tb >= rxBase && tb >= e._rv && (e._rxBS === undefined ? sc === '0,0' : e._rxBS === sc)) return;
+    // (only inline properties set since it was told, G: their values,
+    // not the element described again; 500 boxes moved each frame were
+    // each described whole)
+    var rp = e._rxIP;
+    if (rp) {
+      e._rxIP = null;
+      if (rp.v === e._rv && tb >= rxBase && tb >= rp.p0 && (e._rxBS === undefined ? sc === '0,0' : e._rxBS === sc) && e._style) {
+        var st0 = e._style, pl = '';
+        for (var pn in rp.n) {
+          var pv = st0._p[pn];
+          if (pv === undefined) { pl = null; break; }
+          if (pl) pl += '\u0003';
+          pl += rsxClean(pn) + '\u0002' + rsxClean(pv) + '\u0002' + (st0._prio[pn] ? '1' : '');
+        }
+        if (pl) {
+          rsxOps.push('G\u0001' + e.__id + '\u0001' + pl + '\u0001' + rsxClean(rxAttrs(e)));
+          rxN.p = (rxN.p || 0) + 1;
+          e._rxB = textStamp;
+          return;
+        }
+      }
+    }
     rsxDescribe(e);
     var src = flatKids(e), kids = '', walk = null;
     // (a box of many with virtual rows: the host renders none of it, see
     // rxA; its children are not told)
     var many = false;
     if (virtOn && src.length >= 32) { var ne = 0; for (var m = 0; m < src.length; m++) if (src[m].nodeType === 1) ne++; many = ne >= 32; }
+    // (a box whose children are all absolutely placed has no virtual rows,
+    // virtWindow: its children are told, and the host checks that they
+    // still are, O)
+    var outKids = many && e._rxOut === true;
+    if (outKids) many = false;
     for (var i = 0; i < src.length; i++) {
       var k = src[i];
       if (k.nodeType === 3) {
@@ -8579,7 +8614,7 @@
       for (var q = 0; q < st._order.length; q++) { var nm = st._order[q]; if (inl) inl += '\u0003'; inl += rsxClean(nm) + '\u0002' + rsxClean(st._p[nm]) + '\u0002' + (st._prio[nm] ? '1' : ''); }
     }
     var ax = axOf(e);
-    rsxOps.push('B\u0001' + e.__id + '\u0001' + kids + '\u0001' + inl + '\u0001' + rsxClean(rxAttrs(e)) + '\u0001' + (ax ? rsxClean(JSON.stringify(ax)) : '') + '\u0001' + (e.scrollTop || e.scrollLeft ? '[' + e.scrollLeft + ',' + e.scrollTop + ']' : '') + '\u0001');
+    rsxOps.push('B\u0001' + e.__id + '\u0001' + kids + '\u0001' + inl + '\u0001' + rsxClean(rxAttrs(e)) + '\u0001' + (ax ? rsxClean(JSON.stringify(ax)) : '') + '\u0001' + (e.scrollTop || e.scrollLeft ? '[' + e.scrollLeft + ',' + e.scrollTop + ']' : '') + '\u0001' + (outKids ? 'O' : ''));
     rxN.b++;
     e._rxB = textStamp;
     if (sc !== '0,0' || e._rxBS !== undefined) e._rxBS = sc;
@@ -13172,6 +13207,12 @@
     var vk = 0;
     for (var vi = 0; vi < src.length && vk < VIRT_MIN; vi++) if (src[vi]._attrs !== undefined) vk++;
     if (vk < VIRT_MIN) return virtDrop(n);
+    // (with RX, children all absolutely or fixed placed: the host renders
+    // such a box itself, its children told, rxTell; no rows left out)
+    var outOnly = rxOn;
+    for (var oi = 0; oi < src.length && outOnly; oi++) if (src[oi]._attrs !== undefined) { var op = computedOf(src[oi]).position; outOnly = op === 'absolute' || op === 'fixed'; }
+    if (outOnly) { n._rxOut = true; return virtDrop(n); }
+    if (n._rxOut) n._rxOut = false;
     var tbl = cs.display === 'table-row-group';
     if (!tbl && !/^(block|flow-root|list-item)$/.test(cs.display)) return virtDrop(n);
     if (!tbl && !virtWidthStands(n)) return virtDrop(n);
