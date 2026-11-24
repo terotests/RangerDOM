@@ -139,6 +139,14 @@
     // el._tf0: what el._rv was before the first of such changes in a row;
     // a render of el from then on has only el's transform to change,
     // movedJson)
+    // (el._rxIP: inline properties set on el since the host was last told
+    // of it, and nothing else at or under el: rxTell sends only those, G)
+    if (rxOn && name === 'style' && el._styleSync && el._styleChg) {
+      var rp = el._rxIP;
+      if (!rp || rp.v !== el._rv) rp = el._rxIP = { v: 0, p0: el._rv || 0, n: {} };
+      for (var rpi = 0; rpi < el._styleChg.length; rpi++) rp.n[el._styleChg[rpi]] = 1;
+      rp.v = textStamp;
+    }
     if (name === 'style' && el._styleSync && el._styleChg && el._styleChg.length === 1 && (el._styleChg[0] === 'transform' || el._styleChg[0] === 'opacity')) { if (el._rv !== el._tfv || el._tfn !== el._styleChg[0]) { el._tf0 = el._rv || 0; el._tfn = el._styleChg[0]; } el._tfv = textStamp; }
     for (var p = el; p; p = p.parentNode) p._rv = textStamp;
     if (computedCache.gen !== styleGen) return;
@@ -8477,6 +8485,9 @@
   // again (V). Off by default; a host that has no DomTree answers "-" and
   // webapi.js renders.
   var rxOn = false, rxSuspend = 0, rxTablesH = -1, rxCs = new Map(), rxCsH = -1, rxPsN = 0, rxEls = new Map();
+  // (rxHoleDelta: a host whose DomStyle puts in the nodes it keeps by
+  // number takes the holes as deltas, __webdom.rxHoleDelta)
+  var rxHoleDelta = false;
   var rxN = { walks: 0, rx: 0, fb: 0, holes: 0, b: 0, x: 0, why: {} }, rxCheckOn = false, rxBad = [], rxChecked = 0, rxUsed = false;
   // elements webapi.js renders itself, whatever their style
   var RX_HOLE_TAGS = /^(input|textarea|select|img|iframe|canvas|video|audio|object|embed|template|picture|source|table|caption|colgroup|col|thead|tbody|tfoot|tr|td|th|slot|dialog|option|optgroup|frame|frameset|math)$/;
@@ -8571,12 +8582,39 @@
     // is in the page's snapshot.)
     var tb = e._rxB;
     if (tb >= rxBase && tb >= e._rv && (e._rxBS === undefined ? sc === '0,0' : e._rxBS === sc)) return;
+    // (only inline properties set since it was told, G: their values,
+    // not the element described again; 500 boxes moved each frame were
+    // each described whole)
+    var rp = e._rxIP;
+    if (rp) {
+      e._rxIP = null;
+      if (rp.v === e._rv && tb >= rxBase && tb >= rp.p0 && (e._rxBS === undefined ? sc === '0,0' : e._rxBS === sc) && e._style) {
+        var st0 = e._style, pl = '';
+        for (var pn in rp.n) {
+          var pv = st0._p[pn];
+          if (pv === undefined) { pl = null; break; }
+          if (pl) pl += '\u0003';
+          pl += rsxClean(pn) + '\u0002' + rsxClean(pv) + '\u0002' + (st0._prio[pn] ? '1' : '');
+        }
+        if (pl) {
+          rsxOps.push('G\u0001' + e.__id + '\u0001' + pl + '\u0001' + rsxClean(rxAttrs(e)));
+          rxN.p = (rxN.p || 0) + 1;
+          e._rxB = textStamp;
+          return;
+        }
+      }
+    }
     rsxDescribe(e);
     var src = flatKids(e), kids = '', walk = null;
     // (a box of many with virtual rows: the host renders none of it, see
     // rxA; its children are not told)
     var many = false;
     if (virtOn && src.length >= 32) { var ne = 0; for (var m = 0; m < src.length; m++) if (src[m].nodeType === 1) ne++; many = ne >= 32; }
+    // (a box whose children are all absolutely placed has no virtual rows,
+    // virtWindow: its children are told, and the host checks that they
+    // still are, O)
+    var outKids = many && e._rxOut === true;
+    if (outKids) many = false;
     for (var i = 0; i < src.length; i++) {
       var k = src[i];
       if (k.nodeType === 3) {
@@ -8600,7 +8638,7 @@
       for (var q = 0; q < st._order.length; q++) { var nm = st._order[q]; if (inl) inl += '\u0003'; inl += rsxClean(nm) + '\u0002' + rsxClean(st._p[nm]) + '\u0002' + (st._prio[nm] ? '1' : ''); }
     }
     var ax = axOf(e);
-    rsxOps.push('B\u0001' + e.__id + '\u0001' + kids + '\u0001' + inl + '\u0001' + rsxClean(rxAttrs(e)) + '\u0001' + (ax ? rsxClean(JSON.stringify(ax)) : '') + '\u0001' + (e.scrollTop || e.scrollLeft ? '[' + e.scrollLeft + ',' + e.scrollTop + ']' : '') + '\u0001');
+    rsxOps.push('B\u0001' + e.__id + '\u0001' + kids + '\u0001' + inl + '\u0001' + rsxClean(rxAttrs(e)) + '\u0001' + (ax ? rsxClean(JSON.stringify(ax)) : '') + '\u0001' + (e.scrollTop || e.scrollLeft ? '[' + e.scrollLeft + ',' + e.scrollTop + ']' : '') + '\u0001' + (outKids ? 'O' : ''));
     rxN.b++;
     e._rxB = textStamp;
     if (sc !== '0,0' || e._rxBS !== undefined) e._rxBS = sc;
@@ -8655,28 +8693,32 @@
     if (f[0] === 'N') h = f[1];
     else if (f[0] === 'H') {
       if (f[2]) { var sl = f[2].split('\u0003'); for (var s = 0; s < sl.length; s++) { var sp = sl[s].indexOf('\u0002'); rxCsOf(+sl[s].slice(0, sp), sl[s].slice(sp + 1)); } }
-      var hl = f[1].split(';'), out = [];
+      var hl = f[1].split(';'), out = [], hm0 = marks.length;
       if (treePending.size) flushTree();
       if (computedCache.gen !== styleGen) { computedCache = { gen: styleGen, map: {} }; treePending.clear(); }
       for (var i = 0; i < hl.length; i++) {
         var c = hl[i].indexOf(','), id = +hl[i].slice(0, c), csn = +hl[i].slice(c + 1), el = rxEls.get(id) || rxFind(n, id);
-        if (!el || !el.isConnected) { rxNote('hole not found'); return null; }
+        if (!el || !el.isConnected) { unmark(hm0); rxNote('hole not found'); return null; }
         var pel = el.parentNode && el.parentNode.nodeType === 1 ? el.parentNode : null, pcs = null;
         if (pel) {
           pcs = computedCache.map[pel.__id];
           if (!pcs) {
             pcs = rxCsOf(csn);
-            if (!pcs) { rxNote('hole style'); return null; }
+            if (!pcs) { unmark(hm0); rxNote('hole style'); return null; }
             // (what computedOf would give: the hole's style is computed under it)
             computedCache.map[pel.__id] = pcs;
             if (!pel._es) styledNow(pel);
           }
         }
-        var dm = marks.length, sv = deltaOff;
-        deltaOff = 1;
+        // (as a delta when the host shares the nodes it keeps, rxHoleDelta:
+        // what it has is named, {"r": n}; values over a kept node are not
+        // sent, as DomStyle does not put them together)
+        var hd = rxHoleDelta && deltaOn && !deltaOff && !wireOn;
+        var dm = marks.length, sv = deltaOff, svp = deltaPatch;
+        if (hd) deltaPatch = false; else deltaOff = 1;
         var hj = renderJson(el, pcs);
-        deltaOff = sv;
-        unmark(dm);
+        if (hd) { deltaPatch = svp; if (lastDelta) hj = lastDelta; }
+        else { deltaOff = sv; unmark(dm); }
         out.push('J\u0001' + id + '\u0001' + hj);
         rxN.holes++;
       }
@@ -8685,7 +8727,7 @@
       rsxOps = [];
     }
     if (h === '0') { rxN.rx++; return ''; }
-    if (!h) { rxNote('incomplete'); return null; }
+    if (!h) { if (hm0 !== undefined) unmark(hm0); rxNote('incomplete'); return null; }
     rxN.rx++;
     rxUsed = true;
     return '{"rx":' + h + '}';
@@ -13197,6 +13239,12 @@
     var vk = 0;
     for (var vi = 0; vi < src.length && vk < VIRT_MIN; vi++) if (src[vi]._attrs !== undefined) vk++;
     if (vk < VIRT_MIN) return virtDrop(n);
+    // (with RX, children all absolutely or fixed placed: the host renders
+    // such a box itself, its children told, rxTell; no rows left out)
+    var outOnly = rxOn;
+    for (var oi = 0; oi < src.length && outOnly; oi++) if (src[oi]._attrs !== undefined) { var op = computedOf(src[oi]).position; outOnly = op === 'absolute' || op === 'fixed'; }
+    if (outOnly) { n._rxOut = true; return virtDrop(n); }
+    if (n._rxOut) n._rxOut = false;
     var tbl = cs.display === 'table-row-group';
     if (!tbl && !/^(block|flow-root|list-item)$/.test(cs.display)) return virtDrop(n);
     if (!tbl && !virtWidthStands(n)) return virtDrop(n);
@@ -15552,6 +15600,7 @@
     },
     // (the selectors DomStyle leaves to webapi.js for el)
     rxLeft: function (el) { var q = rsxOn ? rsxQuery(el, scopeRuleSet(doc, null), '') : null; return q ? q.check.map(function (w) { return w.r.sel.text || JSON.stringify(w.r.sel).slice(0, 120); }) : null; },
+    rxHoleDelta: function (on) { rxHoleDelta = !!on; return rxHoleDelta; },
     rxCheck: function (on) { if (on !== undefined) { rxCheckOn = !!on; rxBad = []; rxChecked = 0; if (on) changed(); return rxCheckOn; } return JSON.stringify({ bad: rxBad, checked: rxChecked, n: rxN }); },
     rsxCheck: function (on) { if (on !== undefined) { rsxCheckOn = !!on; rsxBad = []; if (on) changed(); return rsxCheckOn; } return JSON.stringify({ bad: rsxBad, n: rsxN }); },
     restyleAll: function () { changed(); }, overlay: function (on) { overlayOn = !!on; changed(); }, computedOf: computedOf, cascade: cascade, parseSelectorList: parseSelectorList, normalizeColor: normalizeColor, resolveURL: resolveURL, nodeById: nodeById, lengthPx: lengthPx,

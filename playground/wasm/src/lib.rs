@@ -171,6 +171,8 @@ impl Playground {
         let synced = Playground::new_synced(800.0, 600.0);
         let style = Rc::new(std::cell::RefCell::new(DomStyle::new()));
         synced.borrow_mut().kept.ext = Some(style.borrow().ext.clone());
+        // (the nodes kept by number shared with the style: holes as deltas)
+        style.borrow().ext.borrow_mut().shares = true;
         let mut pg = Playground { engine: engine, scripts: Vec::new(), units: Vec::new(), errors: Vec::new(), w: 800.0, h: 600.0, page_json: String::new(), last_gen: String::new(), root: None, lay: None, synced: synced, whole: false, style: style };
         pg.engine.vm.set_host_sync(Box::new(SyncLayout { s: pg.synced.clone(), style: pg.style.clone() }));
         pg
@@ -180,6 +182,8 @@ impl Playground {
     fn tuned(mut engine: Engine) -> Engine {
         // (CEr's register machine: its default is still the stack machine)
         engine.vm.regs = true;
+        // CEr's baseline JIT (pg_jit; a build with the `wjit` feature)
+        JIT.with(|j| { let (on, min) = j.get(); engine.vm.jit_on = on && cer::wjit::available(); engine.vm.jit_min = min; });
         // Date's local time zone: the browser's (pg_set_time_zone), kept
         // over pg_reset
         TIME_ZONE.with(|z| { let z = z.borrow(); if !z.is_empty() { engine.set_time_zone(&z); } });
@@ -230,6 +234,7 @@ impl Playground {
         self.synced = Playground::new_synced(w, h);
         self.style = Rc::new(std::cell::RefCell::new(DomStyle::new()));
         self.synced.borrow_mut().kept.ext = Some(self.style.borrow().ext.clone());
+        self.style.borrow().ext.borrow_mut().shares = true;
         self.engine.vm.set_host_sync(Box::new(SyncLayout { s: self.synced.clone(), style: self.style.clone() }));
         self.w = w;
         self.h = h;
@@ -338,6 +343,16 @@ impl Playground {
             let patch = true;
             if patch {
                 self.exec("__deltaPatch(true)");
+            }
+            // (a part RX leaves to webapi.js, a hole, comes as a delta too:
+            // DomStyle puts in the nodes it names from those kept, by_n;
+            // PG_NOHOLEDELTA whole)
+            #[cfg(not(target_arch = "wasm32"))]
+            let holes = std::env::var("PG_NOHOLEDELTA").is_err();
+            #[cfg(target_arch = "wasm32")]
+            let holes = true;
+            if holes {
+                self.exec("__webdom.rxHoleDelta(true)");
             }
         }
         // virtual rows: this host renders again before it paints when they
@@ -820,6 +835,7 @@ impl Kept {
         let epoch = page.borrow().getInt("d", 0);
         if epoch != self.epoch {
             self.by_n = HashMap::new();
+            self.shared_reset();
             self.styles = HashMap::new();
             self.nodes = HashMap::new();
             self.root = None;
@@ -838,6 +854,7 @@ impl Kept {
         }
         let Some(r) = self.node_of(&root) else {
             self.by_n = HashMap::new();
+            self.shared_reset();
             self.root = None;
             return None;
         };
@@ -879,11 +896,19 @@ impl Kept {
         }
         if (self.fresh > 0 && (self.by_n.len() < 4096 || self.by_n.len() > self.live + self.live / 8)) || self.since_prune >= 32 {
             self.since_prune = 0;
+            // (the copy shared with the style let go of first: what holds a
+            // node is the page, or the style's nodes)
+            let shared = self.shared_reset();
             for _ in 0..8 {
                 let before = self.by_n.len();
                 self.by_n.retain(|_, v| Rc::strong_count(v) > 1);
                 if self.by_n.len() == before {
                     break;
+                }
+            }
+            if shared {
+                if let Some(ext) = self.ext.as_ref() {
+                    ext.borrow_mut().by_n = self.by_n.clone();
                 }
             }
             self.styles.retain(|_, v| Rc::strong_count(&v.1) > 1);
@@ -961,6 +986,26 @@ impl Kept {
         }
         count
     }
+    /// a node kept under its delta number (and in the copy the style
+    /// shares, JsonNodes.by_n, when it asks for one)
+    fn keep_n(&mut self, num: i64, n: &Rc<RefCell<JsonValue>>) {
+        self.by_n.insert(num, n.clone());
+        if let Some(ext) = self.ext.as_ref() {
+            if ext.borrow().shares {
+                ext.borrow_mut().by_n.insert(num, n.clone());
+            }
+        }
+    }
+    /// the shared copy emptied (true: the style asks for one)
+    fn shared_reset(&mut self) -> bool {
+        if let Some(ext) = self.ext.as_ref() {
+            if ext.borrow().shares {
+                ext.borrow_mut().by_n = HashMap::new();
+                return true;
+            }
+        }
+        false
+    }
     /// what node_of does for a node sent whole (counted fresh, its styles
     /// pooled), for DomStyle's nodes it has not met
     fn rx_new(&mut self, n: &Rc<RefCell<JsonValue>>) {
@@ -974,6 +1019,11 @@ impl Kept {
         self.rx_seen.insert(at, n.clone());
         if n.borrow().keyAt("i") >= 0 {
             self.fresh += 1;
+        }
+        // (a node of a hole webapi.js rendered as a delta: kept by its number)
+        let num = n.borrow().getInt("n", -1);
+        if num >= 0 {
+            self.keep_n(num, n);
         }
         self.pool_style(n);
         let c = n.borrow().get("c");
@@ -1032,7 +1082,7 @@ impl Kept {
             // of its own, hashed and compared for nothing)
             let num = p.borrow().getInt("n", -1);
             if num >= 0 {
-                self.by_n.insert(num, p.clone());
+                self.keep_n(num, &p);
             }
             return Some(p);
         }
@@ -1058,7 +1108,7 @@ impl Kept {
         self.pool_style(n);
         let num = n.borrow().getInt("n", -1);
         if num >= 0 {
-            self.by_n.insert(num, n.clone());
+            self.keep_n(num, n);
         }
         Some(n.clone())
     }
@@ -1426,6 +1476,27 @@ pub extern "C" fn pg_set_time_zone(zp: *mut u8, zl: usize) -> u32 {
     let z = text(zp, zl);
     TIME_ZONE.with(|t| *t.borrow_mut() = z.clone());
     PG.with(|p| if p.borrow_mut().engine.set_time_zone(&z) { 1 } else { 0 })
+}
+thread_local! {
+    static JIT: std::cell::Cell<(bool, i64)> = const { std::cell::Cell::new((false, 64)) };
+}
+/// CEr's baseline JIT (cer::wjit): `on` 1 compiles a function's hot loops
+/// to WebAssembly after `min` back edges, for this engine and the ones
+/// pg_reset and pg_restore make. Needs a build with the `wjit` feature and
+/// the host's cerxes_jit.install; 1 when this build can run compiled code.
+#[no_mangle]
+pub extern "C" fn pg_jit(on: i32, min: i32) -> i32 {
+    let ok = cer::wjit::available();
+    JIT.with(|j| j.set((on != 0 && ok, if min > 0 { min as i64 } else { 64 })));
+    PG.with(|p| { let mut p = p.borrow_mut(); p.engine.vm.jit_on = on != 0 && ok; p.engine.vm.jit_min = if min > 0 { min as i64 } else { 64 }; });
+    ok as i32
+}
+/// the JIT's counters as JSON: functions compiled and refused, code bytes,
+/// entries into compiled code
+#[no_mangle]
+pub extern "C" fn pg_jit_stats() -> usize {
+    let s = cer::wjit::stats();
+    answer(format!("{{\"compiled\":{},\"refused\":{},\"dropped\":{},\"bytes\":{},\"entries\":{}}}", s.compiled, s.refused, s.dropped, s.bytes, s.entries))
 }
 #[no_mangle]
 pub extern "C" fn pg_reset() {

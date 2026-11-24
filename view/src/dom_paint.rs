@@ -150,6 +150,32 @@ impl DomPaint {
             }
             return;
         }
+        // (the members in the same order, as the same element renders
+        // them, a number "n" too: side by side, nothing copied or looked
+        // up by name; 500 boxes a frame)
+        if DomPaint::sameKeys(was, now) {
+            let n: i64 = now.borrow().keys.len() as i64;
+            for i in 0..n {
+                if !self.ok {
+                    return;
+                }
+                let wv: Rc<RefCell<JsonValue>> = was.borrow().items[i as usize].clone();
+                let nv: Rc<RefCell<JsonValue>> = now.borrow().items[i as usize].clone();
+                if Rc::ptr_eq(&wv, &nv) {
+                    continue;
+                }
+                let k: String = now.borrow().keys[i as usize].clone();
+                if k == "n" {
+                    continue;
+                }
+                self.member(was, now, &k, &wv, &nv);
+            }
+            if self.ok {
+                self.same.push(Rc::clone(now));
+                self.stamps.push(was.borrow().stamp);
+            }
+            return;
+        }
         let wk: Vec<String> = DomPaint::keysOf(was);
         let nk: Vec<String> = DomPaint::keysOf(now);
         if wk.len() != nk.len() {
@@ -172,13 +198,23 @@ impl DomPaint {
             if Rc::ptr_eq(&wv, &nv) {
                 continue;
             }
+            self.member(was, now, &k, &wv, &nv);
+        }
+        if self.ok {
+            self.same.push(Rc::clone(now));
+            self.stamps.push(was.borrow().stamp);
+        }
+    }
+    /// member `k` of a node, `wv` before and `nv` now (not the same object)
+    fn member(&mut self, was: &Rc<RefCell<JsonValue>>, now: &Rc<RefCell<JsonValue>>, k: &str, wv: &Rc<RefCell<JsonValue>>, nv: &Rc<RefCell<JsonValue>>) {
+        {
             if k == "c" {
                 let up: String = self.parent.clone();
                 self.parent = now.borrow().getText("i");
-                self.kids(&wv, &nv);
+                self.kids(wv, nv);
                 self.parent = up;
             } else if k == "x" {
-                self.text(&was.borrow().getText("i"), &wv, &nv);
+                self.text(&was.borrow().getText("i"), wv, nv);
             } else if k == "i" && now.borrow().has("x") {
                 // (a text node set anew: its elements are named again; the
                 // same id written again is no rename, and a rename walks
@@ -189,22 +225,17 @@ impl DomPaint {
                     self.renOld.push(a);
                     self.renNew.push(b);
                 }
-                continue;
             } else if k == "ax" {
-                self.ax(now, &wv, &nv);
+                self.ax(now, wv, nv);
             } else if k == "s" {
-                self.style(now, &wv, &nv);
+                self.style(now, wv, nv);
             } else if k == "a" {
-                self.attrs(&wv, &nv);
+                self.attrs(wv, nv);
             } else if k == "svg" {
-                self.svg(now, &wv, &nv);
+                self.svg(now, wv, nv);
             } else if wv.borrow().toJson() != nv.borrow().toJson() {
                 self.ok = false;
             }
-        }
-        if self.ok {
-            self.same.push(Rc::clone(now));
-            self.stamps.push(was.borrow().stamp);
         }
     }
     fn kids(&mut self, wc: &Rc<RefCell<JsonValue>>, nc: &Rc<RefCell<JsonValue>>) {

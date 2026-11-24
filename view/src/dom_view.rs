@@ -4140,7 +4140,40 @@ impl DomView {
         if v < 0.0 {
             h = 0.0 - 0.5;
         }
-        DomView::fmt((((v * 100.0 + h).floor() as i64) as f64) / 100.0)
+        let c: i64 = (v * 100.0 + h).floor() as i64;
+        // (hundredths written as digits, the text f64's would be: boxesSince
+        // writes four for each box that moved, 500 boxes a frame)
+        if c > 1000000000000 || c < -1000000000000 {
+            return DomView::fmt((c as f64) / 100.0);
+        }
+        let mut a: i64 = c;
+        if c < 0 {
+            a = 0 - c;
+        }
+        // (the digits put one by one: no formatter, one string)
+        let mut b: Vec<u8> = Vec::new();
+        if c < 0 {
+            b.push(45);
+        }
+        let ip: i64 = a / 100;
+        let mut p: i64 = 1;
+        while p * 10 <= ip {
+            p = p * 10;
+        }
+        while p > 0 {
+            b.push(48 + (((ip / p) % 10) as u8));
+            p = p / 10;
+        }
+        let f: i64 = a % 100;
+        if f != 0 {
+            b.push(46);
+            b.push(48 + ((f / 10) as u8));
+            if f % 10 != 0 {
+                b.push(48 + ((f % 10) as u8));
+            }
+        }
+        let out: String = String::from_utf8_lossy(&b).to_string();
+        out
     }
     /// the room an overflow-y: scroll box gives its bar, as Chromium's
     /// classic scrollbar

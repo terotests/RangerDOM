@@ -8,6 +8,44 @@
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
+// CEr's baseline JIT, the host's side (as ComponentEngine's playground has
+// it): CEr hands over a module's bytes (cerxes_jit.install), which is
+// instantiated against this module's memory and function table, and its
+// functions f0, f1, … go into consecutive table slots. The first module is
+// the runtime (look, gone, …) the others import.
+const JIT_HELPERS = ["get_elem", "set_elem", "get_prop", "set_prop", "op", "call", "slow", "ret"];
+function jitHost(getExports) {
+  let helpers = null, rt = null;
+  return {
+    // an evicted module's slots get the runtime's `gone` (back to the
+    // interpreter at once), so that nothing holds the module any more
+    release(base, n) {
+      const t = getExports().__indirect_function_table;
+      for (let k = 0; k < n; k++) t.set(base + k, rt.gone);
+    },
+    install(ptr, len) {
+      const x = getExports();
+      const t = x.__indirect_function_table;
+      if (!t) return -1;
+      const m = new WebAssembly.Module(new Uint8Array(x.memory.buffer, ptr >>> 0, len).slice());
+      // (the helpers from the table: a wasip1 export runs the constructors
+      // and destructors around every call)
+      if (!helpers) helpers = JIT_HELPERS.map((_, k) => t.get(x.cerxes_jit_helper(k)));
+      const env = { memory: x.memory, table: t };
+      JIT_HELPERS.forEach((h, k) => (env[h] = helpers[k]));
+      const inst = new WebAssembly.Instance(m, rt ? { env, rt } : { env });
+      if (inst.exports.look) { rt = inst.exports; return 0; }
+      let n = 0;
+      while (inst.exports["f" + n]) n++;
+      const idx = t.grow(n);
+      for (let k = 0; k < n; k++) t.set(idx + k, inst.exports["f" + k]);
+      return idx;
+    },
+  };
+}
+
+// opts.jit: the JIT's hotness threshold (back edges before a function is
+// compiled) for a module built with it (rangerdom_pg-jit.wasm); 0 off
 // opts.measure(family, text, size, bold): a run's width in the face the
 // painter draws it with (main.js); without it a canvas with the family as
 // given
@@ -56,11 +94,14 @@ export async function loadWasmPlayground(url, opts = {}) {
       return measure(s(fp, fl), s(tp, tl), size, bold !== 0);
     },
   };
+  let x = null;
+  const jh = jitHost(() => x);
+  const imports = { wasi_snapshot_preview1: wasi, rangerdom, cerxes_jit: { install: (p, n) => jh.install(p, n), release: (b, n) => jh.release(b, n) } };
   const res = await fetch(url);
   const { instance } = typeof WebAssembly.instantiateStreaming === "function" && (res.headers.get("content-type") || "").includes("wasm")
-    ? await WebAssembly.instantiateStreaming(res, { wasi_snapshot_preview1: wasi, rangerdom })
-    : await WebAssembly.instantiate(await res.arrayBuffer(), { wasi_snapshot_preview1: wasi, rangerdom });
-  const x = instance.exports;
+    ? await WebAssembly.instantiateStreaming(res, imports)
+    : await WebAssembly.instantiate(await res.arrayBuffer(), imports);
+  x = instance.exports;
   memory = x.memory;
   if (x._initialize) x._initialize();
 
@@ -80,7 +121,7 @@ export async function loadWasmPlayground(url, opts = {}) {
   const useUnits = new URLSearchParams(location.search).get("units") !== "0";
   if (useUnits && x.pg_add_unit) {
     try {
-      const r = await fetch(String(url).replace(/\.wasm$/, ".units.json"));
+      const r = await fetch(String(url).replace(/(-jit)?\.wasm$/, ".units.json"));
       if (r.ok) {
         const units = await r.json();
         for (const k of Object.keys(units)) { const [a, b] = put(k), [c, d] = put(units[k]); x.pg_add_unit(a, b, c, d); }
@@ -96,7 +137,13 @@ export async function loadWasmPlayground(url, opts = {}) {
     } catch (_) {}
   }
 
+  // (false: this module has no JIT)
+  const jitOn = !!(opts.jit && x.pg_jit && x.pg_jit(1, opts.jit));
+
   class WasmPlayground {
+    static get jit() { return jitOn; }
+    // the JIT's counters ({compiled, refused, dropped, bytes, entries}), or null
+    static jitStats() { return jitOn && x.pg_jit_stats ? JSON.parse(out(x.pg_jit_stats())) : null; }
     reset() { x.pg_reset(); }
     addScript(url, text) { const [a, b] = put(url), [c, d] = put(text); x.pg_add_script(a, b, c, d); }
     // a script's compiled unit (cases/<name>/<script>.unit), when the build made one

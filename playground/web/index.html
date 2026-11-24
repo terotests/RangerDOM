@@ -23,6 +23,8 @@
         <button id="step" disabled>Next step</button>
         <button id="reload" disabled>Reload</button>
         <button id="all" disabled>Run every case</button>
+        <label title="Compare RangerDOM's picture with the browser's after each step (slow; not part of the step times)"><input type="checkbox" id="picture"> Check picture</label>
+        <label title="CEr's baseline JIT: hot loops compiled to WebAssembly (loads the page again)"><input type="checkbox" id="jit"> JIT</label>
         <button id="save" disabled title="Keep the RangerDOM page's whole state (its document, styles, scripts and timers) in memory">Save state</button>
         <button id="load" disabled title="Put the RangerDOM page back in the state saved last for this case">Load state</button>
         <span id="status" role="status"></span>

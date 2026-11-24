@@ -286,11 +286,16 @@ impl JsonValue {
 /// them, DomPage takes them)
 pub struct JsonNodes {
     pub map: HashMap<i64, Rc<RefCell<JsonValue>>>,
+    /// the nodes the host keeps by their delta numbers ("n"), when it
+    /// shares them: a part webapi.js renders inside the style's nodes (a
+    /// hole) names the ones it sent before as {"r": n}
+    pub by_n: HashMap<i64, Rc<RefCell<JsonValue>>>,
+    pub shares: bool,
 }
 
 impl JsonNodes {
     pub fn new() -> Self {
-        Self { map: HashMap::new() }
+        Self { map: HashMap::new(), by_n: HashMap::new(), shares: false }
     }
 }
 
