@@ -114,7 +114,7 @@ class DomRealm {
 
     ; A stylesheet of the page (<link rel=stylesheet>), for getComputedStyle.
     fn addStyle:void (css:string url:string) {
-        this.exec(("__addStyle(" + (DomRealm.quote(css)) + ")"))
+        this.exec(("__addStyle(" + (DomRealm.quote(css)) + ", null, " + (DomRealm.quote(url)) + ")"))
     }
 
     ; The page's scripts, in the order a browser runs them (classic ones,

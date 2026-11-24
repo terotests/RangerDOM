@@ -7393,7 +7393,15 @@
       var j = cssScan(text, i, text.charAt(i) === '@' ? ';{' : '{');
       var prelude = text.slice(i, j).trim();
       if (j >= n) break;
-      if (text.charAt(j) === ';') { i = j + 1; continue; }
+      if (text.charAt(j) === ';') {
+        // (@import: the host fetched the sheet and gave it whole,
+        // __addStyle; noted so a shadow tree's <style> takes it in with it)
+        if (sheet && /^@import\s/i.test(prelude)) {
+          var im = /^@import\s+(?:url\(\s*)?["']?([^"')\s]+)/i.exec(prelude);
+          if (im) (sheet._imports || (sheet._imports = [])).push(im[1]);
+        }
+        i = j + 1; continue;
+      }
       if (prelude.charAt(0) !== '@') {
         // a style rule: its declarations and nested rules are split off
         // in the same walk that finds the block's end
@@ -7750,6 +7758,30 @@
     return s;
   }
   var linkSheets = [];
+  // the sheets a <link> has: one the host gave for its href is shared by
+  // every <link> with that href (_owners), in the document or a shadow tree
+  function linkSheetsOf(e, out) {
+    for (var i = 0; i < linkSheets.length; i++) {
+      var ls = linkSheets[i];
+      if (ls.ownerNode === e || (ls._owners && ls._owners.indexOf(e) >= 0)) out.push(ls);
+    }
+  }
+  // a sheet the host gave by its URL and no <link> holds (an @import's)
+  function urlSheet(href) {
+    for (var i = 0; i < linkSheets.length; i++) if (!linkSheets[i].ownerNode && linkSheets[i].href === href) return linkSheets[i];
+    return null;
+  }
+  // the <link rel=stylesheet>s with this href, shadow trees' too
+  function linksTo(href) {
+    var out = [];
+    (function walk(root) {
+      eachElement(root, function (e) {
+        if (e.localName === 'link' && /(^|\s)stylesheet(\s|$)/i.test(e.getAttribute('rel') || '') && e.href === href) out.push(e);
+        if (e._sr) walk(e._sr);
+      });
+    })(doc);
+    return out;
+  }
   // the document's <style> and <link> sheets for the cascade, found once per
   // style change (styleGen) rather than by a walk of the page per element
   var sheetsCache = { gen: -1, d: null, list: null };
@@ -7765,7 +7797,7 @@
     var out = [];
     eachElement(d, function (e) {
       if (e.localName === 'style' && e.namespaceURI === HTML_NS) out.push(sheetOfStyle(e));
-      else if (e.localName === 'link') { for (var i = 0; i < linkSheets.length; i++) if (linkSheets[i].ownerNode === e) out.push(linkSheets[i]); }
+      else if (e.localName === 'link') linkSheetsOf(e, out);
     });
     for (var j = 0; j < linkSheets.length; j++) if (!linkSheets[j].ownerNode || !linkSheets[j].ownerNode.isConnected) { if (!linkSheets[j].ownerNode) out.push(linkSheets[j]); }
     var adopted = d.adoptedStyleSheets || [];
@@ -7978,7 +8010,14 @@
   function shadowSheets(sr) {
     if (sr._sheetGen === sheetGen && sr._sheets) return sr._sheets;
     var out = [];
-    eachElement(sr, function (e) { if (e.localName === 'style' && e.namespaceURI === HTML_NS) out.push(sheetOfStyle(e)); });
+    eachElement(sr, function (e) {
+      if (e.localName === 'style' && e.namespaceURI === HTML_NS) {
+        var st = sheetOfStyle(e);
+        // (its @imports first, as the host gave them)
+        if (st._imports) for (var m = 0; m < st._imports.length; m++) { var is = urlSheet(joinURL(st._imports[m], doc._base || doc._url)); if (is) out.push(is); }
+        out.push(st);
+      } else if (e.localName === 'link') linkSheetsOf(e, out);
+    });
     for (var i = 0; i < sr._adopted.length; i++) out.push(sr._adopted[i]);
     out = out.filter(function (x) { return x && !x.disabled; });
     sr._sheets = out; sr._sheetGen = sheetGen;
@@ -15424,6 +15463,9 @@
     d._url = url || 'about:blank';
     return d;
   }
+  // the IIFE below's declarativeShadow (<template shadowrootmode>), for
+  // the page's own markup too
+  var declShadow = null;
   G.__page = function (html, url) {
     doc = newDocument(url || 'about:blank');
     install('document', doc);
@@ -15479,6 +15521,10 @@
     }
     // with <html> first, before stray nodes after it
     if (doc.firstElementChild !== h) doc.appendChild(h);
+    // (the parser attaches a declarative shadow root where it meets one,
+    // HTML 13.2.6.4.7: a Podium layout's page is all inside one, tori.fi's
+    // #app with its slots)
+    if (declShadow) declShadow(doc);
     var base = doc.querySelector('base[href]');
     if (base && base.getAttribute('href')) doc._base = joinURL(base.getAttribute('href'), doc._url);
     // the page's own scripts are the host's to run (__scripts): already
@@ -15496,10 +15542,15 @@
     if (el && el.getAttribute('src')) setTimeout(function () { dispatch(el, new Event(ok === false ? 'error' : 'load')); }, 0);
     return 'ok';
   };
-  G.__addStyle = function (css, linkId) {
+  G.__addStyle = function (css, linkId, href) {
     var owner = linkId !== undefined && linkId !== null ? nodeById(linkId) : null;
+    // (given by URL: the <link>s that name it hold it, in whichever tree
+    // they are; one in a shadow tree styles that tree only)
+    var owners = !owner && href ? linksTo(String(href)) : [];
+    if (owners.length) owner = owners[0];
     var s = new CSSStyleSheet(owner);
-    s.href = owner ? owner.href : null;
+    if (owners.length > 1) s._owners = owners;
+    s.href = owner ? owner.href : href ? String(href) : null;
     s.cssRules = parseSheetText(String(css || ''), s).cssRules;
     s._rebuild();
     linkSheets.push(s);
@@ -15794,6 +15845,7 @@
         host.removeChild(t);
       }
     }
+    declShadow = declarativeShadow;
     EP.setHTMLUnsafe = function (html) {
       var target = this.localName === 'template' && this.content ? this.content : this;
       removeAll(target);
