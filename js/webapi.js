@@ -20,6 +20,11 @@
 //                         rest named ({"r": n}); see renderJson
 //   __renderDelta(again)  __render() for such a host; again: it lost what
 //                         it kept, the whole page is sent
+//   __deltaPatch(on)      a delta host that puts a box whose transform or
+//                         opacity alone changed together from the node it
+//                         has: {"n":N,"m":M,"ps":{..},"sa":".."}, see movedJson
+//   __wire(on)            a delta host that reads the styles as a table:
+//                         each style's shared part sent once, see wireRef
 //   __styleCheck()        a test's: '' when the page with every style found
 //                         again is the page the kept styles give
 //   __layout(json)        the boxes the host laid out: {"id": [x, y, w, h]}
@@ -51,7 +56,10 @@
   var viewport = { w: 1024, h: 768 };
   var doc = null;
 
-  function changed() { generation++; styleGen++; sheetGen++; ancEpoch++; sigEpoch++; }
+  // (rxWhole: a change that names no element, RX tells the host the
+  // whole page again, rxTell)
+  var rxWhole = 0;
+  function changed() { generation++; styleGen++; sheetGen++; ancEpoch++; sigEpoch++; rsxChg++; rxWhole++; }
   // bumped with styleGen, and alone when a <style> came, went or changed
   // with rules that only some elements can match (styleSheetChanged): what
   // is read from the sheets (their list, rule sets, selectorReach, the
@@ -99,7 +107,14 @@
   // S)), only el and what is under it are styled again, and its following
   // siblings when a selector has a + or ~ combinator; else the whole page
   // (changed)
+  // SVG attributes only drawing reads (not presentation attributes, see
+  // presentationalHints; viewBox of the outer <svg> sizes it, not here)
+  var SVG_GEOMETRY = { d: 1, points: 1, x: 1, y: 1, x1: 1, y1: 1, x2: 1, y2: 1, cx: 1, cy: 1, r: 1, rx: 1, ry: 1, dx: 1, dy: 1, pathLength: 1, viewBox: 1, preserveAspectRatio: 1 };
   function attrChanged(el, name, was, now) {
+    // (what DomStyle was told of it: the attribute names, and the values
+    // of class, id and the ones its selectors read; a style attribute's
+    // new text is not)
+    if (name !== undefined && (was === null || now === null || was === undefined || now === undefined || name === 'class' || name === 'id' || (rsxSa !== null && rsxSa[name] === 1) || (rsxSa !== null && rsxSa[name.toLowerCase()] === 1))) { el._av = (el._av || 0) + 1; rsxChg++; }
     if (name === 'class' || name === 'id' || name === undefined) ancEpoch++;
     if (name !== 'style') sigEpoch++;
     var conn = el.isConnected;
@@ -124,9 +139,22 @@
     // el._tf0: what el._rv was before the first of such changes in a row;
     // a render of el from then on has only el's transform to change,
     // movedJson)
+    // (el._rxIP: inline properties set on el since the host was last told
+    // of it, and nothing else at or under el: rxTell sends only those, G)
+    if (rxOn && name === 'style' && el._styleSync && el._styleChg) {
+      var rp = el._rxIP;
+      if (!rp || rp.v !== el._rv) rp = el._rxIP = { v: 0, p0: el._rv || 0, n: {} };
+      for (var rpi = 0; rpi < el._styleChg.length; rpi++) rp.n[el._styleChg[rpi]] = 1;
+      rp.v = textStamp;
+    }
     if (name === 'style' && el._styleSync && el._styleChg && el._styleChg.length === 1 && (el._styleChg[0] === 'transform' || el._styleChg[0] === 'opacity')) { if (el._rv !== el._tfv || el._tfn !== el._styleChg[0]) { el._tf0 = el._rv || 0; el._tfn = el._styleChg[0]; } el._tfv = textStamp; }
     for (var p = el; p; p = p.parentNode) p._rv = textStamp;
     if (computedCache.gen !== styleGen) return;
+    // an SVG shape's geometry (a path's d, a circle's r...) that no
+    // selector reads: no style changes, only the drawing (el drawn again,
+    // _rv above). An animated path set its d each frame, and each set
+    // styled the path again with all it matches: most of such a frame.
+    if (name && el.namespaceURI === SVG_NS && SVG_GEOMETRY[name] && el.localName !== 'svg' && !(featureIndex(), fxCache.attrRead)['a:' + name.toLowerCase()]) { el._rj = null; return; }
     var old = computedCache.map[el.__id];
     // (an inline style change leaves what matched el, unless a selector
     // reads the style attribute)
@@ -376,7 +404,7 @@
   // added or moved restyled every node.
   // (detach: gone, the element taken out, and at, where it was)
   function treeChanged(p, c, gone, at) {
-    ancEpoch++; sigEpoch++;
+    ancEpoch++; sigEpoch++; rsxChg++;
     // (a styled element put under ones never styled: they hold one now)
     if (c && c._es) for (var es = p; es && !es._es; es = es.parentNode) es._es = true;
     if (shadowCount && (p.nodeType === 11 && p.host || inShadowScope(p))) { changed(); scheduleSlots(p._sr && (c || gone) ? assignedSlotOf(c || gone) : null); return; }
@@ -861,7 +889,7 @@
   }
   function featureIndex() {
     if (fxCache.gen === sheetGen) return fxCache.fx;
-    var fx = {}, sibs = [], styleRead = false;
+    var fx = {}, sibs = [], styleRead = false, attrRead = {};
     var sheets = [ua()].concat(cascadeSheets(doc));
     function entry(f) { return fx[f] || (fx[f] = { desc: [], sib: [] }); }
     for (var i = 0; i < sheets.length; i++) {
@@ -872,7 +900,9 @@
         var parts = sel.parts, key = sel.key;
         // (a selector that reads the style attribute, anywhere in it: an
         // inline style change can then change what matches)
-        if (!styleRead) for (var ks = 0; ks < parts.length && !styleRead; ks++) { var fst = []; featuresOf(parts[ks].c, fst, false); for (var ns = 0; ns < fst.length; ns++) if (fst[ns].f === 'a:style') styleRead = true; }
+        // (and every attribute any compound reads, the subject's too:
+        // attrRead, for the attributes that only drawing reads)
+        for (var ks = 0; ks < parts.length; ks++) { var fst = []; featuresOf(parts[ks].c, fst, false); for (var ns = 0; ns < fst.length; ns++) if (fst[ns].f.charAt(0) === 'a') { attrRead[fst[ns].f] = true; if (fst[ns].f === 'a:style') styleRead = true; } }
         // every compound left of a + or ~, loose (its pseudo-classes left
         // out): an element put in or taken out that can match one changes
         // what the following siblings that fit the subject's key match
@@ -906,7 +936,7 @@
         }
       }
     }
-    fxCache = { gen: sheetGen, fx: fx, sibs: sibs, styleRead: styleRead };
+    fxCache = { gen: sheetGen, fx: fx, sibs: sibs, styleRead: styleRead, attrRead: attrRead };
     return fx;
   }
   // an attribute's value by its stored name (class, id, style: the same in
@@ -2025,8 +2055,12 @@
 
   // ---- attributes ----------------------------------------------------------
 
+  // (true once any element had a contenteditable attribute: until then no
+  // element is editable and isContentEditable needs no walk up the tree,
+  // which focusableByDefault made for every element rendered)
+  var editableSeen = false;
   class Attr {
-    constructor(name, value, owner) { this.name = name; this._v = value; this.ownerElement = owner; this.namespaceURI = null; this.prefix = null; this.specified = true; }
+    constructor(name, value, owner) { this.name = name; this._v = value; this.ownerElement = owner; this.namespaceURI = null; this.prefix = null; this.specified = true; if (name.length === 15 && name.toLowerCase() === 'contenteditable') editableSeen = true; }
     get localName() { return this.name; }
     get value() { return this._v; }
     set value(v) { if (this.ownerElement) this.ownerElement.setAttribute(this.name, v); else this._v = String(v); }
@@ -2144,6 +2178,34 @@
       this._set(n, v, prio);
       this._sync(n);
     }
+    // several properties set as one change: what setProperty does for each
+    // name in turn, with one write of the style attribute and so one
+    // restyle check (attrChanged's patch takes all the names). For a host
+    // that knows a frame's changes (RangerGames' dom.js): each setProperty
+    // wrote the whole attribute and checked the element's style again.
+    _setMany(names, values) {
+      if (this._readonly) throw DOMException('read-only', 'NoModificationAllowedError');
+      var chg = [], whole = false;
+      for (var i = 0; i < names.length; i++) {
+        var n = String(names[i]), v = values[i];
+        if (n.slice(0, 2) !== '--') n = n.toLowerCase();
+        if (v === null || v === undefined || v === '') {
+          var parts = shorthandParts(n) || [n];
+          for (var j = 0; j < parts.length; j++) {
+            var at = this._order.indexOf(parts[j]);
+            if (at >= 0) { this._order.splice(at, 1); delete this._p[parts[j]]; delete this._prio[parts[j]]; whole = true; }
+          }
+          continue;
+        }
+        v = specifiedText(n, String(v).trim());
+        var longhands = expandShorthand(n, v);
+        if (longhands) { for (var k in longhands) this._set(k, longhands[k], undefined); whole = true; continue; }
+        this._set(n, v, undefined);
+        chg.push(n);
+      }
+      if (whole) this._sync();
+      else if (chg.length) this._sync(chg);
+    }
     _set(n, v, prio) {
       // (a shorthand's longhand it gave no value: not set, as a browser
       // drops an invalid declaration; AG Grid's styles had one, and its
@@ -2176,19 +2238,25 @@
     }
     set cssText(t) {
       this._p = {}; this._prio = {}; this._order = [];
-      var decls = parseDeclarations(String(t || ''));
+      var decls = declsMemo(String(t || ''));
       for (var i = 0; i < decls.length; i++) {
-        var dv = specifiedText(decls[i].name, decls[i].value);
-        var lh = expandShorthand(decls[i].name, dv);
-        if (lh) for (var k in lh) this._set(k, lh[k], decls[i].important ? 'important' : '');
-        else this._set(decls[i].name, dv, decls[i].important ? 'important' : '');
+        var d = decls[i], ex = d.ex;
+        // (its longhands as names and values, worked out once)
+        if (ex === undefined) {
+          var dv = specifiedText(d.name, d.value);
+          var lh = expandShorthand(d.name, dv);
+          ex = [];
+          if (lh) { for (var k in lh) ex.push(k, lh[k]); } else ex.push(d.name, dv);
+          d.ex = ex;
+        }
+        for (var x = 0; x < ex.length; x += 2) this._set(ex[x], ex[x + 1], d.important ? 'important' : '');
       }
       this._sync();
     }
     _sync(one) {
       if (!this._owner) return;
       this._owner._styleSync = true;
-      this._owner._styleChg = one !== undefined ? [one] : null;
+      this._owner._styleChg = one === undefined ? null : typeof one === 'string' ? [one] : one;
       var t = this.cssText;
       if (t) this._owner.setAttribute('style', t); else this._owner.removeAttribute('style');
       this._owner._styleSync = false;
@@ -2283,7 +2351,9 @@
   var BORDER_STYLES = /^(none|hidden|dotted|dashed|solid|double|groove|ridge|inset|outset)$/;
   function isColorWord(t) { return /^(#|rgb|hsl|hwb|lab|lch|oklab|oklch|color\(|var\()/.test(t) || NAMED_COLORS[t.toLowerCase()] !== undefined || t === 'transparent' || t === 'currentcolor' || t === 'currentColor'; }
   function isLength(t) { return /^[+-]?[\d.]+(px|em|rem|%|vh|vw|vmin|vmax|pt|pc|in|cm|mm|q|ch|ex)?$/i.test(t) || /^(calc|min|max|clamp)\(/.test(t) || t === 'thin' || t === 'medium' || t === 'thick'; }
+  var SHORTHANDS = { margin: 1, padding: 1, inset: 1, 'border-width': 1, 'border-style': 1, 'border-color': 1, border: 1, 'border-top': 1, 'border-right': 1, 'border-bottom': 1, 'border-left': 1, 'border-radius': 1, flex: 1, gap: 1, overflow: 1, 'flex-flow': 1, 'place-items': 1, 'place-content': 1, 'place-self': 1, 'grid-gap': 1, 'grid-row-gap': 1, 'grid-column-gap': 1, 'grid-template': 1, grid: 1, outline: 1, 'list-style': 1, font: 1 };
   function shorthandParts(n) {
+    if (SHORTHANDS[n] !== 1) return null;
     if (n === 'margin' || n === 'padding') return SIDES.map(function (s) { return n + '-' + s; });
     if (n === 'inset') return SIDES.slice();
     if (n === 'border-width' || n === 'border-style' || n === 'border-color') { var w = n.slice(7); return SIDES.map(function (s) { return 'border-' + s + '-' + w; }); }
@@ -2802,7 +2872,7 @@
     set draggable(v) { this.setAttribute('draggable', v ? 'true' : 'false'); }
     get contentEditable() { return this.getAttribute('contenteditable') || 'inherit'; }
     set contentEditable(v) { this.setAttribute('contenteditable', v); }
-    get isContentEditable() { for (var n = this; n && n.nodeType === 1; n = n.parentNode) { var c = n.getAttribute('contenteditable'); if (c === '' || c === 'true') return true; if (c === 'false') return false; } return false; }
+    get isContentEditable() { if (!editableSeen) return false; for (var n = this; n && n.nodeType === 1; n = n.parentNode) { var c = n.getAttribute('contenteditable'); if (c === '' || c === 'true') return true; if (c === 'false') return false; } return false; }
     get spellcheck() { return this.getAttribute('spellcheck') !== 'false'; }
     set spellcheck(v) { this.setAttribute('spellcheck', v ? 'true' : 'false'); }
     get innerText() { return innerTextOf(this); }
@@ -6967,6 +7037,16 @@
     return out + v.slice(i);
   }
   function parseDeclarations(text) {
+    var ms = declsMemo(text), out = [];
+    for (var k = 0; k < ms.length; k++) out.push({ name: ms[k].name, value: ms[k].value, important: ms[k].important });
+    return out;
+  }
+  // the declarations of a text, each one parsed once for all texts it is
+  // in: a game's boxes are written whole as each is made ("position:
+  // absolute; left: 12px; ..."), and the same declarations came again and
+  // again through the checks below. The objects are shared: not changed.
+  var declMemo = Object.create(null), declMemoN = 0;
+  function declsMemo(text) {
     var out = [];
     // (split at the semicolons outside strings, escapes and blocks)
     var parts = null;
@@ -6986,17 +7066,28 @@
     }
     for (var k = 0; k < parts.length; k++) {
       var p = parts[k];
+      var m = declMemo[p];
+      if (m === undefined) {
+        m = parseDecl1(p);
+        if (declMemoN >= 8192) { declMemo = Object.create(null); declMemoN = 0; }
+        declMemo[p] = m; declMemoN++;
+      }
+      if (m !== null) out.push(m);
+    }
+    return out;
+  }
+  function parseDecl1(p) {
+    {
       var c = p.indexOf(':');
-      if (c < 0) continue;
+      if (c < 0) return null;
       var name = p.slice(0, c).trim();
       var value = p.slice(c + 1).trim();
-      if (!name) continue;
+      if (!name) return null;
       // (a custom property: its tokens as they are, none of the checks
       // below; GitHub's themes have thousands)
       if (name.charCodeAt(0) === 45 && name.charCodeAt(1) === 45 && name.indexOf('\\') < 0) {
         var cim = value.indexOf('!') >= 0 ? /\s*!\s*important\s*$/i.exec(value) : null;
-        out.push({ name: name, value: cim ? value.slice(0, cim.index).trim() : value, important: !!cim });
-        continue;
+        return { name: name, value: cim ? value.slice(0, cim.index).trim() : value, important: !!cim };
       }
       // (escapes in the name, and in a value outside its strings, stand
       // for their characters: one that stands for a delimiter is not one)
@@ -7006,18 +7097,18 @@
       // the declaration with it invalid)
       if (/url\(/i.test(value) && name.slice(0, 2) !== '--') {
         var uv = urlsQuoted(value);
-        if (uv === null) continue;
+        if (uv === null) return null;
         value = uv;
       }
       if (value.indexOf('\\') >= 0 && name.slice(0, 2) !== '--') {
         var vs = value.split(/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/);
         for (var vi = 0; vi < vs.length; vi += 2) vs[vi] = unescapeIdent(vs[vi]);
         var bare = vs.filter(function (x, xi) { return xi % 2 === 0; }).join('');
-        if (/[;{}]/.test(bare)) continue;
+        if (/[;{}]/.test(bare)) return null;
         // (an escaped space is part of its identifier: `\0020yellow` is
         // no colour name)
         var rawBare = value.split(/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/).filter(function (x, xi) { return xi % 2 === 0; }).join('');
-        if (/\\(0{0,4}(20|9|a|c|d)(?![0-9a-f])|[ \t])/i.test(rawBare) && !/url\(/i.test(rawBare)) continue;
+        if (/\\(0{0,4}(20|9|a|c|d)(?![0-9a-f])|[ \t])/i.test(rawBare) && !/url\(/i.test(rawBare)) return null;
         value = vs.join('').replace(/[\x00-\x08\x0b\x0e-\x1f\x7f]/g, '\ufffd');
       }
       if (name.slice(0, 2) !== '--') name = name.toLowerCase();
@@ -7028,12 +7119,11 @@
       if (im) { important = true; value = value.slice(0, im.index).trim(); }
       // (any other `!` outside a string makes the declaration invalid:
       // `200!invalid`)
-      if (value.indexOf('!') >= 0 && name.slice(0, 2) !== '--' && /!/.test(value.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, ''))) continue;
-      if (value === '' && name.slice(0, 2) !== '--') continue;
-      if (!sizeValueOk(name, value) || (name === 'display' && !displayOk(value)) || !lengthsOk(name, value) || (name === 'font-family' && !familiesOk(value)) || (name === 'background-image' && !imagesOk(value)) || (/^border(-(top|right|bottom|left))?$/.test(name) && !borderOk(value)) || ((name === 'color' || name === 'background-color') && !colorOk(value)) || (name === 'background' && !backgroundOk(value)) || (name === 'font' && !fontOk(value)) || ((name === 'text-decoration' || name === 'text-decoration-line') && !decorationOk(value))) continue;
-      out.push({ name: name, value: value, important: important });
+      if (value.indexOf('!') >= 0 && name.slice(0, 2) !== '--' && /!/.test(value.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, ''))) return null;
+      if (value === '' && name.slice(0, 2) !== '--') return null;
+      if (!sizeValueOk(name, value) || (name === 'display' && !displayOk(value)) || !lengthsOk(name, value) || (name === 'font-family' && !familiesOk(value)) || (name === 'background-image' && !imagesOk(value)) || (/^border(-(top|right|bottom|left))?$/.test(name) && !borderOk(value)) || ((name === 'color' || name === 'background-color') && !colorOk(value)) || (name === 'background' && !backgroundOk(value)) || (name === 'font' && !fontOk(value)) || ((name === 'text-decoration' || name === 'text-decoration-line') && !decorationOk(value))) return null;
+      return { name: name, value: value, important: important, ex: undefined };
     }
-    return out;
   }
   // a colour value: a name, a system colour, #hex of 3, 4, 6 or 8 digits,
   // or a colour function; anything else is an invalid declaration
@@ -7225,16 +7315,30 @@
       var tmp = parseSheetText(String(text), this);
       if (!tmp.cssRules.length && !/^\s*@/.test(text)) throw DOMException("Failed to execute 'insertRule' on 'CSSStyleSheet': Failed to parse the rule '" + text + "'.", 'SyntaxError');
       Array.prototype.splice.apply(this.cssRules, [index, 0].concat(tmp.cssRules));
-      this._rebuild();
+      this._later();
       return index;
     }
-    deleteRule(index) { this.cssRules.splice(index, 1); this._rebuild(); }
+    deleteRule(index) { this.cssRules.splice(index, 1); this._later(); }
     addRule(sel, body, index) { return this.insertRule(sel + '{' + body + '}', index === undefined ? this.cssRules.length : index); }
     removeRule(i) { this.deleteRule(i); }
     replaceSync(text) { var tmp = parseSheetText(String(text), this); this.cssRules = tmp.cssRules; this._rebuild(); }
     replace(text) { this.replaceSync(text); return Promise.resolve(this); }
-    _rebuild() {
-      this._rules = [];
+    // (a CSS-in-JS library adds its rules one by one, each where its group
+    // is: the rules are read and indexed again when they are next used, not
+    // for each; a rebuild for each made a page's 2 000 rules take seconds)
+    _later() { this._dirty = true; if (!sheetQuiet) changed(); }
+    _flush() { if (this._dirty) { this._dirty = false; var q = sheetQuiet; sheetQuiet = true; try { this._rebuild(); } finally { sheetQuiet = q; } } }
+    get _rules() { this._flush(); return this.__rules; }
+    set _rules(v) { this.__rules = v; }
+    get _index() { this._flush(); return this.__index; }
+    set _index(v) { this.__index = v; }
+    get _pindex() { this._flush(); return this.__pindex; }
+    set _pindex(v) { this.__pindex = v; }
+    get _pseudo() { this._flush(); return this.__pseudo; }
+    set _pseudo(v) { this.__pseudo = v; }
+    get _backdrop() { this._flush(); return this.__backdrop; }
+    set _backdrop(v) { this.__backdrop = v; }
+    _collect(top) {
       var self = this;
       (function add(rules, media) {
         for (var i = 0; i < rules.length; i++) {
@@ -7247,7 +7351,12 @@
           else if (r.type === 12 && r._ok) add(r.cssRules, media);
           else if (r._layer) add(r.cssRules, media);
         }
-      })(this.cssRules, '');
+      })(top, '');
+    }
+    _rebuild() {
+      this._dirty = false;
+      this._rules = [];
+      this._collect(this.cssRules);
       indexSheet(this);
       if (!sheetQuiet) changed();
     }
@@ -7498,8 +7607,12 @@
     // (a pseudo-element's rules apart, by its name: an element's cascade
     // and its ::before's each go through their own only)
     var idx = {}, pidx = {};
-    for (var i = 0; i < sheet._rules.length; i++) {
-      var r = sheet._rules[i];
+    for (var i = 0; i < sheet._rules.length; i++) indexRule(sheet, sheet._rules[i], i, idx, pidx);
+    sheet._index = idx;
+    sheet._pindex = pidx;
+  }
+  function indexRule(sheet, r, i, idx, pidx) {
+    {
       r.order = i;
       var k = r.sel.key;
       // (a subject that is only :is() or :where(), as a theme's
@@ -7517,8 +7630,6 @@
       if (r.sel.pseudo === 'before' || r.sel.pseudo === 'after' || r.sel.pseudo === 'first-letter' || r.sel.pseudo === 'first-line') sheet._pseudo = true;
       if (r.sel.pseudo === 'backdrop') sheet._backdrop = true;
     }
-    sheet._index = idx;
-    sheet._pindex = pidx;
   }
   // the keys (#id, .class, tag) of a compound whose own are only in its
   // :is() or :where(): one per selector of the list, null when one of them
@@ -8179,6 +8290,538 @@
     p._ka = set; p._kaE = ancEpoch;
     return set;
   }
+  // ---- Rust style: the host matches the page's rules (DomStyle,
+  // style/ rangerdom_style). Any engine the page runs on gives it
+  // __hostSync; a request starting with U+0001 'S' is DomStyle's. An
+  // element is described to it when its style is asked for (its tag, the
+  // attributes the selectors read, its parent and its places among its
+  // siblings), and again only when one of those changed; so are its
+  // ancestors. DomStyle answers which rules match, and leaves the ones that
+  // read what webapi.js holds (:hover, :checked, :has(), a sibling
+  // combinator...) for cascade1 to match. Nothing it keeps is the page's: a
+  // new host (a restored snapshot) is told again. Off until
+  // __webdom.rsx(true) finds a host that answers; a page with shadow roots
+  // takes webapi.js's own matching.
+  // (rsxChg: attributes or the tree changed somewhere, attrChanged,
+  // treeChanged)
+  var rsxChg = 0, rsxOn = false, rsxOps = [], rsxDoc = null, rsxRs = null, rsxW = null, rsxFlags = null;
+  var rsxHits = new Map(), rsxSession = 0, rsxCheckOn = false, rsxBad = [], rsxN = { q: 0, fb: 0, sync: 0, rules: 0, desc: 0 };
+  // (the selectors read places among siblings: :first-child, :nth-child()...)
+  var rsxStruct = false;
+  function rsxClean(v) { v = String(v); return v.indexOf('\u0000') < 0 && v.indexOf('\u0001') < 0 ? v : v.replace(/[\u0000\u0001]/g, '�'); }
+  // (the value of an attribute no selector of the rule set reads is not
+  // sent, only that the element has it)
+  var rsxSa = null;
+  // el and its ancestors as DomStyle has them, told again where they
+  // changed: el._av counts el's attribute changes (attrChanged), a
+  // parent's _cv its children's
+  function rsxDescribe(el) {
+    for (var e = el; e && e.nodeType === 1; e = e.parentNode) {
+      // (all of it checked since the last change anywhere)
+      if (e._rxE === rsxChg && e._rxS === rsxSession) return;
+      var p = e.parentNode, cv = p ? p._cv || 0 : -1;
+      if (e._rxS === rsxSession && e._rxAv === (e._av || 0) && e._rxP === p && (!rsxStruct || e._rxCv === cv)) { e._rxE = rsxChg; continue; }
+      var pe = 0, pee = 0, pt = 0, pte = 0;
+      if (rsxStruct && p && p._c) { kidPositions(p); pe = e._posE; pee = e._posEE; pt = e._posT; pte = e._posTE; }
+      var html = e.namespaceURI === HTML_NS, at = e._attrs;
+      var rec = 'N\u0001' + e.__id + '\u0001' + (!p ? -1 : p.nodeType === 9 ? 0 : p.nodeType === 1 ? p.__id : -1) + '\u0001' + (html ? '' : e.namespaceURI || '-') + '\u0001' + e.localName + '\u0001' + pe + '\u0001' + pee + '\u0001' + pt + '\u0001' + pte;
+      for (var a = 0; a < at.length; a++) {
+        var an = at[a].name;
+        rec += '\u0001' + rsxClean(an) + '\u0001' + (an === 'class' || an === 'id' || rsxSa[html ? an : an.toLowerCase()] === 1 ? rsxClean(at[a]._v) : '');
+      }
+      rsxOps.push(rec);
+      rsxN.desc++;
+      e._rxS = rsxSession; e._rxAv = e._av || 0; e._rxP = p; e._rxCv = cv; e._rxE = rsxChg;
+    }
+  }
+  // the page again, from the start (a new document, a new host, more
+  // attribute values to send)
+  var rsxSel = new Map(), rsxSelSt = [], rsxHostN = 0;
+  function rsxStart() {
+    rsxOps = ['R\u0001' + (doc.contentType === 'application/xhtml+xml' ? '1' : '') + '\u0001' + (++rsxSession)];
+    rsxDoc = doc; rsxRs = null; rsxN.sync++; rsxSel = new Map(); rsxSelSt = []; rsxStruct = false; rsxHostN++;
+  }
+  // the rule set (scopeRuleSet): its rules (each w once), their flags and
+  // webapi.js's index of them
+  function rsxFlagOf(w, pe) {
+    var r = w.r, ok = !r.media || mediaMatches(r.media);
+    if (pe && !(pe === 'backdrop' ? w.sh._backdrop : w.sh._pseudo)) ok = false;
+    return (ok ? 1 : 0) | (w.multi ? 2 : 0);
+  }
+  var RSX_STRUCT = /"n":"(first-|last-|only-|nth-)/;
+  function rsxRules(rs) {
+    // (one sent before in this session: named by its number)
+    if (rs._rxS === rsxHostN) {
+      rsxOps.push('U\u0001' + rs._rxn);
+      rsxUse(rs, rs._rxSt);
+      if (rs._rxVW !== viewport.w || rs._rxVH !== viewport.h) rsxMedia();
+      return;
+    }
+    var ws = [], pes = [], sels = [], flags = [], idx = {}, pidx = {}, stamp = ++candStamp, st = false;
+    function list(from, pe) {
+      var o = {};
+      for (var k in from) {
+        var l = from[k], out = [];
+        for (var i = 0; i < l.length; i++) {
+          var w = l[i];
+          if (w._rxs !== stamp) {
+            w._rxs = stamp; w._rx = ws.length; ws.push(w);
+            // (each selector sent once a session, then named by its number)
+            var sl = w.r.sel, no = rsxSel.get(sl);
+            if (no === undefined) {
+              var t = JSON.stringify(sl);
+              no = rsxSelSt.length; rsxSel.set(sl, no); rsxSelSt.push(RSX_STRUCT.test(t));
+              rsxOps.push('S\u0001' + no + '\u0001' + t);
+            }
+            if (rsxSelSt[no]) st = true;
+            sels.push(no); flags.push(rsxFlagOf(w, pe)); pes.push(pe);
+          }
+          out.push(w._rx);
+        }
+        o[k] = out;
+      }
+      return o;
+    }
+    idx = list(rs.idx, '');
+    for (var pn in rs.pidx) pidx[pn] = list(rs.pidx[pn], pn);
+    rs._rxW = ws; rs._rxPe = pes; rs._rxF = flags; rs._rxH = new Map(); rs._rxSt = st;
+    rs._rxn = ++rsxSetN;
+    rsxN.rules++;
+    rs._rxVW = viewport.w; rs._rxVH = viewport.h;
+    rsxOps.push('L\u0001' + rs._rxn + '\u0001{"w":[' + sels.join(',') + '],"f":' + JSON.stringify(flags) + ',"idx":' + JSON.stringify(idx) + ',"pidx":' + JSON.stringify(pidx) + '}');
+    if (rxOn) rsxOps.push(rxDecls(rs));
+    rs._rxS = rsxHostN;
+    rsxUse(rs, st);
+  }
+  var rsxSetN = 0, rsxPe = null;
+  function rsxUse(rs, st) {
+    rsxW = rs._rxW; rsxPe = rs._rxPe; rsxFlags = rs._rxF; rsxHits = rs._rxH;
+    rsxRs = rs;
+    // (places sent from now on: every element described again)
+    if (st && !rsxStruct) rsxEpoch();
+    rsxStruct = rsxStruct || st;
+  }
+  // a new number for what the page tells DomStyle: each element told again,
+  // the host keeps its selectors and rule sets
+  function rsxEpoch() {
+    rsxOps.push('E\u0001' + rsxSession + '\u0001' + (++rsxSession));
+  }
+  // (the viewport changed: the media queries answered again)
+  function rsxMedia() {
+    var ch = [];
+    for (var i = 0; i < rsxW.length; i++) {
+      var w = rsxW[i];
+      if (!w.r.media) continue;
+      var f = rsxFlagOf(w, rsxPe[i]);
+      if (f !== rsxFlags[i]) { rsxFlags[i] = f; ch.push(i, f); }
+    }
+    if (ch.length) { rsxOps.push('F\u0001' + ch.join(',')); rsxHits = rsxRs._rxH = new Map(); }
+    rsxRs._rxVW = viewport.w; rsxRs._rxVH = viewport.h;
+  }
+  // The rules DomStyle finds for el (or its ::pe): {hits, check} (w
+  // objects of rs: matched, and left to webapi.js), null when it cannot
+  // answer (el not in the page)
+  function rsxQuery(el, rs, pe) {
+    rsxPrep(rs);
+    rsxDescribe(el);
+    var q = 'Q\u0001' + el.__id + '\u0001' + (pe || '') + '\u0001' + rsxSession;
+    var ans = __hostSync('\u0001S' + (rsxOps.length ? rsxOps.join('\u0000') + '\u0000' : '') + q);
+    rsxOps = [];
+    rsxN.q++;
+    // (a host that does not know this page: a new one, after a snapshot,
+    // or one that let go of what it had)
+    if (ans === '!') {
+      rsxStart(); rsxRules(rs); rsxDescribe(el);
+      q = 'Q\u0001' + el.__id + '\u0001' + (pe || '') + '\u0001' + rsxSession;
+      ans = __hostSync('\u0001S' + rsxOps.join('\u0000') + '\u0000' + q); rsxOps = [];
+    }
+    if (typeof ans !== 'string' || ans.indexOf('|') < 0) { rsxN.fb++; return null; }
+    var got = rsxHits.get(ans);
+    if (!got) {
+      var bar = ans.indexOf('|'), hs = ans.slice(0, bar), cs = ans.slice(bar + 1), h = [], c = [];
+      if (hs) { var hl = hs.split(','); for (var i = 0; i < hl.length; i++) h.push(rsxW[+hl[i]]); }
+      if (cs) { var cl = cs.split(','); for (var j = 0; j < cl.length; j++) c.push(rsxW[+cl[j]]); }
+      got = { hits: h, check: c };
+      if (rsxHits.size >= 5000) rsxHits.clear();
+      rsxHits.set(ans, got);
+    }
+    return got;
+  }
+  // the host told of the page and of rule set rs (in rsxOps, sent with the
+  // next request)
+  function rsxPrep(rs) {
+    if (rsxRs !== rs) {
+      // (a rule set whose selectors read an attribute the last one's did
+      // not: its values were not sent, so every element is told again)
+      var sa = rs._sa;
+      if (!sa) { sa = rs._sa = (rs._base && rs._base._sa) || selAttrsOf(rs); if (rs._base && !rs._base._sa) rs._base._sa = sa; }
+      // (the names whose values are sent only grow in a session)
+      var more = rsxSa === null;
+      if (!more) for (var an in sa) if (an.charAt(0) !== '#' && rsxSa[an] !== 1) { more = true; break; }
+      if (more) { var un = {}, k; if (rsxSa) for (k in rsxSa) un[k] = rsxSa[k]; for (k in sa) un[k] = sa[k]; rsxSa = un; }
+      if (more && rsxDoc === doc) rsxEpoch();
+    }
+    if (rsxDoc !== doc) rsxStart();
+    if (rsxRs !== rs) rsxRules(rs);
+    else if (rs._rxVW !== viewport.w || rs._rxVH !== viewport.h) rsxMedia();
+    // the elements :hover, :active and :focus... are of (W), as matchPseudo
+    // finds them
+    var fa = doc._active && doc._active.nodeType === 1 && doc._active.isConnected ? doc._active : null;
+    var he = hoverEl && hoverEl.nodeType === 1 && hoverEl.isConnected && hoverEl.ownerDocument === doc ? hoverEl : null;
+    var ae = activeEl && activeEl.nodeType === 1 && activeEl.isConnected && activeEl.ownerDocument === doc ? activeEl : null;
+    var fv = fa && (doc._focusVisible !== false || textEntry(fa)) ? 1 : 0;
+    if (rsxStH !== rsxHostN || rsxSt[0] !== he || rsxSt[1] !== ae || rsxSt[2] !== fa || rsxSt[3] !== fv) {
+      if (he) rsxDescribe(he);
+      if (ae) rsxDescribe(ae);
+      if (fa) rsxDescribe(fa);
+      rsxOps.push('W\u0001' + (he ? he.__id : 0) + '\u0001' + (ae ? ae.__id : 0) + '\u0001' + (fa ? fa.__id : 0) + '\u0001' + fv);
+      rsxSt = [he, ae, fa, fv]; rsxStH = rsxHostN;
+    }
+  }
+  var rsxSt = [null, null, null, 0], rsxStH = -1;
+  // (the oracle, __webdom.rsxCheck: webapi.js's own matching beside it)
+  function rsxJsHits(el, rs, pe) {
+    var cand = [], out = [];
+    setCandidates(rs, el, cand, pe);
+    for (var i = 0; i < cand.length; i++) {
+      var w = cand[i], r = w.r;
+      if (pe ? r.sel.pseudo !== pe || !(pe === 'backdrop' ? w.sh._backdrop : w.sh._pseudo) : r.sel.pseudo) continue;
+      if (r.media && !mediaMatches(r.media)) continue;
+      if (matchComplex(el, r.sel, null)) out.push(w);
+    }
+    return out;
+  }
+  function rsxCompare(el, pe, got, rs) {
+    var mine = rsxJsHits(el, rs, pe), ids = function (l) { return l.map(function (w) { return (w.r._uid || (w.r._uid = ++ruleUid)) + ':' + w.sheet; }).sort().join(' '); };
+    var a = ids(got), b = ids(mine);
+    if (a !== b && rsxBad.length < 50) rsxBad.push({ el: el.localName + (el.id ? '#' + el.id : '') + (el.className && typeof el.className === 'string' ? '.' + el.className.split(/\s+/).join('.') : ''), id: el.__id, pe: pe || '', rust: a, js: b, sels: mine.concat(got).map(function (w) { return w.r.sel && w.r.sel.text || ''; }) });
+  }
+  // ---- RX: computed styles and render nodes in Rust (DomTree, style/
+  // dom_tree.rs). With __webdom.rx(true) (Rust matching on), renderJson
+  // asks the host for an element's subtree: webapi.js tells what changed
+  // under it (B: an element's children, inline style, the attributes and
+  // accessibility its node carries; X: a text), the host styles the
+  // elements as computeStyle does and builds their render nodes itself
+  // (no JSON text between). What it cannot (a hole: a control, a picture,
+  // an svg, a table, a selector of state, a custom property...) webapi.js
+  // renders as before and hands over (J); the host's style of the hole's
+  // parent comes along to render it under. The page's JSON names the
+  // host's node, {"rx": handle}, which the host's DomPage takes. Nothing
+  // the host keeps is the page's: a new host (a restored snapshot) is told
+  // again (V). Off by default; a host that has no DomTree answers "-" and
+  // webapi.js renders.
+  var rxOn = false, rxSuspend = 0, rxTablesH = -1, rxCs = new Map(), rxCsH = -1, rxPsN = 0, rxEls = new Map();
+  // (rxHoleDelta: a host whose DomStyle puts in the nodes it keeps by
+  // number takes the holes as deltas, __webdom.rxHoleDelta)
+  var rxHoleDelta = false;
+  var rxN = { walks: 0, rx: 0, fb: 0, holes: 0, b: 0, x: 0, why: {} }, rxCheckOn = false, rxBad = [], rxChecked = 0, rxUsed = false;
+  // elements webapi.js renders itself, whatever their style
+  var RX_HOLE_TAGS = /^(input|textarea|select|img|iframe|canvas|video|audio|object|embed|template|picture|source|table|caption|colgroup|col|thead|tbody|tfoot|tr|td|th|slot|dialog|option|optgroup|frame|frameset|math)$/;
+  function rxHole(e) {
+    if (e.namespaceURI !== HTML_NS || RX_HOLE_TAGS.test(e.localName) || e._sr || e._top || e._virt || e._tr || e._ab || e._anims || (e._waapi && e._waapi.length) || e.__s3d) return true;
+    // (presentational hints: buildSpec's, not the host's)
+    var at = e._attrs;
+    for (var i = 0; i < at.length; i++) if (HINT_ATTRS[at[i].name.toLowerCase()]) return true;
+    return false;
+  }
+  // a rule set's declarations as buildSpec puts them (expanded), by the
+  // place of each rule in rs._rxW, with its place in buildSpec's order
+  function rxDecls(rs) {
+    var ws = rs._rxW, ix = [];
+    for (var i = 0; i < ws.length; i++) ix.push(i);
+    ix.sort(function (x, y) { var a = ws[x], b = ws[y]; return (a.ua === b.ua ? 0 : a.ua ? -1 : 1) || (!a.inner === !b.inner ? 0 : a.inner ? -1 : 1) || cmpSpec(a.r.sel.spec, b.r.sel.spec) || a.sheet - b.sheet || a.r.order - b.r.order || x - y; });
+    var rank = [];
+    for (var k = 0; k < ix.length; k++) rank[ix[k]] = k;
+    var out = [];
+    for (var j = 0; j < ws.length; j++) {
+      var r = ws[j].r, d = r._rxD;
+      if (d === undefined) {
+        var l = [], ds = r.decls;
+        for (var q = 0; q < ds.length; q++) {
+          var nm = ds[q].name, v = ds[q].value, im = ds[q].important ? 1 : 0, lh = expandShorthand(nm, v);
+          if (lh) { for (var lk in lh) if (lh[lk] !== undefined) l.push([lk, lh[lk], im, 0]); if (lh[nm] === undefined) l.push([nm, '', im, 1]); }
+          else l.push([nm, v, im, 0]);
+        }
+        d = r._rxD = JSON.stringify(l);
+      }
+      out.push('[' + rank[j] + ',' + (ws[j].ua ? 1 : 0) + ',' + d + ']');
+    }
+    return 'D\u0001' + rs._rxn + '\u0001[' + out.join(',') + ']';
+  }
+  // the tables computeStyle and renderNode go by
+  function rxTables() {
+    var named = {};
+    for (var c in NAMED_COLORS) if (NAMED_COLORS[c]) named[c] = NAMED_COLORS[c];
+    return 'I\u0001' + JSON.stringify({ inh: Object.keys(INHERITED), init: INITIAL, named: named });
+  }
+  // a webapi.js style the host takes (C), by its number; null: one the host
+  // cannot style under (custom properties)
+  function rxPs(ps) {
+    if (!ps) return 0;
+    if (ps._rxH === rsxHostN) return ps._rxN;
+    if (ps._vars) for (var vk in ps._vars) return null;
+    var p = {}, cc = [];
+    for (var k in ps) if (k.charAt(0) !== '_' && typeof ps[k] === 'string') p[k] = ps[k];
+    if (ps._cc) for (var ck in ps._cc) cc.push(ck);
+    var n = ++rxPsN;
+    rsxOps.push('C\u0001' + n + '\u0001' + JSON.stringify({ p: p, f: ps._fontPx, k: ps._fsKw !== false, c: cc }));
+    Object.defineProperty(ps, '_rxH', { value: rsxHostN, enumerable: false, configurable: true, writable: true });
+    Object.defineProperty(ps, '_rxN', { value: n, enumerable: false, configurable: true, writable: true });
+    return n;
+  }
+  // a host style as a webapi.js one (computeStyle1's shape), the same
+  // object for the same number while the host is the same
+  var rxNoVars = {};
+  function rxCsOf(n, json) {
+    if (rxCsH !== rsxHostN) { rxCs = new Map(); rxCsH = rsxHostN; }
+    var o = rxCs.get(n);
+    if (o) return o;
+    if (json === undefined) return null;
+    var j = JSON.parse(json);
+    o = { _vars: rxNoVars };
+    for (var k in j.p) o[k] = j.p[k];
+    o._fontPx = j.f; o._fsKw = j.k;
+    if (j.c.length) { var cc = {}; for (var i = 0; i < j.c.length; i++) cc[j.c[i]] = true; Object.defineProperty(o, '_cc', { value: cc, enumerable: false, configurable: true, writable: true }); }
+    Object.defineProperty(o, '_sid', { value: ++styleUid, enumerable: false });
+    rxCs.set(n, o);
+    return o;
+  }
+  // renderNode's attributes of an element the host renders
+  function rxAttrs(n) {
+    var a = null;
+    for (var i = 0; i < n._attrs.length; i++) {
+      var an = n._attrs[i].name;
+      if (RENDER_ATTRS[an] || an.slice(0, 5) === 'data-' && (an === 'data-testid' || /^data-(expected|offset)-/.test(an))) { if (!a) a = {}; a[an] = n._attrs[i]._v; }
+    }
+    if (n.localName === 'button' && n.disabled) { if (!a) a = {}; a.disabled = true; }
+    if (doc && doc._active === n) { if (!a) a = {}; a.focused = true; }
+    return a ? JSON.stringify(a) : '';
+  }
+  // what changed under e since the host was told (B, X), e and all under
+  // it that changed (_rv, as renderJson keeps its JSON by); its element
+  // children noted for the holes
+  function rxTell(e) {
+    var sc = e._sTop || e._sLeft ? (e._sTop || 0) + ',' + (e._sLeft || 0) : '0,0';
+    // (told at _rxB, a textStamp: since then nothing changed under it, no
+    // new host and no whole-page change, rxBase. One number an element,
+    // and the scroll offset only for one that scrolled: what is kept here
+    // is in the page's snapshot.)
+    var tb = e._rxB;
+    if (tb >= rxBase && tb >= e._rv && (e._rxBS === undefined ? sc === '0,0' : e._rxBS === sc)) return;
+    // (only inline properties set since it was told, G: their values,
+    // not the element described again; 500 boxes moved each frame were
+    // each described whole)
+    var rp = e._rxIP;
+    if (rp) {
+      e._rxIP = null;
+      if (rp.v === e._rv && tb >= rxBase && tb >= rp.p0 && (e._rxBS === undefined ? sc === '0,0' : e._rxBS === sc) && e._style) {
+        var st0 = e._style, pl = '';
+        for (var pn in rp.n) {
+          var pv = st0._p[pn];
+          if (pv === undefined) { pl = null; break; }
+          if (pl) pl += '\u0003';
+          pl += rsxClean(pn) + '\u0002' + rsxClean(pv) + '\u0002' + (st0._prio[pn] ? '1' : '');
+        }
+        if (pl) {
+          rsxOps.push('G\u0001' + e.__id + '\u0001' + pl + '\u0001' + rsxClean(rxAttrs(e)));
+          rxN.p = (rxN.p || 0) + 1;
+          e._rxB = textStamp;
+          return;
+        }
+      }
+    }
+    rsxDescribe(e);
+    var src = flatKids(e), kids = '', walk = null;
+    // (a box of many with virtual rows: the host renders none of it, see
+    // rxA; its children are not told)
+    var many = false;
+    if (virtOn && src.length >= 32) { var ne = 0; for (var m = 0; m < src.length; m++) if (src[m].nodeType === 1) ne++; many = ne >= 32; }
+    // (a box whose children are all absolutely placed has no virtual rows,
+    // virtWindow: its children are told, and the host checks that they
+    // still are, O)
+    var outKids = many && e._rxOut === true;
+    if (outKids) many = false;
+    for (var i = 0; i < src.length; i++) {
+      var k = src[i];
+      if (k.nodeType === 3) {
+        if (kids) kids += ',';
+        kids += 't' + k.__id;
+        // (each text of an element told again: the host keeps what it was
+        // told and takes only a change; nothing kept with the text here)
+        rsxOps.push('X\u0001' + k.__id + '\u0001' + rsxClean(k._data || '') + '\u0001' + e.__id); rxN.x++;
+      } else if (k.nodeType === 1) {
+        if (kids) kids += ',';
+        // (the holes by number, for the host's list of them: only those, as
+        // anything kept here stays in the page's heap and its snapshot)
+        if (rxHole(k)) { kids += 'h' + k.__id; rsxDescribe(k); rxEls.set(k.__id, k); }
+        else { kids += 'e' + k.__id; if (!many) (walk || (walk = [])).push(k); }
+      }
+    }
+    var inl = '';
+    if (e._style || attrOf(e, 'style') !== null) {
+      var st = e._style;
+      if (!st) { e.style; st = e._style; }
+      for (var q = 0; q < st._order.length; q++) { var nm = st._order[q]; if (inl) inl += '\u0003'; inl += rsxClean(nm) + '\u0002' + rsxClean(st._p[nm]) + '\u0002' + (st._prio[nm] ? '1' : ''); }
+    }
+    var ax = axOf(e);
+    rsxOps.push('B\u0001' + e.__id + '\u0001' + kids + '\u0001' + inl + '\u0001' + rsxClean(rxAttrs(e)) + '\u0001' + (ax ? rsxClean(JSON.stringify(ax)) : '') + '\u0001' + (e.scrollTop || e.scrollLeft ? '[' + e.scrollLeft + ',' + e.scrollTop + ']' : '') + '\u0001' + (outKids ? 'O' : ''));
+    rxN.b++;
+    e._rxB = textStamp;
+    if (sc !== '0,0' || e._rxBS !== undefined) e._rxBS = sc;
+    if (walk) for (var w = 0; w < walk.length; w++) rxTell(walk[w]);
+  }
+  // (rxBase: told before it, an element is told again: a new host, or a
+  // change that names no element. A step of textStamp of its own: a change
+  // after it stamps above it.)
+  var rxBase = 0, rxBaseHN = -1, rxBaseW = -1;
+  function rxBases() {
+    if (rxBaseHN === rsxHostN && rxBaseW === rxWhole) return;
+    textStamp++;
+    rxBase = textStamp;
+    rxBaseHN = rsxHostN; rxBaseW = rxWhole;
+  }
+  // n's JSON as the host's node ({"rx": handle}), '' when nothing shows,
+  // null when the host does not render it (webapi.js does)
+  function rxRender(n, parentStyle) {
+    if (rxSuspend || shadowCount || !doc || n.ownerDocument !== doc || !n.isConnected || rxHole(n)) return null;
+    // (an inline parent may be split around a block in it, from the JSON)
+    if (parentStyle && (parentStyle.display === 'inline' || parentStyle.display === 'contents')) return null;
+    // (one the host did not render, nothing changed since)
+    // (one the host did not render, nothing changed under it since: what
+    // made it refuse is of the element and what is under it; a new sheet
+    // that would let it is only a render webapi.js does meanwhile)
+    if (n._rxNo === n._rv) return null;
+    // (a child of a box of many with virtual rows: the host renders none of
+    // the box, each child alone was a request of its own)
+    var vp = virtOn ? n.parentNode : null;
+    if (vp && vp._c.length >= 32) return null;
+    // (a parent with custom properties: nothing sent, nothing kept)
+    if (parentStyle && parentStyle._vars && parentStyle._rxH !== rsxHostN) for (var vk in parentStyle._vars) { rxNote('parent custom properties'); return null; }
+    var rs = scopeRuleSet(doc, null);
+    rxPrepAll(rs);
+    var psN = rxPs(parentStyle);
+    if (psN === null) { rxNote('parent custom properties'); return null; }
+    rxBases();
+    rxTell(n);
+    var root = doc.documentElement, rpx = root ? computedOf(root)._fontPx : 16;
+    var z = 'Z\u0001' + n.__id + '\u0001' + psN + '\u0001' + viewport.w + '\u0001' + viewport.h + '\u0001' + rpx + '\u0001' + (virtOn ? '1' : '') + '\u0001' + rsxSession;
+    var ans = __hostSync('\u0001S' + (rsxOps.length ? rsxOps.join('\u0000') + '\u0000' : '') + z);
+    rsxOps = [];
+    rxN.walks++;
+    if (ans === '!') {
+      rsxStart(); rxPrepAll(rs); psN = rxPs(parentStyle); rxBases(); rxTell(n);
+      z = 'Z\u0001' + n.__id + '\u0001' + psN + '\u0001' + viewport.w + '\u0001' + viewport.h + '\u0001' + rpx + '\u0001' + (virtOn ? '1' : '') + '\u0001' + rsxSession;
+      ans = __hostSync('\u0001S' + rsxOps.join('\u0000') + '\u0000' + z); rsxOps = [];
+    }
+    if (typeof ans !== 'string' || !ans || ans.charAt(0) === '-' || ans === '!') { rxNote(typeof ans === 'string' && ans ? ans.slice(1) : 'no answer'); if (ans && ans.charAt(0) === '-') n._rxNo = n._rv; return null; }
+    if (ans === '0') { rxN.rx++; return ''; }
+    var f = ans.split('\u0001'), h;
+    if (f[0] === 'N') h = f[1];
+    else if (f[0] === 'H') {
+      if (f[2]) { var sl = f[2].split('\u0003'); for (var s = 0; s < sl.length; s++) { var sp = sl[s].indexOf('\u0002'); rxCsOf(+sl[s].slice(0, sp), sl[s].slice(sp + 1)); } }
+      var hl = f[1].split(';'), out = [], hm0 = marks.length;
+      if (treePending.size) flushTree();
+      if (computedCache.gen !== styleGen) { computedCache = { gen: styleGen, map: {} }; treePending.clear(); }
+      for (var i = 0; i < hl.length; i++) {
+        var c = hl[i].indexOf(','), id = +hl[i].slice(0, c), csn = +hl[i].slice(c + 1), el = rxEls.get(id) || rxFind(n, id);
+        if (!el || !el.isConnected) { unmark(hm0); rxNote('hole not found'); return null; }
+        var pel = el.parentNode && el.parentNode.nodeType === 1 ? el.parentNode : null, pcs = null;
+        if (pel) {
+          pcs = computedCache.map[pel.__id];
+          if (!pcs) {
+            pcs = rxCsOf(csn);
+            if (!pcs) { unmark(hm0); rxNote('hole style'); return null; }
+            // (what computedOf would give: the hole's style is computed under it)
+            computedCache.map[pel.__id] = pcs;
+            if (!pel._es) styledNow(pel);
+          }
+        }
+        // (as a delta when the host shares the nodes it keeps, rxHoleDelta:
+        // what it has is named, {"r": n}; values over a kept node are not
+        // sent, as DomStyle does not put them together)
+        var hd = rxHoleDelta && deltaOn && !deltaOff && !wireOn;
+        var dm = marks.length, sv = deltaOff, svp = deltaPatch;
+        if (hd) deltaPatch = false; else deltaOff = 1;
+        var hj = renderJson(el, pcs);
+        if (hd) { deltaPatch = svp; if (lastDelta) hj = lastDelta; }
+        else { deltaOff = sv; unmark(dm); }
+        out.push('J\u0001' + id + '\u0001' + hj);
+        rxN.holes++;
+      }
+      out.push('K\u0001' + n.__id);
+      h = __hostSync('\u0001S' + (rsxOps.length ? rsxOps.join('\u0000') + '\u0000' : '') + out.join('\u0000'));
+      rsxOps = [];
+    }
+    if (h === '0') { rxN.rx++; return ''; }
+    if (!h) { if (hm0 !== undefined) unmark(hm0); rxNote('incomplete'); return null; }
+    rxN.rx++;
+    rxUsed = true;
+    return '{"rx":' + h + '}';
+  }
+  // (a hole under n by its number, when the list let go of it)
+  function rxFind(n, id) {
+    var st = [n];
+    while (st.length) {
+      var q = st.pop();
+      if (q.__id === id) { rxEls.set(id, q); return q; }
+      var ks = flatKids(q);
+      for (var i = 0; i < ks.length; i++) if (ks[i].nodeType === 1) st.push(ks[i]);
+    }
+    return null;
+  }
+  // (the oracle, __webdom.rxCheck: the page rendered again by webapi.js
+  // alone, beside the host's nodes put in)
+  function rxCompare(root) {
+    if (root.indexOf('"rx":') < 0) { rxChecked++; return; }
+    var exp = root.replace(/\{"rx":(\d+)\}/g, function (m, h) { return __hostSync('\u0001SY\u0001' + h) || 'null'; });
+    var svD = deltaOn, svM = marks, svC = ctr, svQ = qDepth, svW = rxWhole;
+    deltaOn = false; marks = []; rxSuspend++;
+    changed();
+    var js;
+    try { ctr = {}; qDepth = 0; js = renderJson(doc.documentElement, null); }
+    finally { rxSuspend--; deltaOn = svD; marks = svM; ctr = svC; qDepth = svQ; }
+    changed();
+    rxWhole = svW;
+    rxChecked++;
+    var d = rxDiff(JSON.parse(exp), JSON.parse(js), '');
+    if (d && rxBad.length < 20) rxBad.push(d);
+  }
+  function rxDiff(a, b, path) {
+    if (a === b) return null;
+    if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return path + ': ' + JSON.stringify(a).slice(0, 300) + ' != ' + JSON.stringify(b).slice(0, 300);
+    if (Array.isArray(a) !== Array.isArray(b)) return path + ': array';
+    if (Array.isArray(a)) {
+      if (a.length !== b.length) return path + ': ' + a.length + ' children != ' + b.length + ' [' + a.map(function (x) { return x && x.i; }).join(',') + '] [' + b.map(function (x) { return x && x.i; }).join(',') + ']';
+      for (var i = 0; i < a.length; i++) { var d = rxDiff(a[i], b[i], path + '/' + (a[i] && a[i].i !== undefined ? a[i].i : i)); if (d) return d; }
+      return null;
+    }
+    var ks = {}, k;
+    for (k in a) ks[k] = 1;
+    for (k in b) ks[k] = 1;
+    var who = (b.t || '') + '#' + (b.i !== undefined ? b.i : '');
+    for (k in ks) {
+      if (k === 'c') continue;
+      if (JSON.stringify(sortedJson(JSON.stringify(a[k] === undefined ? null : a[k]))) !== JSON.stringify(sortedJson(JSON.stringify(b[k] === undefined ? null : b[k])))) {
+        if (k === 's' && a.s && b.s) { var sk = {}; for (var q in a.s) sk[q] = 1; for (q in b.s) sk[q] = 1; var o = []; for (q in sk) if (a.s[q] !== b.s[q]) o.push(q + ': ' + a.s[q] + ' != ' + b.s[q]); return path + ' ' + who + ' s ' + o.join('; ').slice(0, 400); }
+        return path + ' ' + who + ' ' + k + ': ' + JSON.stringify(a[k]).slice(0, 200) + ' != ' + JSON.stringify(b[k]).slice(0, 200);
+      }
+    }
+    return rxDiff(a.c || [], b.c || [], path + ' ' + who);
+  }
+  function rxNote(why) { rxN.fb++; var w = String(why); rxN.why[w] = (rxN.why[w] || 0) + 1; }
+  // rsxPrep, and the tables and the declarations the host styles by
+  function rxPrepAll(rs) {
+    rsxPrep(rs);
+    if (rxTablesH !== rsxHostN) { rsxOps.push(rxTables()); rxTablesH = rsxHostN; }
+  }
+  // (a restored page, or a host that let go of what it had: told again,
+  // and nothing named by an earlier host's number)
+  function rxFrame() {
+    if (!rxOn || !rxUsed) return;
+    // (a hole taken out of the page keeps what it was in alive: let go)
+    if (rxEls.size) rxEls.forEach(function (e, k) { if (!e.isConnected || e.ownerDocument !== doc) rxEls.delete(k); });
+    if (__hostSync('\u0001SV\u0001' + rsxSession) !== 'ok') { rxUsed = false; rsxStart(); changed(); }
+  }
   function cascade1(el, pe) {
     var d = el.ownerDocument || doc;
     var esr = shadowCount ? shadowRootOf(el) : null;
@@ -8194,6 +8837,7 @@
       rs = scopeRuleSet(d, esr);
       // (elements alike in what the plain selectors read, see sigOf: the
       // rules found for the first one; only the others are tried)
+      var rq = null;
       if (!shadowCount && d === doc) {
         // (kept with the element as for a parent: its ::before and ::after
         // ask again)
@@ -8212,7 +8856,21 @@
           scw = sc;
         }
         if (sc) { for (var sh = 0; sh < sc.plain.length; sh++) hits.push(sc.plain[sh]); cand = sc.dyn; }
-        else { setCandidates(rs, el, cand, pe); dyn = []; }
+        else {
+          // (the first of its kind: DomStyle in Rust matches the rules it
+          // can, its plain hits kept for the others as below; the rest,
+          // and the hits that are not plain, tried here)
+          rq = rsxOn ? rsxQuery(el, rs, pe) : null;
+          dyn = [];
+          if (rq) {
+            for (var rh = 0; rh < rq.hits.length; rh++) {
+              var rw = rq.hits[rh], rpl = rw.r.sel._plain;
+              if (rpl === undefined) rpl = plainSel(rw.r.sel);
+              if (rpl) hits.push(rw); else dyn.push(rw);
+            }
+            cand = rq.check;
+          } else setCandidates(rs, el, cand, pe);
+        }
       } else setCandidates(rs, el, cand, pe);
     }
     var anc = shadowCount || !cand.length ? null : ancOf(el);
@@ -8278,6 +8936,7 @@
       }
     }
     shadowCtx = svCtx;
+    if (rq && rsxCheckOn) rsxCompare(el, pe, hits, rs);
     if (kept === undefined) {
       if (shadowCount && !pe) innerHits(el, pe, hits);
       if (!hm || hm.gen !== styleGen) { hm = el._hm = { gen: styleGen, m: {} }; if (!el._es) styledNow(el); }
@@ -8288,33 +8947,69 @@
     // the same rules, inline style and presentational attributes give the
     // same declarations: elements alike (a table's rows and cells) share
     // one object, which computeStyle then knows them by (_sid)
-    var ckey = null;
+    var ckey = null, ckPre = '', ckPost = '';
     if (!pe) {
-      ckey = el.localName;
-      for (var hk = 0; hk < hits.length; hk++) ckey += ',' + (hits[hk].r._uid || (hits[hk].r._uid = ++ruleUid)) + ':' + hits[hk].sheet;
-      ckey += '|' + (attrOf(el, 'style') || '');
-      if (el._style) { var est = el._style; for (var eq = 0; eq < est._order.length; eq++) ckey += ';' + est._order[eq] + ':' + est._p[est._order[eq]] + (est._prio[est._order[eq]] ? '!' : ''); }
-      if (el.namespaceURI !== HTML_NS) ckey += '|' + el.namespaceURI;
+      ckPre = el.localName;
+      for (var hk = 0; hk < hits.length; hk++) ckPre += ',' + (hits[hk].r._uid || (hits[hk].r._uid = ++ruleUid)) + ':' + hits[hk].sheet;
+      var ckInl = '|' + (attrOf(el, 'style') || '');
+      if (el._style) { var est = el._style; for (var eq = 0; eq < est._order.length; eq++) ckInl += ';' + est._order[eq] + ':' + est._p[est._order[eq]] + (est._prio[est._order[eq]] ? '!' : ''); }
+      if (el.namespaceURI !== HTML_NS) ckPost += '|' + el.namespaceURI;
       // (of an HTML element only the attributes presentationalHints reads:
       // AG Grid gives every cell a comp-id of its own, so no two cells
       // shared their declarations)
       var html = el.namespaceURI === HTML_NS;
+      // (of an SVG element likewise only the presentation attributes, and
+      // an outer svg's size: a chart's paths differ in d alone, and each
+      // was styled again from the start)
+      var svgEl = el.namespaceURI === SVG_NS, outerSvg = svgEl && el.localName === 'svg';
       for (var ak = 0; ak < el._attrs.length; ak++) {
         var an = el._attrs[ak].name;
-        if (html ? !HINT_ATTRS[an.toLowerCase()] : an === 'class' || an === 'id' || an === 'style' || an.slice(0, 5) === 'data-' || an.slice(0, 5) === 'aria-') continue;
-        ckey += '|' + an + '=' + el._attrs[ak]._v;
+        if (html ? !HINT_ATTRS[an.toLowerCase()] : svgEl ? !SVG_PRES_ATTR[an] && !(outerSvg && (an === 'width' || an === 'height')) : an === 'class' || an === 'id' || an === 'style' || an.slice(0, 5) === 'data-' || an.slice(0, 5) === 'aria-') continue;
+        ckPost += '|' + an + '=' + el._attrs[ak]._v;
       }
       // (a cell's hints come from its table's attributes too)
       if (html && (el.localName === 'td' || el.localName === 'th')) {
         var tb0 = el.parentNode;
         while (tb0 && tb0.nodeType === 1 && tb0.localName !== 'table') tb0 = tb0.parentNode;
-        if (tb0 && tb0.nodeType === 1) ckey += '|t:' + tb0.getAttribute('cellpadding') + ',' + tb0.getAttribute('border');
+        if (tb0 && tb0.nodeType === 1) ckPost += '|t:' + tb0.getAttribute('cellpadding') + ',' + tb0.getAttribute('border');
       }
+      ckey = ckPre + ckInl + ckPost;
       var inl = !!(el._style && el._style._order.length) || !!attrOf(el, 'style');
       if (specCache.gen !== styleGen) specCache = { gen: styleGen, map: {}, n: 0 };
       if (inl && (specInline.gen !== styleGen || specInline.n >= INLINE_KEPT)) { specInline = { gen: styleGen, map: {}, n: 0 }; sharedInline = { gen: styleGen, map: {}, n: 0 }; }
       var hit = (inl ? specInline : specCache).map[ckey];
       if (hit) return hit;
+      // an inline style of a box's own place and size (left, top, width…,
+      // OVERLAY): the declarations without those, which the boxes alike
+      // share with their computed style, and those over them
+      // (computeStyle). A game writes every box whole, each with a place
+      // of its own, and each was styled from the start.
+      var ov = inl && !shadowCount && overlayOn ? inlineOverlay(el, hits) : null;
+      if (ov) {
+        var bk = ckPre + '|~' + ov.rest + ckPost, bmap = ov.rest ? specInline : specCache;
+        var base = bmap.map[bk];
+        if (!base) {
+          base = buildSpec(el, hits, ov.names);
+          Object.defineProperty(base, '_sid', { value: ++specUid, enumerable: false });
+          if (ov.rest) Object.defineProperty(base, '_inl', { value: true, enumerable: false });
+          if (ov.rest || specCache.n < 20000) { bmap.map[bk] = base; bmap.n++; }
+        }
+        var full = {};
+        for (var bn in base) full[bn] = base[bn];
+        for (var on in ov.vals) full[on] = ov.vals[on];
+        // (the inline ones set last, as the cascade sets them)
+        var fseq = {}, nsq = 0;
+        for (var sk in base._seq) { fseq[sk] = base._seq[sk]; if (fseq[sk] > nsq) nsq = fseq[sk]; }
+        for (var on0 in ov.vals) fseq[on0] = ++nsq;
+        Object.defineProperty(full, '_seq', { value: fseq, enumerable: false });
+        Object.defineProperty(full, '_auth', { value: base._auth, enumerable: false });
+        Object.defineProperty(full, '_base', { value: base, enumerable: false });
+        Object.defineProperty(full, '_ov', { value: ov.vals, enumerable: false });
+        Object.defineProperty(full, '_sid', { value: ++specUid, enumerable: false });
+        Object.defineProperty(full, '_inl', { value: true, enumerable: false });
+        specInline.map[ckey] = full; specInline.n++;
+        return full;
+      }
     }
     // (a pseudo-element's declarations come from its rules alone: one
     // object for all with the same rules, as specCache is for elements. A
@@ -8327,7 +9022,73 @@
       if (peSpec.gen !== styleGen) peSpec = { gen: styleGen, map: {}, n: 0 };
       var peHit = peSpec.map[pek];
       if (peHit) { if (scw) { scw.out = peHit; scw.og = styleGen; } return peHit; }
+      var po = buildSpec(el, hits, null, pe);
+      if (peSpec.n < 20000) { Object.defineProperty(po, '_sid', { value: ++specUid, enumerable: false }); peSpec.map[pek] = po; peSpec.n++; if (scw) { scw.out = po; scw.og = styleGen; } }
+      return po;
     }
+    var out = buildSpec(el, hits, null);
+    if (ckey !== null && (inl || specCache.n < 20000)) {
+      Object.defineProperty(out, '_sid', { value: ++specUid, enumerable: false });
+      if (inl) { Object.defineProperty(out, '_inl', { value: true, enumerable: false }); specInline.map[ckey] = out; specInline.n++; }
+      else { specCache.map[ckey] = out; specCache.n++; }
+    }
+    return out;
+  }
+  // the inline declarations of el that are only its own place, size or
+  // look (PATCHED: nothing else is computed from them) with plain values,
+  // which no matched rule sets: { names, vals, rest: the others as text },
+  // or null when there are none
+  // (off for a test to compare with: __webdom.overlay(false))
+  var overlayOn = true;
+  function inlineOverlay(el, hits) {
+    var st = el._style;
+    if (!st) { el.style; st = el._style; }
+    if (!st || !st._order.length) return null;
+    var names = null, vals = null, rest = '';
+    for (var i = 0; i < st._order.length; i++) {
+      var n = st._order[i], v = st._p[n];
+      if (PATCHED[n] && !st._prio[n] && overlayValueOk(v)) {
+        if (!ruleSets(hits, n)) { (names || (names = {}))[n] = 1; (vals || (vals = {}))[n] = v; continue; }
+      }
+      rest += ';' + n + ':' + v + (st._prio[n] ? '!' : '');
+    }
+    // (a logical property in the same style may come after its physical
+    // one and win: the cascade's order then)
+    if (names && /;([a-z-]*-(inline|block)(-[a-z]+)*|(min-|max-)?(inline|block)-size):/.test(rest)) return null;
+    return names ? { names: names, vals: vals, rest: rest } : null;
+  }
+  var ovValOk = Object.create(null), ovValN = 0;
+  function overlayValueOk(v) {
+    var ok = ovValOk[v];
+    if (ok !== undefined) return ok;
+    ok = !(v.indexOf('var(') >= 0 || v.indexOf('%') >= 0 || /^(inherit|initial|unset|revert|revert-layer)$/i.test(v) || /\d(ch|ex|cap|ic|lh|rlh|em|rem)\b|currentcolor|calc|env\(|attr\(/i.test(v));
+    if (ovValN >= 4096) { ovValOk = Object.create(null); ovValN = 0; }
+    ovValOk[v] = ok; ovValN++;
+    return ok;
+  }
+  // whether some matched rule declares n (or a shorthand of it, or all)
+  function ruleSets(hits, n) {
+    for (var h = 0; h < hits.length; h++) {
+      var r = hits[h].r, m = r._dn;
+      if (m === undefined) {
+        m = {};
+        var ds = r.decls;
+        for (var j = 0; j < ds.length; j++) {
+          var nm = ds[j].name;
+          m[nm] = 1;
+          var lh = expandShorthand(nm, ds[j].value);
+          if (lh) for (var k in lh) m[k] = 1;
+          else if (nm === 'all') { for (var pk in PATCHED) m[pk] = 1; }
+        }
+        r._dn = m;
+      }
+      if (m[n] === 1) return true;
+    }
+    return false;
+  }
+  // the declarations from the matched rules (sorted here), the inline
+  // style but the names in skip, and the presentational hints
+  function buildSpec(el, hits, skip, pe) {
     hits.sort(function (a, b) { return (a.ua === b.ua ? 0 : a.ua ? -1 : 1) || (!a.inner === !b.inner ? 0 : a.inner ? -1 : 1) || cmpSpec(a.r.sel.spec, b.r.sel.spec) || a.sheet - b.sheet || a.r.order - b.r.order; });
     // (seq: when each key was last set, for computeStyle to tell a logical
     // longhand and the physical property it maps to apart, the later winning)
@@ -8355,14 +9116,13 @@
         var dp = hits[hp].r.decls;
         for (var jp = 0; jp < dp.length; jp++) if (dp[jp].important) put(dp[jp].name, dp[jp].value, true, hits[hp].ua);
       }
-      if (peSpec.n < 20000) { Object.defineProperty(out, '_sid', { value: ++specUid, enumerable: false }); peSpec.map[pek] = out; peSpec.n++; if (scw) { scw.out = out; scw.og = styleGen; } }
       return out;
     }
     // inline style
     if (el._style || attrOf(el, 'style') !== null) {
       var st = el._style;
       if (!st) { el.style; st = el._style; }
-      for (var q = 0; q < st._order.length; q++) { var nm = st._order[q]; if (!imp[nm]) { out[nm] = st._p[nm]; seq[nm] = ++nseq; auth[nm] = 1; } }
+      for (var q = 0; q < st._order.length; q++) { var nm = st._order[q]; if (skip && skip[nm]) continue; if (!imp[nm]) { out[nm] = st._p[nm]; seq[nm] = ++nseq; auth[nm] = 1; } }
     }
     // !important: author important over inline over normal
     for (var h2 = 0; h2 < hits.length; h2++) {
@@ -8371,14 +9131,9 @@
     }
     if (el._style) {
       var st2 = el._style;
-      for (var q2 = 0; q2 < st2._order.length; q2++) { var n2 = st2._order[q2]; if (st2._prio[n2]) { out[n2] = st2._p[n2]; seq[n2] = ++nseq; auth[n2] = 1; } }
+      for (var q2 = 0; q2 < st2._order.length; q2++) { var n2 = st2._order[q2]; if (skip && skip[n2]) continue; if (st2._prio[n2]) { out[n2] = st2._p[n2]; seq[n2] = ++nseq; auth[n2] = 1; } }
     }
     presentationalHints(el, out);
-    if (ckey !== null && (inl || specCache.n < 20000)) {
-      Object.defineProperty(out, '_sid', { value: ++specUid, enumerable: false });
-      if (inl) { Object.defineProperty(out, '_inl', { value: true, enumerable: false }); specInline.map[ckey] = out; specInline.n++; }
-      else { specCache.map[ckey] = out; specCache.n++; }
-    }
     return out;
   }
   var ruleUid = 0, specUid = 0, styleUid = 0;
@@ -8418,12 +9173,18 @@
     Object.defineProperty(ps, '_ik', { value: k, enumerable: false });
     return k;
   }
+  // the SVG attributes presentationalHints reads (cascade's key: the same)
+  var SVG_PRES = ['fill', 'stroke', 'stroke-width', 'opacity', 'fill-opacity', 'stroke-opacity', 'display', 'visibility', 'transform', 'fill-rule', 'stroke-linecap', 'stroke-linejoin', 'stop-color', 'stop-opacity'];
+  var SVG_PRES_ATTR = {};
+  for (var spi = 0; spi < SVG_PRES.length; spi++) SVG_PRES_ATTR[SVG_PRES[spi]] = 1;
   function presentationalHints(el, out) {
     if (el.namespaceURI === SVG_NS) {
-      var pres = ['fill', 'stroke', 'stroke-width', 'opacity', 'fill-opacity', 'stroke-opacity', 'display', 'visibility', 'transform', 'fill-rule', 'stroke-linecap', 'stroke-linejoin', 'stop-color', 'stop-opacity'];
-      for (var i = 0; i < pres.length; i++) { var v = el.getAttribute(pres[i]); if (v !== null && out[pres[i]] === undefined) out[pres[i]] = v; }
+      // (one pass over the attributes: a path has three or four, and asking
+      // for each of the fourteen names was a fifth of a chart's styling)
+      var sa = el._attrs;
+      for (var i = 0; i < sa.length; i++) { var an = sa[i].name; if (SVG_PRES_ATTR[an] === 1 && out[an] === undefined) out[an] = sa[i]._v; }
       if (el.localName === 'svg') {
-        var w = el.getAttribute('width'), h = el.getAttribute('height');
+        var w = attrOf(el, 'width'), h = attrOf(el, 'height');
         if (w !== null && out.width === undefined) out.width = /^[\d.]+$/.test(w) ? w + 'px' : w;
         if (h !== null && out.height === undefined) out.height = /^[\d.]+$/.test(h) ? h + 'px' : h;
       }
@@ -9343,6 +10104,41 @@
 
   function computeStyle(el, parent, pe, extra) {
     var spec = pe ? cascade(el, pe) : cascade(el);
+    // (an inline place and size over declarations boxes alike share: their
+    // style, shared too, with those computed over it; see cascade1)
+    if (spec && spec._base && !pe && !extra && parent && parent._sid && !(el._waapi && el._waapi.length) && el !== (doc && doc.documentElement)) {
+      // (kept as any shared style: the same inline style under the same
+      // parent style is the same object, which its children share by)
+      if (sharedInline.gen !== styleGen) sharedInline = { gen: styleGen, map: {}, n: 0 };
+      var ok0 = spec._sid + ':' + parent._sid, os = sharedInline.map[ok0];
+      if (os) { el._ia = os._ia0; return os; }
+      os = overlayStyle(computeStyle1(el, parent, null, null, spec._base), spec._ov, parent);
+      if (os) {
+        Object.defineProperty(os, '_ia0', { value: el._ia, enumerable: false });
+        sharedInline.map[ok0] = os; sharedInline.n++;
+        return os;
+      }
+    }
+    return computeStyle1(el, parent, pe, extra, spec);
+  }
+  // a computed style with the plain values vals (PATCHED properties, see
+  // inlineOverlay) computed over it, as patchedStyle does; null when that
+  // cannot be told
+  function overlayStyle(b, vals, parent) {
+    var tr = b.transition, td = b['transition-duration'];
+    if ((tr && tr !== 'none' && /[1-9]/.test(tr)) || (td && /[1-9]/.test(td)) || (b.animation && b.animation !== 'none') || (b['animation-name'] && b['animation-name'] !== 'none')) return null;
+    if (b.display === 'table-cell' || b._boxDep) return null;
+    var out = {};
+    for (var k in b) out[k] = b[k];
+    var ctx = { em: b._fontPx, rem: rootFontPx(), vw: viewport.w / 100, vh: viewport.h / 100 };
+    for (var n in vals) out[n] = computeValue(n, vals[n], ctx, parent, out);
+    if (b._cc) Object.defineProperty(out, '_cc', { value: b._cc, enumerable: false, configurable: true, writable: true });
+    Object.defineProperty(out, '_sid', { value: ++styleUid, enumerable: false });
+    // (the style it is over: the style table's base, wireRefOf)
+    Object.defineProperty(out, '_ovb', { value: b, enumerable: false });
+    return out;
+  }
+  function computeStyle1(el, parent, pe, extra, spec) {
     var skey = null, ikey = null, tookOwn = false;
     // (a pseudo-element's style too: it takes nothing from its element but
     // the element's style, its parent here)
@@ -9935,10 +10731,9 @@
     return [gam(r) * 255, gam(g) * 255, gam(bb) * 255];
   }
 
-  function getComputedStyle(el, pseudo) {
-    if (!el || el.nodeType !== 1) throw new TypeError("Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.");
-    var c = el.isConnected ? computedOf(el) : { display: 'block', _vars: {} };
-    var decl = new CSSStyleDeclaration(null);
+  // every property of a resolved style, as getComputedStyle answers them
+  // (ComputedDecl fills itself so when a read needs more than one value)
+  function fillComputed(decl, el, c, conn, b) {
     for (var k in INITIAL) decl._set(k, c[k] !== undefined ? c[k] : INITIAL[k], '');
     for (var n in c) if (n.charAt(0) !== '_') decl._set(n, c[n], '');
     for (var v in c._vars) if (c._vars[v] !== undefined) decl._set(v, c._vars[v], '');
@@ -9965,14 +10760,13 @@
         decl._set('animation-play-state', aj(function (a) { return a.play; }), '');
       }
     }
-    var b = boxes[el.__id];
-    if (b && el.isConnected && c.display !== 'none') {
+    if (b && conn && c.display !== 'none') {
       if (!/^\d/.test(decl._p.width) || decl._p.width === 'auto') decl._p.width = fmtPx(b[2]);
       if (!/^\d/.test(decl._p.height) || decl._p.height === 'auto') decl._p.height = fmtPx(b[3]);
     }
     // (a subgrid's tracks: "subgrid" and the line names of each line it
     // spans, [] where it names none, as Chromium resolves them)
-    if (el.isConnected && /^(inline-)?grid$/.test(c.display || '') && el.parentNode && el.parentNode.nodeType === 1) {
+    if (conn && /^(inline-)?grid$/.test(c.display || '') && el.parentNode && el.parentNode.nodeType === 1) {
       var pd = computedOf(el.parentNode).display || '';
       if (/^(inline-)?grid(-lanes)?$/.test(pd)) {
         ['columns', 'rows'].forEach(function (ax) {
@@ -9991,8 +10785,60 @@
     // (a number line-height resolves to its px, as Chromium reports it)
     if (/^[\d.]+$/.test(decl._p['line-height'] || '') && c._fontPx) decl._p['line-height'] = fmtPx(parseFloat(decl._p['line-height']) * c._fontPx);
     computedShorthands(decl._p);
-    decl._readonly = true;
-    return styleProxy(decl);
+  }
+  // getComputedStyle's declaration: read-only, and filled with all ~400
+  // properties only when a read needs them all (length, item, cssText,
+  // iteration) or one that is worked out from others (COMPUTED_SPECIAL).
+  // A read of one plain property takes it from the resolved style as the
+  // fill would. Pages read one or two (RangerGames' dom.js position and
+  // display per new element, AG Grid, Floating UI): the whole fill was
+  // most of such a frame's script.
+  var COMPUTED_SPECIAL = {
+    width: 1, height: 1, 'line-height': 1, 'text-decoration-line': 1, 'grid-template-columns': 1, 'grid-template-rows': 1,
+    margin: 1, padding: 1, inset: 1, 'border-width': 1, 'border-style': 1, 'border-color': 1, 'border-top': 1, 'border-right': 1,
+    'border-bottom': 1, 'border-left': 1, border: 1, 'border-radius': 1, gap: 1, overflow: 1
+  };
+  class ComputedDecl extends CSSStyleDeclaration {
+    constructor(el, c, conn, b) { super(null); this._el = el; this._c = c; this._conn = conn; this._b = b; this._filled = false; this._readonly = true; }
+    _fill() {
+      if (this._filled) return;
+      this._filled = true;
+      this._readonly = false;
+      fillComputed(this, this._el, this._c, this._conn, this._b);
+      this._readonly = true;
+      this._el = null;
+    }
+    get _p() { if (!this._filled) this._fill(); return this.__p; }
+    set _p(v) { this.__p = v; }
+    get _order() { if (!this._filled) this._fill(); return this.__order; }
+    set _order(v) { this.__order = v; }
+    getPropertyValue(n) {
+      n = String(n);
+      if (n.slice(0, 2) !== '--') n = n.toLowerCase();
+      if (!this._filled) {
+        var c = this._c;
+        if (!COMPUTED_SPECIAL[n] && n.slice(0, 10) !== 'animation-') {
+          // (the fill's order: INITIAL, the style's own, its variables; a
+          // later one wins, undefined and null are not set)
+          var v, w;
+          if (Object.prototype.hasOwnProperty.call(INITIAL, n)) v = c[n] !== undefined ? c[n] : INITIAL[n];
+          if (n.charAt(0) !== '_' && (w = c[n]) !== undefined && w !== null) v = w;
+          if (c._vars && (w = c._vars[n]) !== undefined && w !== null) v = w;
+          return v === undefined || v === null ? '' : v;
+        }
+      }
+      var r = this.__p[n];
+      if (!this._filled) { this._fill(); r = this.__p[n]; }
+      return r === undefined ? '' : r;
+    }
+  }
+
+  function getComputedStyle(el, pseudo) {
+    if (!el || el.nodeType !== 1) throw new TypeError("Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.");
+    var conn = el.isConnected;
+    var c = conn ? computedOf(el) : { display: 'block', _vars: {} };
+    var b = boxes[el.__id];
+    return styleProxy(new ComputedDecl(el, c, conn, b ? [b[0], b[1], b[2], b[3]] : null));
   }
   // a resolved style's shorthands from its longhands (CSSOM 6.7.2 resolved
   // values, as Chromium serialises them): four sides collapse to fewer when
@@ -10132,7 +10978,7 @@
   function axHasName(n) { return !!(n.getAttribute('aria-label') || n.getAttribute('aria-labelledby') || n.getAttribute('title')); }
   function axGridTable(n) { for (var p = n.parentNode; p && p.nodeType === 1; p = p.parentNode) if (p.localName === 'table') { var r = (p.getAttribute('role') || '').trim(); return r === 'grid' || r === 'treegrid'; } return false; }
   function axRoleOf(n) {
-    var ra = n.getAttribute('role');
+    var ra = attrOf(n, 'role');
     if (ra === null && n._internals && n._internals.role) ra = String(n._internals.role);
     if (ra !== null) {
       var toks = ra.trim().toLowerCase().split(/\s+/);
@@ -10147,13 +10993,15 @@
     }
     return axImplicit(n);
   }
+  // (ARIA names are lower case: read without getAttribute's name folding)
   function axAttr(n, a) {
-    var v = n.getAttribute(a);
+    var v = attrOf(n, a);
     if (v === null && n._internals) { var p = 'aria' + a.slice(5).replace(/(^|-)([a-z])/g, function (m, d, c) { return c.toUpperCase(); }); var iv = n._internals[p]; if (iv !== null && iv !== undefined) v = String(iv); }
     return v;
   }
   function axHidden(n) {
-    if (n.getAttribute('aria-hidden') === 'true' || n.hasAttribute('hidden') && n.getAttribute('hidden') !== 'until-found') return true;
+    var hd;
+    if (attrOf(n, 'aria-hidden') === 'true' || (hd = attrOf(n, 'hidden')) !== null && hd !== 'until-found') return true;
     var cs = computedOf(n);
     return cs.display === 'none' || cs.visibility === 'hidden';
   }
@@ -10184,7 +11032,7 @@
     return out;
   }
   function axRefs(n, attr) {
-    var ids = (n.getAttribute(attr) || '').trim();
+    var ids = (attrOf(n, attr) || '').trim();
     if (!ids) return '';
     var root = n.getRootNode ? n.getRootNode() : doc, out = [];
     ids.split(/\s+/).forEach(function (id) {
@@ -10229,8 +11077,19 @@
   }
   function axTri(v) { return v === 'true' ? 2 : v === 'false' ? 1 : v === 'mixed' ? 3 : 0; }
   // the render tree's `ax` for an element, or null (no role, nothing to say)
+  // an element's aria-* attributes as one object (null: none), so that
+  // axOf's twenty state lookups do not each walk the attribute list
+  function axAriaOf(n) {
+    var a = n._attrs, m = null;
+    for (var i = 0; i < a.length; i++) {
+      var k = a[i].name;
+      if (k.length > 5 && k.charCodeAt(4) === 45 && k.charCodeAt(0) === 97 && k.lastIndexOf('aria-', 0) === 0) { if (!m) m = {}; m[k] = a[i]._v; }
+    }
+    return m;
+  }
+  function axAm(n, am, k) { if (am === undefined) return axAttr(n, k); if (am === null) return null; var v = am[k]; return v === undefined ? null : v; }
   function axOf(n) {
-    if (n.getAttribute('aria-hidden') === 'true') return { h: 1 };
+    if (attrOf(n, 'aria-hidden') === 'true') return { h: 1 };
     var role = axRoleOf(n), o = null;
     if (!role) {
       // static text: a box with text of its own and no role, outside a
@@ -10251,38 +11110,40 @@
     // static text under a role, so what it holds is said as its name)
     if (!nm && (role === 'paragraph' || role === 'listitem')) { nm = axSquash(axText(n, 0, [])); if (nm.length > 2000) nm = nm.slice(0, 2000); }
     if (nm) o.n = nm;
-    var ds = axRefs(n, 'aria-describedby') || axAttr(n, 'aria-description') || (nm !== axSquash(n.getAttribute('title') || '') ? axSquash(n.getAttribute('title') || '') : '');
+    var am = n._internals ? undefined : axAriaOf(n);
+    var ttl = axSquash(attrOf(n, 'title') || '');
+    var ds = axRefs(n, 'aria-describedby') || axAm(n, am, 'aria-description') || (nm !== ttl ? ttl : '');
     if (ds) o.d = ds;
     var t = n.localName;
     // states
-    var ch = axTri(axAttr(n, 'aria-checked'));
+    var ch = axTri(axAm(n, am, 'aria-checked'));
     if (t === 'input' && (n.type === 'checkbox' || n.type === 'radio')) ch = n.indeterminate ? 3 : n.checked ? 2 : 1;
     else if (!ch && /^(checkbox|radio|switch|menuitemcheckbox|menuitemradio)$/.test(role)) ch = 1;
     if (ch) o.ck = ch;
-    var pr2 = axTri(axAttr(n, 'aria-pressed')); if (pr2 && role === 'button') o.pr = pr2;
-    var ex = axTri(axAttr(n, 'aria-expanded'));
+    var pr2 = axTri(axAm(n, am, 'aria-pressed')); if (pr2 && role === 'button') o.pr = pr2;
+    var ex = axTri(axAm(n, am, 'aria-expanded'));
     if (t === 'details') ex = n.open ? 2 : 1;
     else if (t === 'summary' && n.parentNode && n.parentNode.localName === 'details') ex = n.parentNode.open ? 2 : 1;
     if (ex) o.ex = ex;
-    var se = axTri(axAttr(n, 'aria-selected'));
+    var se = axTri(axAm(n, am, 'aria-selected'));
     if (t === 'option') se = n.selected ? 2 : 1;
     if (se === 2) o.se = 2;
-    if (n.disabled || axAttr(n, 'aria-disabled') === 'true') o.di = 1;
+    if (n.disabled || axAm(n, am, 'aria-disabled') === 'true') o.di = 1;
     if (focusableByDefault(n) || n.hasAttribute('tabindex')) o.fo = 1;
-    if ((t === 'dialog' && n._modal) || axAttr(n, 'aria-modal') === 'true') o.mo = 1;
-    var lv = parseInt(axAttr(n, 'aria-level'), 10);
+    if ((t === 'dialog' && n._modal) || axAm(n, am, 'aria-modal') === 'true') o.mo = 1;
+    var lv = parseInt(axAm(n, am, 'aria-level'), 10);
     if (!(lv > 0) && role === 'heading' && /^h[1-6]$/.test(t)) lv = +t.charAt(1);
     if (!(lv > 0) && role === 'heading') lv = 2;
     if (lv > 0) o.lv = lv;
-    var hp = axAttr(n, 'aria-haspopup'); if (hp && hp !== 'false') o.hp = hp === 'true' ? 'menu' : hp;
+    var hp = axAm(n, am, 'aria-haspopup'); if (hp && hp !== 'false') o.hp = hp === 'true' ? 'menu' : hp;
     if (t === 'select' && role === 'combobox') o.hp = 'listbox';
-    var cu = axAttr(n, 'aria-current'); if (cu && cu !== 'false') o.cu = cu;
-    if (n.required || axAttr(n, 'aria-required') === 'true') o.rq = 1;
-    if (axAttr(n, 'aria-invalid') && axAttr(n, 'aria-invalid') !== 'false') o.iv = 1;
-    if (n.readOnly || axAttr(n, 'aria-readonly') === 'true') o.ro = 1;
-    var or = axAttr(n, 'aria-orientation'); if (or) o.or = or;
-    var rd = axAttr(n, 'aria-roledescription'); if (rd) o.rd = rd;
-    var ps = parseInt(axAttr(n, 'aria-posinset'), 10), sz = parseInt(axAttr(n, 'aria-setsize'), 10);
+    var cu = axAm(n, am, 'aria-current'); if (cu && cu !== 'false') o.cu = cu;
+    if (n.required || axAm(n, am, 'aria-required') === 'true') o.rq = 1;
+    if (axAm(n, am, 'aria-invalid') && axAm(n, am, 'aria-invalid') !== 'false') o.iv = 1;
+    if (n.readOnly || axAm(n, am, 'aria-readonly') === 'true') o.ro = 1;
+    var or = axAm(n, am, 'aria-orientation'); if (or) o.or = or;
+    var rd = axAm(n, am, 'aria-roledescription'); if (rd) o.rd = rd;
+    var ps = parseInt(axAm(n, am, 'aria-posinset'), 10), sz = parseInt(axAm(n, am, 'aria-setsize'), 10);
     if (ps > 0) o.ps = ps;
     if (sz > 0) o.sz = sz;
     // value: a field's text, a select's choice, a range's number
@@ -10291,12 +11152,12 @@
       if (val) o.v = val;
     }
     if (role === 'slider' || role === 'spinbutton' || role === 'progressbar' || role === 'separator' && o.fo) {
-      var vn = parseFloat(axAttr(n, 'aria-valuenow')), vmin = parseFloat(axAttr(n, 'aria-valuemin')), vmax = parseFloat(axAttr(n, 'aria-valuemax'));
+      var vn = parseFloat(axAm(n, am, 'aria-valuenow')), vmin = parseFloat(axAm(n, am, 'aria-valuemin')), vmax = parseFloat(axAm(n, am, 'aria-valuemax'));
       if (t === 'input') { vn = parseFloat(n.value); var rb = n.type === 'range' ? rangeBounds(n) : null; if (rb) { vmin = rb[0]; vmax = rb[1]; } }
       if ((t === 'progress' || t === 'meter') && n.hasAttribute('value')) { vn = parseFloat(n.getAttribute('value')); vmin = parseFloat(n.getAttribute('min')) || 0; vmax = parseFloat(n.getAttribute('max')) || 1; }
       if (!isNaN(vn)) o.vn = vn;
       if (!isNaN(vmin) && !isNaN(vmax)) { o.vmin = vmin; o.vmax = vmax; }
-      var vt = axAttr(n, 'aria-valuetext'); if (vt) o.v = vt;
+      var vt = axAm(n, am, 'aria-valuetext'); if (vt) o.v = vt;
     }
     return o;
   }
@@ -10443,6 +11304,9 @@
       Object.defineProperty(cs, '_ownPs', { value: parentStyle, enumerable: false, configurable: true, writable: true });
     }
     o.s = s;
+    // (sMod: s is not its style's own members with only PATCHED ones
+    // changed, wireText)
+    var sMod = false;
     // the individual transforms (translate, rotate, scale) before the
     // transform list, CSS Transforms 2, 6.1: the host takes one list
     if ((cs.translate && cs.translate !== 'none') || (cs.rotate && cs.rotate !== 'none') || (cs.scale && cs.scale !== 'none')) s.transform = individualTransforms(n, cs);
@@ -10462,19 +11326,19 @@
     if (n.localName === 'body' && n.parentNode && n.parentNode.localName === 'html' && n.parentNode.parentNode && n.parentNode.parentNode.nodeType === 9 && (s['overflow-x'] || s['overflow-y'])) {
       var rootCs = computedOf(n.parentNode), firstBody = null;
       for (var bi = 0; bi < n.parentNode._c.length && !firstBody; bi++) if (n.parentNode._c[bi].localName === 'body') firstBody = n.parentNode._c[bi];
-      if (firstBody === n && (rootCs['overflow-x'] || 'visible') === 'visible' && (rootCs['overflow-y'] || 'visible') === 'visible') { delete s['overflow-x']; delete s['overflow-y']; }
+      if (firstBody === n && (rootCs['overflow-x'] || 'visible') === 'visible' && (rootCs['overflow-y'] || 'visible') === 'visible') { delete s['overflow-x']; delete s['overflow-y']; sMod = true; }
     }
-    if (/^(inline-)?grid-lanes$/.test(cs.display)) lanesStyle(cs, s);
+    if (/^(inline-)?grid-lanes$/.test(cs.display)) { lanesStyle(cs, s); sMod = true; }
     // an outer <svg> with one side set and the other auto takes the other
     // from its viewBox (its intrinsic ratio, CSS Images 3, 5.2): the host
     // lays an auto side out as 0 and an icon beside a label overflowed
-    if (o.t === 'svg:svg' && n.ownerSVGElement === null) svgRatioSide(n, cs, s);
+    if (o.t === 'svg:svg' && n.ownerSVGElement === null && svgRatioSide(n, cs, s)) sMod = true;
     // (width does not apply to rows and row groups, height not to columns
     // and column groups, CSS 2 10.2 and 10.5)
     var tblBox = (!cs.float || cs.float === 'none') && cs.position !== 'absolute' && cs.position !== 'fixed' && !(parentStyle && /flex|grid/.test(parentStyle.display || ''));
     if (!tblBox) {}
-    else if (/^table-(row|row-group|header-group|footer-group)$/.test(cs.display)) { delete s.width; delete s['min-width']; delete s['max-width']; }
-    else if (/^table-column(-group)?$/.test(cs.display)) { delete s.height; delete s['min-height']; delete s['max-height']; }
+    else if (/^table-(row|row-group|header-group|footer-group)$/.test(cs.display)) { delete s.width; delete s['min-width']; delete s['max-width']; sMod = true; }
+    else if (/^table-column(-group)?$/.test(cs.display)) { delete s.height; delete s['min-height']; delete s['max-height']; sMod = true; }
     // a text field with an auto width is as wide as its size (20) in
     // characters, as Chromium measures them: 0.6em each and 1.275em more
     // (0.75em more in a monospace font), in a line only: a flex or grid
@@ -10486,6 +11350,7 @@
       var fw = fsz * (0.6 * fsize + (/monospace/.test(cs['font-family'] || '') ? 0.75 : 1.275));
       if (cs['box-sizing'] === 'border-box') fw += (parseFloat(cs['padding-left']) || 0) + (parseFloat(cs['padding-right']) || 0) + (parseFloat(cs['border-left-width']) || 0) + (parseFloat(cs['border-right-width']) || 0);
       s.width = (Math.round(fw * 100) / 100) + 'px';
+      sMod = true;
     }
     // (a percentage-wide text field in a flex row that is itself as wide
     // as its content: the row's width is the field's size in characters,
@@ -10497,6 +11362,7 @@
       var fw2 = fsz2 * (0.6 * fsize2 + (/monospace/.test(cs['font-family'] || '') ? 0.75 : 1.275));
       if (cs['box-sizing'] === 'border-box') fw2 += (parseFloat(cs['padding-left']) || 0) + (parseFloat(cs['padding-right']) || 0) + (parseFloat(cs['border-left-width']) || 0) + (parseFloat(cs['border-right-width']) || 0);
       s['min-width'] = (Math.round(fw2 * 100) / 100) + 'px';
+      sMod = true;
     }
     var a = null;
     for (var i = 0; i < n._attrs.length; i++) {
@@ -10638,11 +11504,11 @@
       var kids0 = kids;
       kids = anonTables(cs.display, kids, kd, o.i, true);
       if (kids !== kids0) { kel = null; kdj = null; }
-      if (cs['border-collapse'] === 'collapse' && /^(inline-)?table$/.test(cs.display)) { pjDelta = deltaOn && !deltaOff; kids = collapseTable(o, kids, true, cs.color, kel); pjDelta = false; kdj = collapseDj; collapseDj = null; }
+      if (cs['border-collapse'] === 'collapse' && /^(inline-)?table$/.test(cs.display)) { pjDelta = deltaOn && !deltaOff; sMod = true; kids = collapseTable(o, kids, true, cs.color, kel); pjDelta = false; kdj = collapseDj; collapseDj = null; }
       var own = JSON.stringify(o);
       var kj = kids.join(',');
       if (deltaOn) {
-        if (kdj) { renderDj = own.slice(1, -1) + (kids.length ? ',"c":[' + kdj.join(',') + ']}' : '}'); if (kel && !pm && !pb && !pa && !fl) renderOwn = { el: n, own: own, kids: kids, kel: kel, cs: cs, st: null }; }
+        if (kdj) { var ownD = wireOn && o.s && typeof o.s === 'object' ? wireText(own, o, cs, parentStyle, sMod) : own; renderDj = ownD.slice(1, -1) + (kids.length ? ',"c":[' + kdj.join(',') + ']}' : '}'); if (kel && !pm && !pb && !pa && !fl) renderOwn = { el: n, own: own, ownW: wireOn ? ownD : null, kids: kids, kel: kel, cs: cs, st: null }; }
         else { unmark(dm0); renderDj = null; }
       }
       // (a table part's own members and children, for its table's border
@@ -11713,9 +12579,15 @@
   var deltaCheck = false;
   //   deltaOff     > 0 under an element known to go whole (a table with
   //                collapsed borders): no delta texts are made under it
+  //   deltaPatch   the host puts a node together from the one it has
+  //                and the values that changed ({"n":N,"m":M,"ps":{..},
+  //                "sa":".."}, DomPaint.patchedNode): __deltaPatch(on)
+  var deltaPatch = false;
   var deltaOn = false, deltaEpoch = 1, deltaSerial = 0, lastDelta = '', renderDj = null, marks = [], deltaOff = 0;
   function deltaOf(k) {
     if (!k.json || deltaOff) { lastDelta = ''; return; }
+    // (the host's node: named by its handle each time, never numbered)
+    if (k.rx) { lastDelta = k.json; return; }
     if (k.sent === deltaEpoch) { lastDelta = '{"r":' + k.n + '}'; return; }
     // (no delta text of its own: its whole text under its number)
     lastDelta = k.dj || '{"n":' + k.n + ',' + k.json.slice(1);
@@ -11726,6 +12598,85 @@
   function unmark(from) {
     for (var i = from; i < marks.length; i++) marks[i].dj = null;
     marks.length = from;
+  }
+  // THE STYLE TABLE (__wire): a delta host that keeps a table of styles is
+  // sent each node's style as a reference. A style's members that place
+  // or size a box (PATCHED: a game writes each box's left and top of
+  // its own, so no two styles were alike) stay with the node; the rest,
+  // shared by many boxes, is a base sent once in an epoch under a number:
+  // "s":7, or "s":[7,{"left":"3px","top":"9px"}]. The bases a render
+  // made go before its root, "st":{"e":epoch,"d":[[7,{...}],...]}. Only
+  // the delta texts (dj) carry references; a part that goes whole has its
+  // style written out, as without the table. The style attribute is left
+  // out of them: its declarations are in the style.
+  var wireOn = false, wireEpoch = 0, wireBase = null, wireN = 0, wireMemo = null, wireMemoN = 0, wireDefs = [];
+  // (the members a box's own inline style puts over a shared style,
+  // inlineOverlay's PATCHED, are the ones that stay with the node)
+  var WIRE_LIST = null;
+  function wireReset() { wireEpoch = deltaEpoch; wireBase = Object.create(null); wireN = 0; wireMemo = Object.create(null); wireMemoN = 0; wireDefs = []; }
+  // s (its text sT) as the table names it: a number, or [number, the
+  // placing members], as text
+  function wireRef(s, sT) {
+    if (wireEpoch !== deltaEpoch) wireReset();
+    var r = wireMemo[sT];
+    if (r !== undefined) return r;
+    var b = {}, ov = null;
+    for (var k in s) { if (PATCHED[k] === 1) { if (!ov) ov = {}; ov[k] = s[k]; } else b[k] = s[k]; }
+    var bT = JSON.stringify(b), id = wireBase[bT];
+    if (id === undefined) { id = wireBase[bT] = ++wireN; wireDefs.push('[' + id + ',' + bT + ']'); }
+    r = ov ? '[' + id + ',' + JSON.stringify(ov) + ']' : String(id);
+    if (++wireMemoN > 8192) { wireMemo = Object.create(null); wireMemoN = 1; }
+    wireMemo[sT] = r;
+    return r;
+  }
+  // the same by the style s is copied from: the boxes of one shared style
+  // (cs, or the style a patch or an inline overlay is over: _dfrom, _ovb)
+  // under one parent style have one base; only the members of PATCHED
+  // differ
+  function wireRefOf(s, cs, ps) {
+    if (wireEpoch !== deltaEpoch) wireReset();
+    var df = cs._dfrom, K = df && df.base ? df.base : cs._ovb || cs, c = K._wb, id;
+    if (c && c.ps === ps && c.ep === wireEpoch && c.tb === wireBase) id = c.id;
+    else {
+      var b = {};
+      for (var k in s) if (PATCHED[k] !== 1) b[k] = s[k];
+      var bT = JSON.stringify(b);
+      id = wireBase[bT];
+      if (id === undefined) { id = wireBase[bT] = ++wireN; wireDefs.push('[' + id + ',' + bT + ']'); }
+      if (!c) { c = {}; Object.defineProperty(K, '_wb', { value: c, enumerable: false, configurable: true, writable: true }); }
+      c.ps = ps; c.ep = wireEpoch; c.tb = wireBase; c.id = id;
+    }
+    if (!WIRE_LIST) WIRE_LIST = Object.keys(PATCHED);
+    var ov = null;
+    for (var i = 0; i < WIRE_LIST.length; i++) { var v = s[WIRE_LIST[i]]; if (v !== undefined) { if (!ov) ov = {}; ov[WIRE_LIST[i]] = v; } }
+    var r = ov ? '[' + id + ',' + JSON.stringify(ov) + ']' : String(id);
+    if (wireCheck) { wireCheck.n++; if (sortedJson(wireRef(s, JSON.stringify(s))) !== sortedJson(r)) { wireCheck.bad++; if (!wireCheck.first) wireCheck.first = r + ' /// ' + JSON.stringify(s); } }
+    return r;
+  }
+  var wireCheck = null;
+  // a node's text (own: o's JSON) with its style a reference and without
+  // its style attribute. (o's members are i, t, s in that order: its
+  // style is the first ,"s": after the tag)
+  function wireText(own, o, cs, ps, mod) {
+    var s = o.s, a = o.a, sT = JSON.stringify(s), at = own.indexOf(',"s":' + sT);
+    if (at < 0) return own;
+    var post = own.slice(at + 5 + sT.length);
+    if (a && typeof a.style === 'string') {
+      var sa = '"style":' + JSON.stringify(a.style), j = post.indexOf(sa);
+      if (j >= 0) {
+        var e = j + sa.length;
+        if (post.charCodeAt(j - 1) === 44) j--; else if (post.charCodeAt(e) === 44) e++;
+        post = post.slice(0, j) + post.slice(e);
+      }
+    }
+    return own.slice(0, at) + ',"s":' + (mod || !cs ? wireRef(s, sT) : wireRefOf(s, cs, ps)) + post;
+  }
+  // the bases made since the last delta render, for its text
+  function wireTable() {
+    if (!wireOn || wireEpoch !== deltaEpoch || !wireDefs.length) return '';
+    var t = ',"st":{"e":' + deltaEpoch + ',"d":[' + wireDefs.join(',') + ']}';
+    wireDefs = [];
+    return t;
   }
   // n's kept render (k) with a new transform: el.style.transform was the
   // only change at or under n since (attrChanged), and its style is the one
@@ -11764,6 +12715,17 @@
       if (plain) cut.kd = cut.kj;
     }
     var open = cut.pre + b + cut.mid + st + cut.post, dm = marks.length, kd = cut.kd;
+    // (with the style table: the delta text from the node's own text with
+    // its style named, cut the same way around the one value)
+    var cutW = null, openW = null;
+    if (fp.ownW && wireOn && wireEpoch === deltaEpoch) {
+      cutW = fp.cutW && fp.cutW.pn === pn ? fp.cutW : null;
+      if (!cutW) {
+        var w0 = fp.ownW, tw = '"' + pn + '":' + JSON.stringify(a), iw = w0.indexOf(tw);
+        if (iw >= 0 && w0.indexOf(tw, iw + 1) < 0) cutW = { pn: pn, pre: w0.slice(0, iw) + '"' + pn + '":"', post: '"' + w0.slice(iw + tw.length, -1) };
+      }
+      if (cutW) openW = cutW.pre + b + cutW.post;
+    }
     if (kd === null) {
       var kids = fp.kids, kel = fp.kel, kdj = [];
       for (var q = 0; q < kids.length; q++) {
@@ -11777,9 +12739,13 @@
       kd = ',"c":[' + kdj.join(',') + ']}';
     }
     var json = open + cut.kj;
-    var nk = { sg: styleGen, rv: n._rv, ps: parentStyle, sc: sc, json: json, ct: false, parts: null, fp: { el: n, own: open + '}', kids: fp.kids, kel: fp.kel, cs: cs, st: st, cut: cut }, _dm: dm };
+    var nk = { sg: styleGen, rv: n._rv, ps: parentStyle, sc: sc, json: json, ct: false, parts: null, fp: { el: n, own: open + '}', ownW: openW !== null ? openW + '}' : null, kids: fp.kids, kel: fp.kel, cs: cs, st: st, cut: cut, cutW: cutW }, _dm: dm };
     nk.n = ++deltaSerial;
-    nk.dj = '{"n":' + nk.n + ',' + open.slice(1) + kd;
+    // (a host that takes patched nodes, __deltaPatch: the node it has of
+    // n under the last number, with the one value and the style attribute
+    // written over; the children are the same texts)
+    if (deltaPatch && openW === null && kd === cut.kd && k.n && k.sent === deltaEpoch && !fastCheck) nk.dj = '{"n":' + nk.n + ',"m":' + k.n + ',"ps":{"' + pn + '":"' + b + '"},"sa":"' + st + '"}';
+    else nk.dj = '{"n":' + nk.n + ',' + (openW !== null ? openW : open).slice(1) + kd;
     nk.sent = 0; nk.de = deltaEpoch;
     n._rjl = nk; n._rj = nk;
     deltaOf(nk);
@@ -12315,6 +13281,12 @@
     var vk = 0;
     for (var vi = 0; vi < src.length && vk < VIRT_MIN; vi++) if (src[vi]._attrs !== undefined) vk++;
     if (vk < VIRT_MIN) return virtDrop(n);
+    // (with RX, children all absolutely or fixed placed: the host renders
+    // such a box itself, its children told, rxTell; no rows left out)
+    var outOnly = rxOn;
+    for (var oi = 0; oi < src.length && outOnly; oi++) if (src[oi]._attrs !== undefined) { var op = computedOf(src[oi]).position; outOnly = op === 'absolute' || op === 'fixed'; }
+    if (outOnly) { n._rxOut = true; return virtDrop(n); }
+    if (n._rxOut) n._rxOut = false;
     var tbl = cs.display === 'table-row-group';
     if (!tbl && !/^(block|flow-root|list-item)$/.test(cs.display)) return virtDrop(n);
     if (!tbl && !virtWidthStands(n)) return virtDrop(n);
@@ -12486,6 +13458,17 @@
         return moved;
       }
     }
+    // (the host renders it, RX)
+    if (rxOn && n.nodeType === 1) {
+      var rxj = rxRender(n, parentStyle);
+      if (rxj !== null) {
+        var xk = { sg: styleGen, rv: n._rv, ps: parentStyle, sc: sc, json: rxj, ct: false, parts: null, fp: null, rx: 1, n: 0, dj: null, sent: 0, de: deltaEpoch };
+        if (deltaOn) n._rjl = xk;
+        n._rj = xk;
+        if (deltaOn) deltaOf(xk); else lastDelta = '';
+        return rxj;
+      }
+    }
     var t0 = ctrTouch;
     renderParts = null; renderDj = null; renderOwn = null;
     var dm = marks.length;
@@ -12499,7 +13482,12 @@
       // what the host has of it holds, under the number it had)
       var was = n._rjl;
       if (was && was.de === deltaEpoch && was.json === json) { nk.n = was.n; nk.dj = was.dj; nk.sent = was.sent; marks.length = dm; }
-      else { nk.n = json ? ++deltaSerial : 0; nk.dj = json && renderDj !== null && typeof r === 'string' ? '{"n":' + nk.n + ',' + renderDj : null; nk.sent = 0; }
+      else {
+        nk.n = json ? ++deltaSerial : 0; nk.dj = json && renderDj !== null && typeof r === 'string' ? '{"n":' + nk.n + ',' + renderDj : null; nk.sent = 0;
+        // (a node rendered as an object, an inline <svg> or a canvas,
+        // with the style table: its text with its style named)
+        if (json && wireOn && r && typeof r === 'object' && r.s && typeof r.s === 'object' && !deltaOff) { var wj = wireText(json, r, null, null, true); if (wj !== json) nk.dj = '{"n":' + nk.n + ',' + wj.slice(1); }
+      }
       nk.de = deltaEpoch;
       n._rjl = nk;
     }
@@ -12766,10 +13754,12 @@
   function render(delta) {
     if (!doc || !doc.documentElement) return JSON.stringify({ v: generation, root: null });
     flushTree();
+    rxFrame();
     ctr = {}; qDepth = 0;
     marks = []; deltaOff = 0;
     var root = renderJson(doc.documentElement, null);
     var rk = doc.documentElement._rj, dmr = marks.length, topsJson = '';
+    if (rxCheckOn && rxOn && root) rxCompare(root);
     // an editing host's caret, over everything (the top layer's place)
     var cb = editCaretBox();
     caretDrawn = cb ? JSON.stringify(cb) : null;
@@ -12807,7 +13797,8 @@
     }
     var gone = goneEls ? ',"gone":' + goneEls : '';
     goneEls = 0;
-    return '{"v":' + generation + gone + ',"w":' + JSON.stringify(viewport.w) + ',"h":' + JSON.stringify(viewport.h) + ',"root":' + (root || 'null') + ',"title":' + JSON.stringify(doc.title) + (doc.compatMode === 'BackCompat' ? ',"quirks":true' : '') + (browserFonts ? ',"fm":"' + (browserFonts === 'measure' ? 'measure' : 'browser') + '"' : '') + '}';
+    var stT = delta ? wireTable() : '';
+    return '{"v":' + generation + gone + ',"w":' + JSON.stringify(viewport.w) + ',"h":' + JSON.stringify(viewport.h) + stT + ',"root":' + (root || 'null') + ',"title":' + JSON.stringify(doc.title) + (doc.compatMode === 'BackCompat' ? ',"quirks":true' : '') + (browserFonts ? ',"fm":"' + (browserFonts === 'measure' ? 'measure' : 'browser') + '"' : '') + '}';
   }
 
   // ---- input from the host -------------------------------------------------
@@ -14562,6 +15553,11 @@
   };
   // a test's: each text movedJson gives is compared with renderNode's
   G.__fastRenderCheck = function (on) { if (on === undefined) return fastCheck ? JSON.stringify(fastCheck) : ''; fastCheck = on ? { n: 0, bad: 0, first: '' } : null; return ''; };
+  // a test's: each style wireRefOf names by the style it is copied from is
+  // compared with the one its text gives
+  G.__wireCheck = function (on) { if (on === undefined) return wireCheck ? JSON.stringify(wireCheck) : ''; wireCheck = on ? { n: 0, bad: 0, first: '' } : null; return ''; };
+  G.__wire = function (on) { on = !!on; if (on !== wireOn) { wireOn = on; deltaEpoch++; } return String(wireOn); };
+  G.__deltaPatch = function (on) { on = !!on; if (on !== deltaPatch) { deltaPatch = on; deltaEpoch++; } return String(deltaPatch); };
   G.__deltaRender = function (on) { on = !!on; if (on !== deltaOn) { deltaOn = on; deltaEpoch++; } return String(deltaOn); };
   // the host draws text with the browser's own faces (the playground's
   // canvas), so a line of Arial has Arial's height, not that of the Open
@@ -14621,7 +15617,38 @@
     return 'ok';
   };
   G.__querySelector = function (s) { var e = doc && doc.querySelector(s); return e ? String(e.__id) : ''; };
-  G.__webdom = { restyleAll: function () { changed(); }, computedOf: computedOf, cascade: cascade, parseSelectorList: parseSelectorList, normalizeColor: normalizeColor, resolveURL: resolveURL, nodeById: nodeById, lengthPx: lengthPx };
+  G.__webdom = {
+    // Rust style (DomStyle): on when the host answers; rsxCheck(true) puts
+    // webapi.js's own matching beside it and rsxCheck() gives the elements
+    // where they differed
+    rsx: function (on) {
+      if (on === undefined) return rsxOn;
+      var ok = false;
+      if (on && typeof __hostSync === 'function') { try { ok = __hostSync('\u0001SP') === 'rsx1'; } catch (e) { ok = false; } }
+      rsxOn = ok; rsxDoc = null; rsxRs = null; rsxOps = [];
+      changed();
+      return rsxOn;
+    },
+    // computed styles and render nodes in Rust (RX, needs rsx on);
+    // rxCheck(true) renders each frame again without it and compares,
+    // rxCheck() gives what differed and the counts
+    rx: function (on) {
+      if (on === undefined) return rxOn;
+      var ok = false;
+      if (on && rsxOn) { try { ok = __hostSync('\u0001SV\u00010') !== ''; } catch (e) { ok = false; } }
+      rxOn = ok; rsxDoc = null; rsxRs = null; rsxOps = []; rxUsed = false;
+      changed();
+      return rxOn;
+    },
+    // (the selectors DomStyle leaves to webapi.js for el)
+    rxLeft: function (el) { var q = rsxOn ? rsxQuery(el, scopeRuleSet(doc, null), '') : null; return q ? q.check.map(function (w) { return w.r.sel.text || JSON.stringify(w.r.sel).slice(0, 120); }) : null; },
+    rxHoleDelta: function (on) { rxHoleDelta = !!on; return rxHoleDelta; },
+    rxCheck: function (on) { if (on !== undefined) { rxCheckOn = !!on; rxBad = []; rxChecked = 0; if (on) changed(); return rxCheckOn; } return JSON.stringify({ bad: rxBad, checked: rxChecked, n: rxN }); },
+    rsxCheck: function (on) { if (on !== undefined) { rsxCheckOn = !!on; rsxBad = []; if (on) changed(); return rsxCheckOn; } return JSON.stringify({ bad: rsxBad, n: rsxN }); },
+    restyleAll: function () { changed(); }, overlay: function (on) { overlayOn = !!on; changed(); }, computedOf: computedOf, cascade: cascade, parseSelectorList: parseSelectorList, normalizeColor: normalizeColor, resolveURL: resolveURL, nodeById: nodeById, lengthPx: lengthPx,
+    // an <svg>'s markup as the render tree gives it ("svg"): a host that
+    // changed only a shape in it sends this as a paint patch
+    svgMarkup: function (n) { return serializeSvg(n, true); } };
 
   // ---- interfaces and members found missing against Chromium --------------
   // (bench/cases/webapi-survey: the globals and prototype members UI
@@ -15100,6 +16127,7 @@
       });
     };
   })();
+
 
   // until __page: an empty document
   doc = newDocument('about:blank');

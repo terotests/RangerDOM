@@ -13,7 +13,8 @@ use cer::Engine;
 use ranger::cell::RefCell;
 use std::collections::HashMap;
 
-use rangerdom_json::{JsonParser, JsonValue};
+use rangerdom_json::{JsonMemo, JsonNodes, JsonParser, JsonValue};
+use rangerdom_style::DomStyle;
 use rangerdom_view::{DomBoxes, DomPaint, DomSvgDocs, DomView};
 use rangerevg::{EVGA11yFromTree, EVGA11yTree, EVGDisplayList, EVGElement, EVGLayout, EVGRetain, EVGUnit};
 
@@ -159,14 +160,21 @@ pub struct Playground {
     /// the next render sends the whole page (after a restore this host
     /// has nothing of it)
     whole: bool,
+    /// the page's elements and rule matching for webapi.js (RangerDOM's
+    /// style in Rust, __webdom.rsx); a restored page tells a new one
+    style: Rc<std::cell::RefCell<DomStyle>>,
 }
 
 impl Playground {
     pub fn new() -> Playground {
         let engine = Playground::tuned(Engine::new());
         let synced = Playground::new_synced(800.0, 600.0);
-        let mut pg = Playground { engine: engine, scripts: Vec::new(), units: Vec::new(), errors: Vec::new(), w: 800.0, h: 600.0, page_json: String::new(), last_gen: String::new(), root: None, lay: None, synced: synced, whole: false };
-        pg.engine.vm.set_host_sync(Box::new(SyncLayout { s: pg.synced.clone() }));
+        let style = Rc::new(std::cell::RefCell::new(DomStyle::new()));
+        synced.borrow_mut().kept.ext = Some(style.borrow().ext.clone());
+        // (the nodes kept by number shared with the style: holes as deltas)
+        style.borrow().ext.borrow_mut().shares = true;
+        let mut pg = Playground { engine: engine, scripts: Vec::new(), units: Vec::new(), errors: Vec::new(), w: 800.0, h: 600.0, page_json: String::new(), last_gen: String::new(), root: None, lay: None, synced: synced, whole: false, style: style };
+        pg.engine.vm.set_host_sync(Box::new(SyncLayout { s: pg.synced.clone(), style: pg.style.clone() }));
         pg
     }
     /// an engine as the playground runs it: the register machine, the
@@ -174,6 +182,8 @@ impl Playground {
     fn tuned(mut engine: Engine) -> Engine {
         // (CEr's register machine: its default is still the stack machine)
         engine.vm.regs = true;
+        // CEr's baseline JIT (pg_jit; a build with the `wjit` feature)
+        JIT.with(|j| { let (on, min) = j.get(); engine.vm.jit_on = on && cer::wjit::available(); engine.vm.jit_min = min; });
         // Date's local time zone: the browser's (pg_set_time_zone), kept
         // over pg_reset
         TIME_ZONE.with(|z| { let z = z.borrow(); if !z.is_empty() { engine.set_time_zone(&z); } });
@@ -222,7 +232,10 @@ impl Playground {
         }
         self.engine = Playground::tuned(engine);
         self.synced = Playground::new_synced(w, h);
-        self.engine.vm.set_host_sync(Box::new(SyncLayout { s: self.synced.clone() }));
+        self.style = Rc::new(std::cell::RefCell::new(DomStyle::new()));
+        self.synced.borrow_mut().kept.ext = Some(self.style.borrow().ext.clone());
+        self.style.borrow().ext.borrow_mut().shares = true;
+        self.engine.vm.set_host_sync(Box::new(SyncLayout { s: self.synced.clone(), style: self.style.clone() }));
         self.w = w;
         self.h = h;
         self.root = None;
@@ -299,6 +312,22 @@ impl Playground {
         self.exec("__installDefaults()");
         // sizes read after a change are laid out at once (SyncLayout)
         self.exec("__syncLayout(true)");
+        // the rules matched by RangerDOM's style in Rust (DomStyle): PG_RSX=1
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::env::var("PG_RSX").map(|v| v == "1").unwrap_or(false) {
+            self.exec("__webdom.rsx(true)");
+            if std::env::var("PG_RSXCHECK").is_ok() {
+                self.exec("__webdom.rsxCheck(true)");
+            }
+            // and the computed styles and render nodes too (RX): PG_RX=1,
+            // PG_RXCHECK compares each render with webapi.js's own
+            if std::env::var("PG_RX").map(|v| v == "1").unwrap_or(false) {
+                self.exec("__webdom.rx(true)");
+                if std::env::var("PG_RXCHECK").is_ok() {
+                    self.exec("__webdom.rxCheck(true)");
+                }
+            }
+        }
         // a render sends what changed since the last one (Kept::resolve)
         #[cfg(not(target_arch = "wasm32"))]
         let delta = std::env::var("PG_NODELTA").is_err();
@@ -306,6 +335,25 @@ impl Playground {
         let delta = true;
         if delta {
             self.exec("__deltaRender(true)");
+            // (a box whose transform or opacity alone changed comes as the
+            // values over the node kept: Kept::node_of; PG_NOPATCH off)
+            #[cfg(not(target_arch = "wasm32"))]
+            let patch = std::env::var("PG_NOPATCH").is_err();
+            #[cfg(target_arch = "wasm32")]
+            let patch = true;
+            if patch {
+                self.exec("__deltaPatch(true)");
+            }
+            // (a part RX leaves to webapi.js, a hole, comes as a delta too:
+            // DomStyle puts in the nodes it names from those kept, by_n;
+            // PG_NOHOLEDELTA whole)
+            #[cfg(not(target_arch = "wasm32"))]
+            let holes = std::env::var("PG_NOHOLEDELTA").is_err();
+            #[cfg(target_arch = "wasm32")]
+            let holes = true;
+            if holes {
+                self.exec("__webdom.rxHoleDelta(true)");
+            }
         }
         // virtual rows: this host renders again before it paints when they
         // ask (layout); PG_NOVIRT renders every child
@@ -483,6 +531,7 @@ fn lay_out(page: &Rc<RefCell<JsonValue>>, delta: bool, w: f64, h: f64, kept: &mu
     lap("share");
     kept.svgs.borrow_mut().frame();
     // (the last field's caret goes, its element may be kept)
+    let had_caret = kept.deco.is_some();
     if let Some(old) = kept.deco.take() {
         let ks: Vec<_> = old.borrow().children.iter().filter(|c| { let n = c.borrow().class_name.clone(); n != "mfd-dcaret" && n != "mfd-dsel" }).cloned().collect();
         old.borrow_mut().children = ks;
@@ -500,7 +549,7 @@ fn lay_out(page: &Rc<RefCell<JsonValue>>, delta: bool, w: f64, h: f64, kept: &mu
     // text (DomView::decorate)
     // (a delta's tree is under "root", resolved to the whole page)
     let top = if page.borrow().has("root") { page.borrow().get("root") } else { page.clone() };
-    let ff = DomView::focusedField(&top);
+    let ff = if had_caret || kept.caret_named { DomView::focusedField(&top) } else { Rc::new(RefCell::new(JsonValue::new())) };
     if ff.borrow().kind == 5 {
         let fid = format!("mfd-xd-0-{}", ff.borrow().getText("i"));
         if let Some(fe) = find_el(&b, &fid) {
@@ -610,6 +659,10 @@ fn find_el(el: &Rc<RefCell<EVGElement>>, id: &str) -> Option<Rc<RefCell<EVGEleme
 struct Kept {
     /// the field decorate drew a caret or selection on last time
     deco: Option<Rc<RefCell<EVGElement>>>,
+    /// the page text being laid out names a caret: without it, and without
+    /// a caret drawn last time, no node has one and the tree is not walked
+    /// for it (DomView::focusedField walked all of AG Grid's 2 400 nodes)
+    caret_named: bool,
     svgs: Rc<RefCell<DomSvgDocs>>,
     /// the boxes the page has: what DomView::boxesSince sends is what
     /// changed since (PG_FULLBOXES: all of them every time)
@@ -644,6 +697,21 @@ struct Kept {
     /// elements mostly share a few styles (10 000 table rows: 90 000 style
     /// objects, 23 different), each kept apart was ~1.8 KB.
     pool: HashMap<u64, Rc<RefCell<JsonValue>>>,
+    /// the parser's styles by their text (JsonMemo "s"): the same text is
+    /// the same object as it is read, so pool_style hashes only a style it
+    /// has not met (AG Grid: 1 200 new nodes a step, a few dozen styles)
+    memo: Rc<RefCell<JsonMemo>>,
+    /// the style objects pool_style has met (by address, the object held so
+    /// the address stays its own) and the pooled object in their place;
+    /// cleared when the pool is pruned
+    met: HashMap<usize, (Rc<RefCell<JsonValue>>, Rc<RefCell<JsonValue>>)>,
+    /// the render nodes DomStyle built (RX, __webdom.rx): a page's
+    /// {"rx": n} is the node kept there under n
+    ext: Option<Rc<RefCell<JsonNodes>>>,
+    /// DomStyle's nodes met before (by address, held): one met again is
+    /// the same node with the same under it (DomStyle builds a new node for
+    /// each change), not counted fresh or pooled again
+    rx_seen: HashMap<usize, Rc<RefCell<JsonValue>>>,
 }
 
 /// a delta page put together is the whole page (but for the numbers, "n")
@@ -757,7 +825,7 @@ impl Kept {
         let off = std::env::var("PG_NORETAIN").is_ok();
         #[cfg(target_arch = "wasm32")]
         let off = false;
-        Kept { deco: None, svgs: svgs, boxes: Rc::new(RefCell::new(DomBoxes::new())), #[cfg(not(target_arch = "wasm32"))] mirror: HashMap::new(), nodes: HashMap::new(), styles: HashMap::new(), seen: 0, same: 0, off: off, unused: 0, noted: false, hits0: 0, misses0: 0, by_n: HashMap::new(), epoch: 0, total: 0, fresh: 0, live: 0, since_prune: 0, root: None, pool: HashMap::new() }
+        Kept { deco: None, caret_named: true, svgs: svgs, boxes: Rc::new(RefCell::new(DomBoxes::new())), #[cfg(not(target_arch = "wasm32"))] mirror: HashMap::new(), nodes: HashMap::new(), styles: HashMap::new(), seen: 0, same: 0, off: off, unused: 0, noted: false, hits0: 0, misses0: 0, by_n: HashMap::new(), epoch: 0, total: 0, fresh: 0, live: 0, since_prune: 0, root: None, pool: HashMap::new(), memo: Rc::new(RefCell::new(JsonMemo::new("s"))), met: HashMap::new(), ext: None, rx_seen: HashMap::new() }
     }
     /// a delta page (webapi.js renderJson): each node it names ({"r": n})
     /// is the node kept under that number, each node with a number is kept.
@@ -767,10 +835,13 @@ impl Kept {
         let epoch = page.borrow().getInt("d", 0);
         if epoch != self.epoch {
             self.by_n = HashMap::new();
+            self.shared_reset();
             self.styles = HashMap::new();
             self.nodes = HashMap::new();
             self.root = None;
             self.pool = HashMap::new();
+            self.rx_seen = HashMap::new();
+            self.met = HashMap::new();
             self.total = 0;
             self.live = 0;
             self.epoch = epoch;
@@ -783,6 +854,7 @@ impl Kept {
         }
         let Some(r) = self.node_of(&root) else {
             self.by_n = HashMap::new();
+            self.shared_reset();
             self.root = None;
             return None;
         };
@@ -824,6 +896,9 @@ impl Kept {
         }
         if (self.fresh > 0 && (self.by_n.len() < 4096 || self.by_n.len() > self.live + self.live / 8)) || self.since_prune >= 32 {
             self.since_prune = 0;
+            // (the copy shared with the style let go of first: what holds a
+            // node is the page, or the style's nodes)
+            let shared = self.shared_reset();
             for _ in 0..8 {
                 let before = self.by_n.len();
                 self.by_n.retain(|_, v| Rc::strong_count(v) > 1);
@@ -831,7 +906,14 @@ impl Kept {
                     break;
                 }
             }
+            if shared {
+                if let Some(ext) = self.ext.as_ref() {
+                    ext.borrow_mut().by_n = self.by_n.clone();
+                }
+            }
             self.styles.retain(|_, v| Rc::strong_count(&v.1) > 1);
+            self.rx_seen.retain(|_, v| Rc::strong_count(v) > 1);
+            self.met = HashMap::new();
             self.pool.retain(|_, v| Rc::strong_count(v) > 1);
             self.live = self.by_n.len();
         }
@@ -851,14 +933,29 @@ impl Kept {
         if s.borrow().kind != 5 {
             return;
         }
-        let hs = hash_value(&s);
-        if let Some(p) = self.pool.get(&hs) {
-            if !Rc::ptr_eq(p, &s) && same_value(p, &s) {
+        // (an object read for this text before: pooled then, or the one
+        // pooled in its place is the object the memo gives)
+        let at = Rc::as_ptr(&s) as usize;
+        if let Some((_, p)) = self.met.get(&at) {
+            if !Rc::ptr_eq(p, &s) {
                 let keep = p.clone();
                 n.borrow_mut().put("s", keep);
             }
             return;
         }
+        if self.met.len() >= 16384 {
+            self.met = HashMap::new();
+        }
+        let hs = hash_value(&s);
+        if let Some(p) = self.pool.get(&hs) {
+            if !Rc::ptr_eq(p, &s) && same_value(p, &s) {
+                let keep = p.clone();
+                self.met.insert(at, (s.clone(), keep.clone()));
+                n.borrow_mut().put("s", keep);
+            }
+            return;
+        }
+        self.met.insert(at, (s.clone(), s.clone()));
         self.pool.insert(hs, s);
     }
     /// pool_style for n and every node under it (sent whole)
@@ -889,13 +986,105 @@ impl Kept {
         }
         count
     }
+    /// a node kept under its delta number (and in the copy the style
+    /// shares, JsonNodes.by_n, when it asks for one)
+    fn keep_n(&mut self, num: i64, n: &Rc<RefCell<JsonValue>>) {
+        self.by_n.insert(num, n.clone());
+        if let Some(ext) = self.ext.as_ref() {
+            if ext.borrow().shares {
+                ext.borrow_mut().by_n.insert(num, n.clone());
+            }
+        }
+    }
+    /// the shared copy emptied (true: the style asks for one)
+    fn shared_reset(&mut self) -> bool {
+        if let Some(ext) = self.ext.as_ref() {
+            if ext.borrow().shares {
+                ext.borrow_mut().by_n = HashMap::new();
+                return true;
+            }
+        }
+        false
+    }
+    /// what node_of does for a node sent whole (counted fresh, its styles
+    /// pooled), for DomStyle's nodes it has not met
+    fn rx_new(&mut self, n: &Rc<RefCell<JsonValue>>) {
+        if n.borrow().kind != 5 {
+            return;
+        }
+        let at = Rc::as_ptr(n) as usize;
+        if self.rx_seen.contains_key(&at) {
+            return;
+        }
+        self.rx_seen.insert(at, n.clone());
+        if n.borrow().keyAt("i") >= 0 {
+            self.fresh += 1;
+        }
+        // (a node of a hole webapi.js rendered as a delta: kept by its number)
+        let num = n.borrow().getInt("n", -1);
+        if num >= 0 {
+            self.keep_n(num, n);
+        }
+        self.pool_style(n);
+        let c = n.borrow().get("c");
+        if c.borrow().kind == 4 {
+            let kids = c.borrow().items.clone();
+            for k in kids.iter() {
+                self.rx_new(k);
+            }
+        }
+    }
+    /// the node DomStyle built that {"rx": n} names (none: not kept)
+    fn ext_of(&self, n: &Rc<RefCell<JsonValue>>) -> Option<Rc<RefCell<JsonValue>>> {
+        let ext = self.ext.as_ref()?;
+        let h = n.borrow().getInt("rx", -1);
+        let got = ext.borrow().map.get(&h).cloned();
+        got
+    }
+    /// a whole page's {"rx": n} put in (one not kept: null)
+    fn ext_in(&self, n: &Rc<RefCell<JsonValue>>) -> Rc<RefCell<JsonValue>> {
+        if n.borrow().kind != 5 {
+            return n.clone();
+        }
+        if n.borrow().keyAt("rx") >= 0 {
+            return self.ext_of(n).unwrap_or_else(JsonValue::mkNull);
+        }
+        let c = n.borrow().get("c");
+        if c.borrow().kind == 4 {
+            let kids = c.borrow().items.clone();
+            let out: Vec<Rc<RefCell<JsonValue>>> = kids.iter().map(|k| self.ext_in(k)).collect();
+            c.borrow_mut().items = out;
+        }
+        n.clone()
+    }
     fn node_of(&mut self, n: &Rc<RefCell<JsonValue>>) -> Option<Rc<RefCell<JsonValue>>> {
         if n.borrow().kind != 5 {
             return Some(n.clone());
         }
+        if n.borrow().keyAt("rx") >= 0 {
+            let got = self.ext_of(n)?;
+            self.rx_new(&got);
+            return Some(got);
+        }
         if n.borrow().keys.len() == 1 && n.borrow().keys[0] == "r" {
             let id = n.borrow().getInt("r", -1);
             return self.by_n.get(&id).cloned();
+        }
+        // (a kept node with a value or two written over, __deltaPatch)
+        if n.borrow().keyAt("m") >= 0 {
+            let m = n.borrow().getInt("m", -1);
+            let base = self.by_n.get(&m).cloned()?;
+            let p = DomPaint::patchedNode(&base, n);
+            if p.borrow().keyAt("i") >= 0 {
+                self.fresh += 1;
+            }
+            // (its style not pooled: a copy of the kept one with a value
+            // of its own, hashed and compared for nothing)
+            let num = p.borrow().getInt("n", -1);
+            if num >= 0 {
+                self.keep_n(num, &p);
+            }
+            return Some(p);
         }
         // (a node without a number was sent whole: nothing under it is
         // named or kept by itself)
@@ -919,7 +1108,7 @@ impl Kept {
         self.pool_style(n);
         let num = n.borrow().getInt("n", -1);
         if num >= 0 {
-            self.by_n.insert(num, n.clone());
+            self.keep_n(num, n);
         }
         Some(n.clone())
     }
@@ -1136,8 +1325,16 @@ impl Synced {
         }
         #[cfg(not(target_arch = "wasm32"))]
         let t0 = std::time::Instant::now();
-        let page = JsonParser::parse(json.to_string()).borrow_mut().value();
+        let parser = JsonParser::parse(json.to_string());
+        parser.borrow_mut().memo = Some(Rc::clone(&self.kept.memo));
+        let page = parser.borrow_mut().value();
+        self.kept.caret_named = json.contains("\"caret\"");
         let delta = page.borrow().has("d");
+        if !delta && self.kept.ext.is_some() && json.contains("\"rx\":") {
+            let r = page.borrow().get("root");
+            let got = self.kept.ext_in(&r);
+            page.borrow_mut().put("root", got);
+        }
         if delta {
             let was = self.kept.root.clone();
             let tops = page.borrow().get("tops");
@@ -1153,7 +1350,13 @@ impl Synced {
                     if let Some(b) = r.borrow().children.first().cloned() {
                         let mut dp = DomPaint::new();
                         if paint_lane() && dp.compare(&w0, &page.borrow().get("root")) && dp.apply(&b, 0) {
-                            EVGRetain::paint_frame(&l, &r);
+                            if dp.dirty.is_empty() {
+                                EVGRetain::paint_frame(&l, &r);
+                            } else {
+                                // (a text changed: laid out on the path to it)
+                                EVGRetain::layout_frame(&l, r.clone(), &dp.dirty);
+                                DomView::settle(&b);
+                            }
                             let boxes = DomView::boxesSince(&b, 0, &self.kept.boxes);
                             #[cfg(not(target_arch = "wasm32"))]
                             if std::env::var("PG_RETAINCHECK").is_ok() {
@@ -1206,10 +1409,15 @@ impl Synced {
 /// layout does, and the boxes are the answer.
 struct SyncLayout {
     s: Rc<std::cell::RefCell<Synced>>,
+    /// and webapi.js's questions to RangerDOM's style (DomStyle::mine)
+    style: Rc<std::cell::RefCell<DomStyle>>,
 }
 
 impl cer::vm::HostSync for SyncLayout {
     fn call(&mut self, request: &str) -> String {
+        if DomStyle::mine(request) {
+            return self.style.borrow_mut().call(request);
+        }
         match self.s.borrow_mut().lay_out(request) {
             Some(l) => l.0,
             None => "!".to_string(),
@@ -1268,6 +1476,27 @@ pub extern "C" fn pg_set_time_zone(zp: *mut u8, zl: usize) -> u32 {
     let z = text(zp, zl);
     TIME_ZONE.with(|t| *t.borrow_mut() = z.clone());
     PG.with(|p| if p.borrow_mut().engine.set_time_zone(&z) { 1 } else { 0 })
+}
+thread_local! {
+    static JIT: std::cell::Cell<(bool, i64)> = const { std::cell::Cell::new((false, 64)) };
+}
+/// CEr's baseline JIT (cer::wjit): `on` 1 compiles a function's hot loops
+/// to WebAssembly after `min` back edges, for this engine and the ones
+/// pg_reset and pg_restore make. Needs a build with the `wjit` feature and
+/// the host's cerxes_jit.install; 1 when this build can run compiled code.
+#[no_mangle]
+pub extern "C" fn pg_jit(on: i32, min: i32) -> i32 {
+    let ok = cer::wjit::available();
+    JIT.with(|j| j.set((on != 0 && ok, if min > 0 { min as i64 } else { 64 })));
+    PG.with(|p| { let mut p = p.borrow_mut(); p.engine.vm.jit_on = on != 0 && ok; p.engine.vm.jit_min = if min > 0 { min as i64 } else { 64 }; });
+    ok as i32
+}
+/// the JIT's counters as JSON: functions compiled and refused, code bytes,
+/// entries into compiled code
+#[no_mangle]
+pub extern "C" fn pg_jit_stats() -> usize {
+    let s = cer::wjit::stats();
+    answer(format!("{{\"compiled\":{},\"refused\":{},\"dropped\":{},\"bytes\":{},\"entries\":{}}}", s.compiled, s.refused, s.dropped, s.bytes, s.entries))
 }
 #[no_mangle]
 pub extern "C" fn pg_reset() {

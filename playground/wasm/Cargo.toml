@@ -21,7 +21,13 @@ ranger = { path = "../../runtime/rust/ranger", features = ["shared-cell"] }
 rangerevg = { path = "../../runtime/rust/rangerevg" }
 rangerdom_json = { path = "../domjson" }
 rangerdom_view = { path = "../domview" }
+rangerdom_style = { path = "../domstyle" }
 cer = { path = "../cer" }
+
+[features]
+# CEr's baseline JIT (cer/src/wjit.rs): hot loops compiled to WebAssembly by
+# the host (rangerdom-wasm.js cerxes_jit.install); rangerdom_pg-jit.wasm
+wjit = ["cer/wjit"]
 
 # CEr names Ranger's runtime by git; here it is the tree's own
 [patch."https://github.com/terotests/Ranger.git"]

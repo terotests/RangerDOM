@@ -225,6 +225,16 @@ class RealmTest {
         def got (r.eval("__deltaRender(true); __renderDelta(); __fastRenderCheck(true); var a = document.getElementById('a'), b = document.getElementById('b'), sp = document.getElementById('in'), o = []; for (var i = 0; i < 4; i++) { a.style.transform = 'translate(' + i + 'px, 2px) rotate(' + i + 'deg)'; b.style.transform = 'rotate(' + (i + 4) + 'deg)'; __renderDelta(); } o.push(JSON.parse(__fastRenderCheck()).n); for (i = 0; i < 3; i++) { b.style.opacity = String(0.4 + i / 10); __renderDelta(); } o.push(JSON.parse(__fastRenderCheck()).n); sp.className = 'red'; b.style.transform = 'rotate(20deg)'; var t = __renderDelta(); o.push(JSON.parse(__fastRenderCheck()).n, /rotate\\(20deg\\)/.test(t), /rgb\\(9, 0, 0\\)/.test(t)); a.style.transform = 'none'; __renderDelta(); a.style.transform = 'translate(50%, 0)'; __renderDelta(); a.textContent = 'z'; a.style.transform = 'rotate(1deg)'; t = __renderDelta(); o.push(JSON.parse(__fastRenderCheck()).n, /\"x\":\"z\"/.test(t), JSON.parse(__fastRenderCheck()).bad); o.join(',')"))
         this.check("only a transform or an opacity set: the kept render with the new value, the same as a whole render" (got == "8,11,11,true,true,11,true,0"))
     }
+    ; a host that takes patched nodes (__deltaPatch): a box whose transform
+    ; alone changed comes as the number it was sent under and the new value,
+    ; again on the next frame; a box with an element in it, or one never
+    ; sent, comes whole
+    fn movedPatch:void () {
+        def r:DomRealm (this.realm("<html><head><style>.b{position:absolute;width:40px;height:30px}</style></head><body><div id=w><div class=b id=a style='transform:translate(1px,2px)'>a</div><div class=b id=b style='transform:rotate(3deg)'><span>in</span></div></div></body></html>"))
+        r.runScripts()
+        def got (r.eval("__deltaRender(true); __deltaPatch(true); __renderDelta(); var a = document.getElementById('a'), b = document.getElementById('b'), o = [], t, m; a.style.transform = 'translate(1px, 2px) rotate(1deg)'; __renderDelta(); a.style.transform = 'translate(5px, 2px)'; t = __renderDelta(); m = /\\{\"n\":(\\d+),\"m\":(\\d+),\"ps\":\\{\"transform\":\"translate\\(5px, 2px\\)\"\\},\"sa\":\"transform: translate\\(5px, 2px\\);\"\\}/.exec(t); o.push(!!m); a.style.transform = 'translate(6px, 2px)'; t = __renderDelta(); o.push(m !== null && t.indexOf('\"m\":' + m[1] + ',') >= 0); b.style.transform = 'rotate(4deg)'; t = __renderDelta(); o.push(/\"m\":/.test(t), /rotate\\(4deg\\)/.test(t)); __deltaPatch(false); a.style.transform = 'translate(7px, 2px)'; t = __renderDelta(); o.push(/\"m\":/.test(t)); o.join(',')"))
+        this.check(("a box's new transform as a patched node (" + got + ")") (got == "true,true,false,true,false"))
+    }
     fn controls:void () {
         def r:DomRealm (this.realm("<html><body style='margin:0;font:10px Arial'><input type=range id=r min=0 max=100 step=10 value=0><select id=m multiple style='font-size:10px;line-height:10px;border:0;padding:0'><option value=1>1<option value=2>2<option value=3>3<option value=4>4</select><div id=ce contenteditable style='font-size:10px'>abc</div><input id=t value=hello style='font-size:10px;padding:0;border:0'><input id=n type=number value=10 step=2><input id=d type=date value=2026-11-15><input id=tm type=time value=13:45><input id=c type=color value='#3366cc'><input id=f type=file></body></html>"))
         r.runScripts()
@@ -243,7 +253,32 @@ class RealmTest {
         def got (r.eval((this.file("tests/a11y.js"))))
         this.check(("a11y: roles, names and states from HTML and ARIA (" + got + ")") (got == "navigation:Main|link:Home|text:no href|main:|heading:Title:lv=1|heading:Sub:lv=4|paragraph:Some text|button:Save disk|img:disk|button:Close|button:Bold:pr=2|text:Name|textbox:Name:v=Ann,rq=1|text:Agree|checkbox:Agree:ck=2|slider:Volume:vn=3|combobox:Fruit:hp=listbox,v=Pear|option:Apple|option:Pear:se=2|tablist:|tab:One:se=2|tab:Two|button:Menu:ex=1,hp=menu|text:Search box|textbox:Search box:d=type here|list:|listitem:One|table:|rowgroup:|row:|columnheader:H|row:|cell:C"))
     }
+    fn lazyStyle:void () {
+        def r:DomRealm (this.realm("<html><head><style>circle[r='5']{stroke:rgb(4,5,6)} path{fill:rgb(1,2,3)}</style></head><body><div id=w style='margin:1px 2px;width:10px;--v:3'><svg width=10 height=10 viewBox='0 0 10 10'><path id=p d='M0 0 L1 1'/><circle id=c r='4'/></svg><span>x</span></div></body></html>"))
+        r.runScripts()
+        def got (r.eval((this.file("tests/lazystyle.js"))))
+        this.check(("computed style read lazily, SVG geometry drawn again without a restyle, several inline properties as one change, an svg's markup for a paint patch (" + got + ")") (got == "true,0,2px,1px 2px,3,true,true,true,rgb(4, 5, 6),true,margin-top: 1px; margin-right: 2px; margin-bottom: 1px; width: 20px; --v: 3; height: 7px;,7px,true,true,true"))
+    }
+    fn overlay:void () {
+        def r:DomRealm (this.realm("<html><head><style>.a{left:1px;color:rgb(9,9,9)} .b{color:rgb(1,2,3);font-size:10px} path{stroke:black}</style></head><body><div id=r style='position:relative'></div></body></html>"))
+        r.runScripts()
+        def got (r.eval((this.file("tests/overlay.js"))))
+        this.check(("inline place and size over a shared style, SVG paths alike share, declarations parsed once (" + got + ")") (got == "true,true,rgb(0, 0, 255),position: absolute; left: 5px; top: 6px; width: 20px; height: 10px; background-color: red;,height: 12px; left: 1px !important;,height: 13px; z-index: 2; opacity: 0.5;,true,true,7px,20px,4px,rgb(9, 9, 9)"))
+    }
+    fn wire:void () {
+        def r:DomRealm (this.realm("<html><head><style>.box{color:rgb(1,2,3);border:1px solid rgb(4,5,6);font-size:9px} path{stroke:black}</style></head><body><div id=r style='position:relative'></div></body></html>"))
+        r.runScripts()
+        def got (r.eval((this.file("tests/wire.js"))))
+        this.check(("style table: the delta render with styles as references puts together the whole render (" + got + ")") (got == "true,true,true,true,no style,true,true,true,true,true,true,false,true"))
+    }
+    fn insertRule:void () {
+        def r:DomRealm (this.realm("<html><head><style id=s></style></head><body><p class=a>x</p></body></html>"))
+        r.runScripts()
+        def got (r.eval((this.file("tests/insertrule.js"))))
+        this.check(("insertRule and deleteRule anywhere in a sheet (" + got + ")") (got == "rgb(255, 0, 0),rgb(0, 0, 255),rgb(0, 0, 255),3,rgb(255, 0, 0),rgb(1, 2, 3)"))
+    }
     fn run:void () {
+        this.insertRule()
         this.plainDom()
         this.react()
         this.timers()
@@ -259,9 +294,13 @@ class RealmTest {
         this.scopedStyles()
         this.detachedImage()
         this.movedRender()
+        this.movedPatch()
         this.controls()
         this.focus()
         this.a11y()
+        this.lazyStyle()
+        this.overlay()
+        this.wire()
         print ("passed " + (to_string passes) + ", failed " + (to_string fails))
     }
 

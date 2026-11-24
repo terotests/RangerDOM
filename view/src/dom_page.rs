@@ -33,9 +33,10 @@ use ranger::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crate::dom_paint::DomPaint;
 use crate::dom_view::{DomBoxes, DomSvgDocs, DomView};
 use crate::rgr::EVGElement;
-use rangerdom_json::{JsonParser, JsonValue};
+use rangerdom_json::{JsonMemo, JsonNodes, JsonParser, JsonValue};
 
 pub struct DomPage {
     pub svgs: Rc<RefCell<DomSvgDocs>>,
@@ -58,9 +59,10 @@ pub struct DomPage {
     /// delta pages: the nodes by their numbers, the epoch they are of
     byN: HashMap<i64, Rc<RefCell<JsonValue>>>,
     epoch: i64,
-    /// the nodes' style objects by node id, and their texts
-    styleObj: HashMap<String, Rc<RefCell<JsonValue>>>,
-    styleText: HashMap<String, String>,
+    /// the style objects parsed so far by their text (JsonMemo): a node
+    /// sent again with the same style has the same object, which what was
+    /// built under it is kept by, and a style is parsed once
+    styles: Rc<RefCell<JsonMemo>>,
     /// the nodes the last page sent (fresh), the most a page sent (total),
     /// how many numbered nodes the page held when last counted (live)
     fresh: i64,
@@ -77,6 +79,9 @@ pub struct DomPage {
     forget: bool,
     /// the size changed since the last build
     resized: bool,
+    /// the nodes the host's DomStyle built (RX): a page's {"rx": n} is the
+    /// node kept there under n
+    pub ext: Option<Rc<RefCell<JsonNodes>>>,
 }
 
 impl DomPage {
@@ -96,8 +101,7 @@ impl DomPage {
             laid: false,
             byN: HashMap::new(),
             epoch: -1,
-            styleObj: HashMap::new(),
-            styleText: HashMap::new(),
+            styles: Rc::new(RefCell::new(JsonMemo::new("s"))),
             fresh: 0,
             total: 0,
             live: 0,
@@ -108,6 +112,7 @@ impl DomPage {
             misses0: 0,
             forget: false,
             resized: false,
+            ext: None,
         }
     }
     /// the viewport's size; a new size builds the page again
@@ -140,7 +145,17 @@ impl DomPage {
             return 0;
         }
         let p: Rc<RefCell<JsonParser>> = JsonParser::parse(json.clone());
+        p.borrow_mut().memo = Some(Rc::clone(&self.styles));
+        self.styles.borrow_mut().missing = false;
         let page: Rc<RefCell<JsonValue>> = p.borrow_mut().value();
+        if self.styles.borrow().missing {
+            // (a style named from a table this host does not have)
+            self.styles.borrow_mut().missing = false;
+            self.styles.borrow_mut().restart(-1);
+            self.byN = HashMap::new();
+            self.lastJson = String::new();
+            return -1;
+        }
         if page.borrow().kind != 5 {
             return 0;
         }
@@ -158,6 +173,11 @@ impl DomPage {
             // (a whole page: its nodes are new objects, nothing to take)
             self.byN = HashMap::new();
             self.root = None;
+            if self.ext.is_some() && json.contains("\"rx\":") {
+                let r: Rc<RefCell<JsonValue>> = page.borrow().get("root");
+                let got: Rc<RefCell<JsonValue>> = self.extIn(&r);
+                page.borrow_mut().put("root", got);
+            }
             Rc::clone(&self.svgs.borrow().memo).borrow_mut().on = false;
         }
         self.lastJson = json;
@@ -343,8 +363,11 @@ impl DomPage {
         let epoch: i64 = page.borrow().getInt("d", 0);
         if epoch != self.epoch {
             self.byN = HashMap::new();
-            self.styleObj = HashMap::new();
-            self.styleText = HashMap::new();
+            // (the page's style table, when it has one, began the epoch
+            // as the page was read: what it added stays)
+            if self.styles.borrow().epoch != epoch {
+                self.styles.borrow_mut().restart(epoch);
+            }
             self.root = None;
             self.total = 0;
             self.live = 0;
@@ -409,20 +432,6 @@ impl DomPage {
             }
             self.byN = keep;
             self.live = self.byN.len() as i64;
-            let mut so: HashMap<String, Rc<RefCell<JsonValue>>> = HashMap::new();
-            let mut st: HashMap<String, String> = HashMap::new();
-            let sk: Vec<String> = self.styleObj.keys().cloned().collect::<Vec<String>>();
-            for k in sk.iter().cloned() {
-                if ids.contains_key(&k) {
-                    so.insert(k.clone(), Rc::clone(self.styleObj.get(&k).unwrap()));
-                    let tx: Option<String> = self.styleText.get(&k).cloned();
-                    if tx.is_some() {
-                        st.insert(k.clone(), tx.unwrap());
-                    }
-                }
-            }
-            self.styleObj = so;
-            self.styleText = st;
         }
         if self.fresh > self.total {
             self.total = self.fresh;
@@ -480,9 +489,33 @@ impl DomPage {
         if n.borrow().kind != 5 {
             return Some(Rc::clone(n));
         }
+        if n.borrow().keyAt("rx") >= 0 {
+            let got: Option<Rc<RefCell<JsonValue>>> = self.extOf(n);
+            if got.is_some() {
+                self.fresh += DomPage::ids(got.as_ref().unwrap());
+            }
+            return got;
+        }
         if n.borrow().keys.len() == 1 && n.borrow().keys[0] == "r" {
             let k: i64 = n.borrow().getInt("r", -1);
             return self.byN.get(&k).cloned();
+        }
+        // (a kept node with a value or two written over, __deltaPatch)
+        if n.borrow().keyAt("m") >= 0 {
+            let m: i64 = n.borrow().getInt("m", -1);
+            let base: Option<Rc<RefCell<JsonValue>>> = self.byN.get(&m).cloned();
+            if base.is_none() {
+                return None;
+            }
+            let p: Rc<RefCell<JsonValue>> = DomPaint::patchedNode(base.as_ref().unwrap(), n);
+            if p.borrow().keyAt("i") >= 0 {
+                self.fresh += 1;
+            }
+            let num: i64 = p.borrow().getInt("n", -1);
+            if num >= 0 {
+                self.byN.insert(num, Rc::clone(&p));
+            }
+            return Some(p);
         }
         // (a node without a number was sent whole: nothing under it is
         // named or kept by itself)
@@ -506,31 +539,45 @@ impl DomPage {
         let id: String = n.borrow().getText("i");
         if !id.is_empty() {
             self.fresh += 1;
-            // (a node sent again keeps its style object while that holds
-            // the same: its children were built under it)
-            let s: Rc<RefCell<JsonValue>> = n.borrow().get("s");
-            if s.borrow().kind == 5 {
-                let text: String = s.borrow().toJson();
-                let was: Option<String> = self.styleText.get(&id).cloned();
-                let mut keep: Rc<RefCell<JsonValue>> = Rc::clone(&s);
-                if was.is_some() && was.unwrap() == text {
-                    let old: Option<Rc<RefCell<JsonValue>>> = self.styleObj.get(&id).cloned();
-                    if old.is_some() {
-                        keep = old.unwrap();
-                    }
-                }
-                if !Rc::ptr_eq(&keep, &s) {
-                    n.borrow_mut().put("s", Rc::clone(&keep));
-                }
-                self.styleObj.insert(id.clone(), keep);
-                self.styleText.insert(id.clone(), text);
-            }
         }
         let num: i64 = n.borrow().getInt("n", -1);
         if num >= 0 {
             self.byN.insert(num, Rc::clone(n));
         }
         Some(Rc::clone(n))
+    }
+    /// the host's node a page's {"rx": n} names (none: not kept)
+    fn extOf(&self, n: &Rc<RefCell<JsonValue>>) -> Option<Rc<RefCell<JsonValue>>> {
+        if self.ext.is_none() {
+            return None;
+        }
+        let h: i64 = n.borrow().getInt("rx", -1);
+        let ext: Rc<RefCell<JsonNodes>> = Rc::clone(self.ext.as_ref().unwrap());
+        let got: Option<Rc<RefCell<JsonValue>>> = ext.borrow().map.get(&h).cloned();
+        got
+    }
+    /// a whole page's {"rx": n} put in (one not kept: an empty node)
+    fn extIn(&self, n: &Rc<RefCell<JsonValue>>) -> Rc<RefCell<JsonValue>> {
+        if n.borrow().kind != 5 {
+            return Rc::clone(n);
+        }
+        if n.borrow().keyAt("rx") >= 0 {
+            let got: Option<Rc<RefCell<JsonValue>>> = self.extOf(n);
+            if got.is_some() {
+                return got.unwrap();
+            }
+            return JsonValue::mkNull();
+        }
+        let c: Rc<RefCell<JsonValue>> = n.borrow().get("c");
+        if c.borrow().kind == 4 {
+            let kids: Vec<Rc<RefCell<JsonValue>>> = c.borrow().items.clone();
+            let mut out: Vec<Rc<RefCell<JsonValue>>> = Vec::new();
+            for k in kids.iter() {
+                out.push(self.extIn(k));
+            }
+            c.borrow_mut().items = out;
+        }
+        Rc::clone(n)
     }
     /// whether this page's elements are noted: mostly is "the page is
     /// mostly the last one". Three noted pages in a row that the next page

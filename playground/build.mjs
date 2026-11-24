@@ -25,7 +25,8 @@
 // rangerdom_pg.wasm, the engine the page uses by default, is playground/wasm
 // (the same engine written as a crate) built with cargo for wasm32-wasip1 in
 // the Ranger tree, where its crates' relative paths lead: lib/evg,
-// gallery/domview and gallery/domjson (view/, json/), gallery/cer (CEr) and
+// gallery/domview, gallery/domjson and gallery/domstyle (view/, json/,
+// style/), gallery/cer (CEr) and
 // gallery/rangerdom_pg (playground/wasm with js/). Needs cargo and
 // `rustup target add wasm32-wasip1`; without them the page falls back to the
 // JavaScript engine.
@@ -179,6 +180,7 @@ function placeEngine() {
   place(EVG, "lib/evg");
   place(path.join(ROOT, "view"), "gallery/domview");
   place(path.join(ROOT, "json"), "gallery/domjson");
+  place(path.join(ROOT, "style"), "gallery/domstyle");
   place(path.join(ROOT, "vendor", "ranger", "cer"), "gallery/cer");
   fs.mkdirSync(path.join(G, "rangerdom_pg"), { recursive: true });
   for (const f of ["Cargo.toml", "src"]) place(path.join(HERE, "wasm", f), `gallery/rangerdom_pg/${f}`);
@@ -198,6 +200,20 @@ if (withWasm) {
     fs.copyFileSync(path.join(crate, "target", "wasm32-wasip1", "release", "rangerdom_pg.wasm"), path.join(OUT, "rangerdom_pg.wasm"));
   } catch (e) {
     console.error("rangerdom_pg.wasm was not built (cargo with the wasm32-wasip1 target?): the page will use rangerdom_pg.js");
+    if (process.env.CI) process.exit(1);
+  }
+  // The same with CEr's baseline JIT (cer/src/wjit.rs, ?jit=1): the
+  // modules it writes call back into this one through its function table,
+  // so the table is exported and growable.
+  console.log("==> rangerdom_pg-jit.wasm (cargo, wasm32-wasip1, --features wjit)");
+  try {
+    execFileSync("cargo", ["build", "--release", "--lib", "--target", "wasm32-wasip1", "--features", "wjit", "--target-dir", path.join(crate, "target-jit")], {
+      cwd: crate, stdio: ["ignore", "inherit", "inherit"],
+      env: { ...process.env, RUSTFLAGS: "-C link-arg=-zstack-size=33554432 -C link-arg=--export-table -C link-arg=--growable-table" },
+    });
+    fs.copyFileSync(path.join(crate, "target-jit", "wasm32-wasip1", "release", "rangerdom_pg.wasm"), path.join(OUT, "rangerdom_pg-jit.wasm"));
+  } catch (e) {
+    console.error("rangerdom_pg-jit.wasm was not built: ?jit=1 runs without the JIT");
     if (process.env.CI) process.exit(1);
   }
 }

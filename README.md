@@ -68,13 +68,14 @@ where its boxes are with `layout`).
 
 ## The page in EVG (Rust crates)
 
-Two Cargo crates, written in the Rust Ranger reads, so cargo and every
+Three Cargo crates, written in the Rust Ranger reads, so cargo and every
 Ranger target build them:
 
 | Crate | Role |
 | --- | --- |
 | `json/` (`rangerdom_json`) | `JsonParser` / `JsonValue`: the tree `__render()` gives, and `DomText` |
 | `view/` (`rangerdom_view`) | `DomView`: that tree as [EVG](https://github.com/terotests/evg) elements, laid out and drawn by EVG on any host (SDL, Kotlin, Go or Rust WASM, EVGBrowser); `DomMemo` keeps the elements and their layout from frame to frame, so a frame costs what changed |
+| `style/` (`rangerdom_style`) | `DomStyle`: selector matching for webapi.js on the host side, any JS engine. The host routes `__hostSync` requests that start with U+0001 `S` (`DomStyle::mine`) to `call`; the page turns it on with `__webdom.rsx(true)`. webapi.js describes an element when it first matches an element of its kind (sigOf), DomStyle answers the rules that match and leaves `:hover`, `:has()`, sibling combinators and the like to webapi.js. It keeps nothing the page needs: a new host (a restored snapshot) is told again. `__webdom.rsxCheck(true)` compares it with webapi.js's own matching <br>RX (`__webdom.rx(true)`, `dom_tree.rs`): the computed styles and render nodes too. webapi.js tells each changed element once (B: children, inline style, attributes; X: texts; D: rule declarations), the host styles them (`DomTree`) and builds the nodes; what it cannot (controls, pictures, svg, tables, custom properties, state selectors when asked by webapi.js...) are holes webapi.js renders (J) under the host's parent style. The page's JSON names the host's node as `{"rx": handle}`, which `DomPage` and the playground take from `DomStyle.ext`. `__webdom.rxCheck(true)` renders each frame again in webapi.js and compares. Off by default: RangerGames turns it on (`RG_DOM_RX=0` off), the playground with `PG_RX=1` |
 | `view/` `DomPage` | a host's whole side of a changing page: takes `__renderDelta()` (after `__deltaRender(true)`), keeps the nodes it was sent and the elements built for them (DomMemo, keepLayout), gives `__layout` only the boxes that changed (`settle`), and takes the sizes of pictures the host fetches (http, https: `wanted`, `setImageSize`, drawn by their URL). EVGBrowser draws its script pages with it |
 
 A host with DomPage, in Ranger:
@@ -92,9 +93,9 @@ if (r > 0) {
 }
 ```
 
-Both name the Ranger runtime as `../../runtime/rust/ranger` and the view
-names `../domjson`, so a project copies them into `<Ranger>/gallery/domjson`
-and `gallery/domview`. Ranger
+All name the Ranger runtime as `../../runtime/rust/ranger`, and the view
+and style name `../domjson`, so a project copies them into
+`<Ranger>/gallery/domjson`, `gallery/domview` and `gallery/domstyle`. Ranger
 reads EVG from `lib/evg`; cargo takes it from `runtime/rust/rangerevg`.
 
 ## Building and testing

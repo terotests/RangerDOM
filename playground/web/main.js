@@ -10,6 +10,8 @@
 //   &auto=1          run its steps at once; window.__pgResult has the result
 //   &engine=wasm|js  RangerDOM as WebAssembly (default; cargo build of
 //                    playground/wasm) or as JavaScript (rangerdom_pg.js)
+//   &jit=1|N         CEr's baseline JIT (rangerdom_pg-jit.wasm): hot loops
+//                    compiled to WebAssembly after N back edges (1: 64)
 //   &size=W,H        the page's viewport (default 1200,800)
 //   &delta=0         each render sends the whole page to the layout, not
 //                    only what changed since the last one
@@ -375,6 +377,11 @@ async function nativeRun(call) {
 //     in the same rectangle of the canvas. Catches a body drawn blank.
 // The probe says what the page reports; this says what it shows.
 const PIC_GRID = 24; // px between flat points
+// The picture check (flat colours and text runs through elementsFromPoint,
+// readPixels) takes longer than most steps, so it runs only when asked:
+// the "Check picture" box, ?picture=1, or an automatic run (the battery).
+// It runs after a step's times are taken either way.
+const picOn = () => { const b = $("picture"); return b ? b.checked : false; };
 const PIC_TOL = 48; // |dr| + |dg| + |db|
 // (a colour of another space, oklch() or color-mix(), as the browser
 // draws it in sRGB: one pixel of a 2D canvas)
@@ -748,7 +755,7 @@ async function open(name) {
   $("about").textContent = current.about;
   $("steps").tBodies[0].textContent = "";
   $("summary").hidden = true;
-  history.replaceState(null, "", "?case=" + encodeURIComponent(current.name) + (params.get("size") ? "&size=" + params.get("size") : ""));
+  history.replaceState(null, "", "?case=" + encodeURIComponent(current.name) + (params.get("size") ? "&size=" + params.get("size") : "") + (params.get("jit") ? "&jit=" + params.get("jit") : ""));
   setStatus("Loading…");
   const nLoad = await nativeLoad(current.name);
   const rLoad = await rdLoad(current.name);
@@ -760,7 +767,7 @@ async function open(name) {
   const rdDrawn = performance.now() - t0;
   state = { steps: (native.line && native.line.steps) || (rdLine && rdLine.steps) || [], next: 0, rows: [] };
   const r = { name: "load + setup", native: { js: native.line && native.line.setup, drawn: nLoad + native.drawn }, rd: { js: rdLine && rdLine.setup, render: acc.render, layout: acc.layout, paint: acc.paint, gl: acc.gl, drawn: rLoad + rdDrawn }, nativeProbe: native.probe, rdProbe: rdProbe() };
-  r.picture = pictureCheck();
+  r.picture = picOn() ? pictureCheck() : null;
   state.rows.push(r);
   row(r);
   showErrors();
@@ -785,9 +792,10 @@ async function step() {
     const line = await rdRun(`__bench.run(${k})`, 20000);
     const drawn = performance.now() - t0;
     r = { name: state.steps[k], native: { js: native.line && native.line.total, drawn: native.drawn, frames: native.frames, gap: native.gap }, rd: { js: line && line.total, render: acc.render, layout: acc.layout, paint: acc.paint, gl: acc.gl, frames: acc.frames, gap: acc.gap, gaps: acc.gaps, drawn }, nativeProbe: native.probe, rdProbe: rdProbe() };
-    r.picture = pictureCheck();
+    r.picture = picOn() ? pictureCheck() : null;
     if (BUDGET > 0 && drawn > BUDGET) state.over = true;
   }
+  if (Engine.jit) r.jit = Engine.jitStats();
   state.rows.push(r);
   row(r);
   showErrors();
@@ -1007,14 +1015,20 @@ $("load").onclick = () => loadState();
       // family DomView gave EVG, ", mfd" its last name, and the weight)
       const mctx = document.createElement("canvas").getContext("2d");
       let mfont = "";
-      Engine = await loadWasmPlayground("rangerdom_pg.wasm", {
+      // ?jit=1 (or a threshold, ?jit=200): CEr's baseline JIT
+      const jit = params.get("jit") ? (Number(params.get("jit")) > 1 ? Number(params.get("jit")) : 64) : 0;
+      const wopts = {
+        jit,
         measure(family, text, size, bold) {
           const f = fontSpec({ font: family + ", mfd", size, weight: bold ? "bold" : "" }, 1);
           if (f !== mfont) { mctx.font = f; mfont = f; }
           return mctx.measureText(text).width;
         },
-      });
-      engineName = "WebAssembly";
+      };
+      // (a site without the JIT build runs the plain one)
+      if (jit) { try { Engine = await loadWasmPlayground("rangerdom_pg-jit.wasm", wopts); } catch (e) { console.warn("no JIT build:", e); } }
+      if (!Engine) Engine = await loadWasmPlayground("rangerdom_pg.wasm", wopts);
+      engineName = "WebAssembly" + (Engine.jit ? " + JIT" : jit ? " (no JIT in this build)" : "");
     } catch (e) {
       console.warn("no WebAssembly engine, using JavaScript:", e);
     }
@@ -1037,6 +1051,11 @@ $("load").onclick = () => loadState();
     b.onclick = () => { if (!busy) open(c.name); };
     nav.appendChild(b);
   }
+  // the JIT box: the page again with or without ?jit=1
+  $("jit").checked = !!Engine.jit;
+  $("jit").disabled = engineName === "JavaScript";
+  $("jit").onchange = () => { const q = new URLSearchParams(location.search); if ($("jit").checked) q.set("jit", "1"); else q.delete("jit"); location.search = q.toString(); };
+  $("picture").checked = params.has("picture") ? params.get("picture") !== "0" : !!params.get("auto");
   await open(params.get("case") || cases[0].name);
   idle();
   if (params.get("auto")) {

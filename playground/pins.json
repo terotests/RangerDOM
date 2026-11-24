@@ -1,7 +1,7 @@
 {
   "ranger": {
     "git": "https://github.com/terotests/Ranger.git",
-    "rev": "cfbc8bb2b40f62568b12ca000fd40fa253c9418e",
+    "rev": "e4e275e9d3d33da249572cca14774011a210c670",
     "sparse": [
       "dist",
       "compiler",
@@ -11,7 +11,7 @@
   },
   "evg": {
     "git": "https://github.com/terotests/evg.git",
-    "rev": "68408e0c0e93a72d4a0aa048a505a818b8de2120",
+    "rev": "ab4635c63af66f610ef5d558a9211cddc056daa3",
     "sparse": [
       "storm"
     ]
