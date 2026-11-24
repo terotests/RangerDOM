@@ -179,6 +179,18 @@ class RealmTest {
         def got (r.eval("var sh = new CSSStyleSheet(); sh.replaceSync(':host{color:rgb(1,1,1)}:host(.k){color:rgb(2,2,2)}p{margin-left:7px}'); var o = [('adoptedStyleSheets' in Document.prototype)]; ['a', 'b'].forEach(function (id) { var h = document.getElementById(id), sr = h.attachShadow({ mode: 'open' }); sr.innerHTML = '<p>x</p>'; sr.adoptedStyleSheets = [sh]; }); __render(); ['a', 'b'].forEach(function (id) { var p = document.getElementById(id).shadowRoot.querySelector('p'); o.push(getComputedStyle(p).color, getComputedStyle(p).marginLeft); }); document.adoptedStyleSheets = [sh]; o.push(document.adoptedStyleSheets.length); o.join(';')"))
         this.check("adopted sheets: one sheet in two shadow roots, each styled by its own host" (got == "true;rgb(1, 1, 1);7px;rgb(2, 2, 2);7px;1"))
     }
+    ; a page whose content is in a declarative shadow root (a Podium
+    ; layout, tori.fi): the parser attaches it, a sheet the host gives by
+    ; URL styles the shadow tree its <link> is in and not the document, a
+    ; <style>'s @import brings the host's sheet into the tree, and
+    ; the page shows it
+    fn declarativeShadowPage:void () {
+        def r:DomRealm (this.realm("<html><head></head><body><x-layout id=h><template shadowrootmode=open><link rel=stylesheet href=/s.css><style>@import url('/i.css');</style><div id=app><p id=p class=k>p</p><i id=q class=m>q</i></div></template></x-layout><p id=out class=k>o</p></body></html>"))
+        r.addStyle(".k{color:rgb(1,2,3)}" "https://example.com/s.css")
+        r.addStyle(".m{margin-left:4px}" "https://example.com/i.css")
+        def got (r.eval("var sr = document.getElementById('h').shadowRoot, o = [!!sr, document.querySelector('template') === null]; __render(); var a = sr.getElementById('app'); o.push(getComputedStyle(a).display, getComputedStyle(sr.getElementById('p')).color, getComputedStyle(sr.getElementById('q')).marginLeft, getComputedStyle(document.getElementById('out')).color); o.join(';')"))
+        this.check("declarative shadow page: attached by the parser, its <link> and @import sheets scoped to it" (got == "true;true;block;rgb(1, 2, 3);4px;rgb(0, 0, 0)"))
+    }
     ; :has() above a selector's subject: a class set under the box, an
     ; element put in and taken out, each styles what is under the box
     ; again (hasAbove), and the page is as when every style is found again
@@ -254,6 +266,7 @@ class RealmTest {
         this.keptStyles()
         this.adopted()
         this.hasAboveSubject()
+        this.declarativeShadowPage()
         this.hasSibling()
         this.styleElement()
         this.scopedStyles()
