@@ -1336,7 +1336,7 @@ impl DlPainter {
                     continue;
                 }
             }
-            if g == 0 && !ch.is_whitespace() {
+            if g == 0 {
                 for fb in self.fallback.iter() {
                     let gi = self.faces[*fb as usize].glyph(cp);
                     if gi != 0 {
@@ -1345,6 +1345,13 @@ impl DlPainter {
                         break;
                     }
                 }
+            }
+            if g == 0 && ch.is_whitespace() {
+                // (a space no face has, such as U+202F between the digits
+                // of "8 000", is drawn as an ordinary space, not as the
+                // missing-glyph box)
+                f = fi;
+                g = self.faces[fi as usize].glyph(32);
             }
             gf.push(f);
             gg.push(g);
