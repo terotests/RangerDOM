@@ -2643,7 +2643,10 @@
       if (!this._style) {
         var d = new CSSStyleDeclaration(this);
         var s = this.getAttribute('style');
-        if (s) { this._styleSync = true; d.cssText = s; this._styleSync = false; }
+        // (read, not written back: the attribute stays as it was, and the
+        // page is not changed by a look at its style. GitHub's icons
+        // restyled the whole page some 150 times in one render)
+        if (s) { d._owner = null; d.cssText = s; d._owner = this; }
         this._styleProxy = styleProxy(d);
         this._style = d;
       }
@@ -6917,29 +6920,33 @@
 
   function stripComments(css) {
     if (css.indexOf('/*') < 0) return css;
-    // copied in pieces: a string grown a character at a time is copied
-    // again for every character
-    var out = [], i = 0, from = 0, n = css.length, q = null;
-    while (i < n) {
-      var ch = css.charAt(i);
-      if (q) { if (ch === '\\') { i += 2; continue; } if (ch === q) q = null; i++; continue; }
-      if (ch === '"' || ch === "'") { q = ch; i++; continue; }
+    // copied in pieces, and a regular expression finds the next character
+    // that matters: walked one character at a time, GitHub's 1.5 MB of CSS
+    // took ten seconds in the engine
+    var out = [], from = 0, n = css.length, re = /["']|\/\*|url\(\s*(?=[^\s"'])/gi, m;
+    re.lastIndex = 0;
+    while ((m = re.exec(css)) !== null) {
+      var i = m.index, t = m[0];
+      if (t === '"' || t === "'") {
+        var q = t.charCodeAt(0), j = i + 1;
+        while (j < n) { var c = css.charCodeAt(j); if (c === 92) { j += 2; continue; } if (c === q) break; j++; }
+        re.lastIndex = j + 1;
+        continue;
+      }
       // (an unquoted url( ... ) has no comments in it)
-      if ((ch === 'l' || ch === 'L') && css.charAt(i + 1) === '(' && /url$/i.test(css.slice(i - 2, i + 1)) && /^\(\s*[^\s"']/.test(css.slice(i + 1, i + 40))) {
-        i += 2;
-        while (i < n && css.charAt(i) !== ')') { if (css.charAt(i) === '\\') i++; i++; }
+      if (t.charAt(0) === 'u' || t.charAt(0) === 'U') {
+        var k = i + t.length;
+        while (k < n && css.charCodeAt(k) !== 41) { if (css.charCodeAt(k) === 92) k++; k++; }
+        re.lastIndex = k;
         continue;
       }
-      if (ch === '/' && css.charAt(i + 1) === '*') {
-        out.push(css.slice(from, i));
-        var e = css.indexOf('*/', i + 2);
-        // (a comment still parts two tokens: `1/**/0px` is no `10px`)
-        if (e >= 0 && /[\w.%-]/.test(css.charAt(i - 1)) && /[\w.%-]/.test(css.charAt(e + 2)) && /^[\d.]/.test(css.charAt(e + 2))) out.push(' ');
-        i = e < 0 ? n : e + 2;
-        from = i;
-        continue;
-      }
-      i++;
+      out.push(css.slice(from, i));
+      var e = css.indexOf('*/', i + 2);
+      // (a comment still parts two tokens: `1/**/0px` is no `10px`)
+      if (e >= 0 && /[\w.%-]/.test(css.charAt(i - 1)) && /[\w.%-]/.test(css.charAt(e + 2)) && /^[\d.]/.test(css.charAt(e + 2))) out.push(' ');
+      from = e < 0 ? n : e + 2;
+      re.lastIndex = from;
+      if (from >= n) break;
     }
     out.push(css.slice(from));
     return out.join('');
@@ -6962,11 +6969,20 @@
   function parseDeclarations(text) {
     var out = [];
     // (split at the semicolons outside strings, escapes and blocks)
-    var parts = [];
-    for (var i = 0; i <= text.length;) {
-      var e = cssScan(text, i, ';');
-      parts.push(text.slice(i, e));
-      i = e + 1;
+    var parts = null;
+    // (no string, escape, bracket or url(: the semicolons are where they
+    // are, unless one is inside parentheses)
+    if (!/["'\\\[{]|url\(/i.test(text)) {
+      parts = text.split(';');
+      for (var pk = 0; pk < parts.length; pk++) { var pp = parts[pk]; if (pp.indexOf('(') >= 0 && pp.split('(').length !== pp.split(')').length) { parts = null; break; } }
+    }
+    if (!parts) {
+      parts = [];
+      for (var i = 0; i <= text.length;) {
+        var e = cssScan(text, i, ';');
+        parts.push(text.slice(i, e));
+        i = e + 1;
+      }
     }
     for (var k = 0; k < parts.length; k++) {
       var p = parts[k];
@@ -6975,6 +6991,13 @@
       var name = p.slice(0, c).trim();
       var value = p.slice(c + 1).trim();
       if (!name) continue;
+      // (a custom property: its tokens as they are, none of the checks
+      // below; GitHub's themes have thousands)
+      if (name.charCodeAt(0) === 45 && name.charCodeAt(1) === 45 && name.indexOf('\\') < 0) {
+        var cim = value.indexOf('!') >= 0 ? /\s*!\s*important\s*$/i.exec(value) : null;
+        out.push({ name: name, value: cim ? value.slice(0, cim.index).trim() : value, important: !!cim });
+        continue;
+      }
       // (escapes in the name, and in a value outside its strings, stand
       // for their characters: one that stands for a delimiter is not one)
       if (name.indexOf('\\') >= 0) name = unescapeIdent(name);
@@ -8193,6 +8216,17 @@
       } else setCandidates(rs, el, cand, pe);
     }
     var anc = shadowCount || !cand.length ? null : ancOf(el);
+    // (the rules left of elements alike once their ancestors are known:
+    // the same for the siblings that follow, which share the ancestors'
+    // names. GitHub's `.Skeleton *` rules were tried on every element.)
+    if (anc && sc && cand === sc.dyn) {
+      if (sc.fa === anc) cand = sc.ff;
+      else {
+        var fl = [];
+        for (var fi = 0; fi < cand.length; fi++) { var fs = cand[fi].r.sel, fnd = fs._need; if (fnd === undefined) fnd = needOf(fs); if (!fnd || !lacksNeed(anc, fnd)) fl.push(cand[fi]); }
+        sc.fa = anc; sc.ff = fl; cand = fl;
+      }
+    }
     // (the states some element is in: a rule that needs one no element is
     // in, :focus-visible with nothing focused, is not tried)
     var stOn = shadowCount || d !== doc ? 7 : (doc._active ? 1 : 0) | (hoverEl ? 2 : 0) | (activeEl ? 4 : 0);
@@ -8370,7 +8404,7 @@
   // transform only, and none of their cells shared a style).
   var ikMap = {}, ikUid = 0, varsUid = 0, varsMemo = { gen: -1, map: {}, n: 0 };
   function varsId(vars) {
-    var vid = vars._vid;
+    var vid = Object.prototype.hasOwnProperty.call(vars, '_vid') ? vars._vid : undefined;
     if (vid === undefined) { vid = ++varsUid; Object.defineProperty(vars, '_vid', { value: vid, enumerable: false }); }
     return vid;
   }
@@ -9344,16 +9378,21 @@
       vars = varsMemo.map[vkey];
     }
     if (!vars) {
-      vars = {};
+      // (the parent's as the prototype, not copied: GitHub's Primer has
+      // some 2000 on :root, copied to each element that set one of its own;
+      // an unset one is undefined over the parent's)
+      vars = parent && parent._vars ? Object.create(parent._vars) : {};
       if (varsMemo.n < 20000) { varsMemo.map[vkey] = vars; varsMemo.n++; }
-      if (parent) for (var pv in parent._vars) vars[pv] = parent._vars[pv];
-      if (regProps) for (var rn in regProps) { var rp = regProps[rn]; if (!parent || !rp.inh || !parent._vars) { if (rp.init === undefined) delete vars[rn]; else vars[rn] = rp.init; } }
+      if (regProps) for (var rn in regProps) { var rp = regProps[rn]; if (!parent || !rp.inh || !parent._vars) { vars[rn] = rp.init; } }
       for (var n in spec) if (n.slice(0, 2) === '--') vars[n] = spec[n];
       // custom properties may use each other
       // (one that refers to an unset property with no fallback is
       // guaranteed-invalid, i.e. unset itself, CSS Variables 1, 3: a
       // child's var() of it takes its fallback, AG Grid's theme params)
-      for (var vn in vars) if (vars[vn].indexOf('var(') >= 0) { varInvalid = false; var rv = resolveVars(vars[vn], vars, 0); if (varInvalid) delete vars[vn]; else vars[vn] = rv; }
+      // (only the element's own: what came from the parent was resolved
+      // there. GitHub's Primer has some 2000 on :root, and each component
+      // that sets one resolved them all again)
+      for (var vn in spec) if (vn.charCodeAt(0) === 45 && vn.charCodeAt(1) === 45 && vars[vn] !== undefined && vars[vn].indexOf('var(') >= 0) { varInvalid = false; var rv = resolveVars(vars[vn], vars, 0); if (varInvalid) vars[vn] = undefined; else vars[vn] = rv; }
     }
     out._vars = vars;
     // inherited from the parent first
@@ -9902,7 +9941,7 @@
     var decl = new CSSStyleDeclaration(null);
     for (var k in INITIAL) decl._set(k, c[k] !== undefined ? c[k] : INITIAL[k], '');
     for (var n in c) if (n.charAt(0) !== '_') decl._set(n, c[n], '');
-    for (var v in c._vars) decl._set(v, c._vars[v], '');
+    for (var v in c._vars) if (c._vars[v] !== undefined) decl._set(v, c._vars[v], '');
     // (text-decoration as a shorthand: its line longhand, which the
     // cascade keeps under the shorthand's name)
     if (c['text-decoration'] && !c['text-decoration-line']) {
