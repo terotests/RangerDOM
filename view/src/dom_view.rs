@@ -9151,6 +9151,19 @@ impl DomView {
                 EVGElement::set_attribute(&e, "object-fit", "fill".to_string());
             }
             e.borrow_mut().a11y_label = alt.clone();
+            // a positioned picture paints over its in-flow siblings and
+            // among the positioned ones in tree order, as any positioned
+            // box (CSS 2.1 Appendix E; it returns before the boxes' marking
+            // below, so a card drawn before it covered it)
+            let ipos: String = s.borrow().getText("position");
+            let iz: String = s.borrow().getText("z-index");
+            if (ipos == "absolute" || (ipos == "fixed" || (ipos == "relative" || ipos == "sticky"))) && !iz.starts_with("-") {
+                EVGElement::set_attribute(&e, "paint-late", "true".to_string());
+                if iz.parse::<i64>().ok().is_some() && iz != "0" {
+                    EVGElement::set_attribute(&e, "paint-z", iz.clone());
+                }
+                self.lateCount += 1;
+            }
             return e;
         }
         let flex_item: bool = self.inFlex;
