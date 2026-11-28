@@ -14462,7 +14462,7 @@
       if (type && !/^(text\/javascript|application\/javascript|module)$/i.test(type)) return;
       var src = e.getAttribute('src');
       var isModule = !!type && type.toLowerCase() === 'module';
-      out.push({ id: e.__id, src: src, url: src ? resolveURL(src) : null, text: src ? null : e.textContent, defer: e.hasAttribute('defer') || isModule, async: e.hasAttribute('async'), module: isModule });
+      out.push({ id: e.__id, src: src, url: src ? resolveURL(src) : null, text: src ? null : e.textContent, defer: e.hasAttribute('defer') || isModule, async: e.hasAttribute('async'), module: isModule, nomodule: e.hasAttribute('nomodule') });
     });
     // classic scripts in order, deferred ones after
     return JSON.stringify(out.filter(function (s) { return !s.defer; }).concat(out.filter(function (s) { return s.defer; })));

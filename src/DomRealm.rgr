@@ -36,6 +36,9 @@ class DomRealm {
     def failed:int 0
     def errors:[string]
     def started:boolean false
+    ; the inline scripts runInline ran (their element ids): runScripts
+    ; leaves them out
+    def ranEarly:[string]
     def maxErrors:int 50
 
     Constructor () {
@@ -122,6 +125,29 @@ class DomRealm {
     ; runs as a classic one: a bundle that imports nothing runs, one that
     ; does fails as a script with a syntax error does.
     fn runScripts:void () {
+        this.runList(false)
+        this.exec("__loaded()")
+        this.tick(0.0)
+    }
+
+    ; The inline scripts a browser runs while it parses the page, before
+    ; the first script it has to fetch and wait for (one without async or
+    ; defer): run at the start, with the page's first render, as the
+    ; scripts that show what a server streamed in (React's `$RC`, which
+    ; moves each `<div hidden id="S:n">` into its place) are. A page whose
+    ; scripts have not arrived is then drawn as a browser draws it.
+    fn runInline:void () {
+        this.runList(true)
+        this.tick(0.0)
+        ; and the page's first animation frame: React's `$RC` reveals what
+        ; it moved in one (`$RV` by requestAnimationFrame)
+        def d:double (this.dueIn())
+        if ((d >= 0.0) && (d <= 16.0)) {
+            this.tick(16.0)
+        }
+    }
+
+    fn runList:void (inlineOnly:boolean) {
         this.exec("var __rdScripts = JSON.parse(__scripts())")
         def nd@(optional):double (str2double (this.value("__rdScripts.length")))
         def n:int 0
@@ -133,6 +159,27 @@ class DomRealm {
             def at:string ("__rdScripts[" + (to_string i) + "]")
             def id:string (this.value((at + ".id")))
             def hasSrc:string (this.value(("(" + at + ".src !== null) ? 'y' : ''")))
+            if inlineOnly {
+                if ((strlen (this.value((at + ".defer ? 'y' : ''")))) > 0) {
+                    break
+                }
+                if ((strlen hasSrc) > 0) {
+                    ; an async one does not hold the parser up, nor does a
+                    ; nomodule one (a browser that runs modules skips it);
+                    ; any other fetched script does
+                    if ((strlen (this.value(("(" + at + ".async || " + at + ".nomodule) ? 'y' : ''")))) > 0) {
+                        i = (i + 1)
+                        continue
+                    }
+                    break
+                }
+                push ranEarly id
+            } {
+                if ((indexOf ranEarly id) >= 0) {
+                    i = (i + 1)
+                    continue
+                }
+            }
             def src:string ""
             if ((strlen hasSrc) > 0) {
                 src = (this.scriptFor((this.value((at + ".url")))))
@@ -153,8 +200,6 @@ class DomRealm {
             }
             i = (i + 1)
         }
-        this.exec("__loaded()")
-        this.tick(0.0)
     }
 
     ; An event from the user (webapi.js hostInput); its answer.
