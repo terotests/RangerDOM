@@ -130,6 +130,19 @@ class RealmTest {
         this.check("timer: fired" ((this.text(r "#t")) == "later"))
     }
 
+    ; runInline: the inline scripts before the first fetched script that is
+    ; not async or nomodule, and a frame; runScripts then runs the rest once
+    fn inlineFirst:void () {
+        def r:DomRealm (this.realm("<html><head><script src=\"/a.js\" async></script><script src=\"/old.js\" nomodule></script></head><body><p id=s>0</p><div hidden id=S><b>streamed</b></div><script>var runs = (window.runs || 0) + 1; window.runs = runs; requestAnimationFrame(function () { document.getElementById('s').textContent = document.getElementById('S').textContent; });</script><script src=\"/b.js\"></script><script>window.after = 1;</script></body></html>"))
+        r.addScript("https://example.com/a.js" "window.a = 1;")
+        r.addScript("https://example.com/old.js" "")
+        r.addScript("https://example.com/b.js" "window.b = 1;")
+        r.runInline()
+        this.check("inline: ran before the blocking script, its frame too" (((this.text(r "#s")) == "streamed") && ((r.eval("String(window.after) + ',' + String(window.a) + ',' + String(window.b)")) == "undefined,undefined,undefined")))
+        r.runScripts()
+        this.check("inline: the rest after, the early one not again" ((r.eval("[window.runs, window.a, window.b, window.after].join()")) == "1,1,1,1"))
+    }
+
     fn form:void () {
         def r:DomRealm (this.realm("<html><body><form action=\"/search\"><input name=q value=\"kissa koira\"><input type=checkbox name=all checked><button id=go>Hae</button></form></body></html>"))
         r.runScripts()
@@ -294,6 +307,7 @@ class RealmTest {
         this.plainDom()
         this.react()
         this.timers()
+        this.inlineFirst()
         this.form()
         this.errors()
         this.parser()
