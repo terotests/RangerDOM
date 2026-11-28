@@ -7355,6 +7355,8 @@
     }
     _rebuild() {
       this._dirty = false;
+      // (rules changed after the host gave the text: no longer shared, __addStyle)
+      this._text = null;
       this._rules = [];
       this._collect(this.cssRules);
       indexSheet(this);
@@ -15548,11 +15550,28 @@
     // they are; one in a shadow tree styles that tree only)
     var owners = !owner && href ? linksTo(String(href)) : [];
     if (owners.length) owner = owners[0];
+    var text = String(css || '');
+    // the same text under another URL (tori.fi links @warp-ds/css/v2/... in
+    // the page and .../~2/... in its shadow tree, 150 KB of the same CSS):
+    // the sheet parsed for the first is the second's <link>s' too
+    if (owners.length) {
+      for (var si = 0; si < linkSheets.length; si++) {
+        var ls = linkSheets[si];
+        if (ls._text !== text || !ls.ownerNode) continue;
+        var all = ls._owners ? ls._owners : [ls.ownerNode];
+        for (var oi = 0; oi < owners.length; oi++) if (all.indexOf(owners[oi]) < 0) all.push(owners[oi]);
+        ls._owners = all;
+        changed();
+        setTimeout(function () { dispatch(owner, new Event('load')); }, 0);
+        return String(ls._rules.length);
+      }
+    }
     var s = new CSSStyleSheet(owner);
     if (owners.length > 1) s._owners = owners;
     s.href = owner ? owner.href : href ? String(href) : null;
-    s.cssRules = parseSheetText(String(css || ''), s).cssRules;
+    s.cssRules = parseSheetText(text, s).cssRules;
     s._rebuild();
+    s._text = text;
     linkSheets.push(s);
     if (owner) setTimeout(function () { dispatch(owner, new Event('load')); }, 0);
     return String(s._rules.length);
