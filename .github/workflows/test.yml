@@ -7,9 +7,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # the C++ build of CEr needs a Ranger newer than the npm package
+      # (native!'s cpp_polyfill, Ranger 5084dab); the same rev as
+      # componentengine's CI
+      - uses: actions/checkout@v4
+        with:
+          repository: terotests/Ranger
+          ref: 2efe4411cf394026e42e35a4915ec63220693426
+          path: .ranger-cpp
+          sparse-checkout: |
+            dist
+            compiler
+            lib
       - uses: actions/setup-node@v4
         with:
           node-version: 20
       - run: npm install
       - run: npm test
       - run: npm run test:cpp
+        env:
+          RANGER_DIR: ${{ github.workspace }}/.ranger-cpp
