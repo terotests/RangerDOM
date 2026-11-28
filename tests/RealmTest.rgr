@@ -191,6 +191,16 @@ class RealmTest {
         def got (r.eval("var sr = document.getElementById('h').shadowRoot, o = [!!sr, document.querySelector('template') === null]; __render(); var a = sr.getElementById('app'); o.push(getComputedStyle(a).display, getComputedStyle(sr.getElementById('p')).color, getComputedStyle(sr.getElementById('q')).marginLeft, getComputedStyle(document.getElementById('out')).color); o.join(';')"))
         this.check("declarative shadow page: attached by the parser, its <link> and @import sheets scoped to it" (got == "true;true;block;rgb(1, 2, 3);4px;rgb(0, 0, 0)"))
     }
+    ; the same sheet text under two URLs, one <link> in the document and one
+    ; in a shadow tree (tori.fi's @warp-ds/css/v2/... and ~2/...): parsed
+    ; once, it styles both trees
+    fn sameSheetTwoUrls:void () {
+        def r:DomRealm (this.realm("<html><head><link rel=stylesheet href=/v2/s.css></head><body><x-layout id=h><template shadowrootmode=open><link rel=stylesheet href=/~2/s.css><p id=p class=k>p</p></template></x-layout><p id=out class=k>o</p></body></html>"))
+        r.addStyle(".k{color:rgb(1,2,3)}" "https://example.com/v2/s.css")
+        r.addStyle(".k{color:rgb(1,2,3)}" "https://example.com/~2/s.css")
+        def got (r.eval("var sr = document.getElementById('h').shadowRoot, o = [document.styleSheets.length]; __render(); o.push(getComputedStyle(sr.getElementById('p')).color, getComputedStyle(document.getElementById('out')).color); o.join(';')"))
+        this.check("same sheet text under two URLs: parsed once, styles the document and the shadow tree" (got == "1;rgb(1, 2, 3);rgb(1, 2, 3)"))
+    }
     ; :has() above a selector's subject: a class set under the box, an
     ; element put in and taken out, each styles what is under the box
     ; again (hasAbove), and the page is as when every style is found again
@@ -302,6 +312,7 @@ class RealmTest {
         this.adopted()
         this.hasAboveSubject()
         this.declarativeShadowPage()
+        this.sameSheetTwoUrls()
         this.hasSibling()
         this.styleElement()
         this.scopedStyles()
